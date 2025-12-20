@@ -14,7 +14,6 @@ REAL-8 Explorer wraps the **Real8 VM + Shell** with a native host UI (windowing,
 - [Supported cart formats](#supported-cart-formats)
 - [Usage](#usage)
 - [Screenshots](#screenshots)
-- [Building](#building)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -44,6 +43,7 @@ REAL-8 Explorer wraps the **Real8 VM + Shell** with a native host UI (windowing,
 | **Video** | Fullscreen toggle, stretch modes, interpolation toggle, optional CRT scanline filter |
 | **Audio** | Music + SFX toggles, queued-audio sync |
 | **Input** | Keyboard + controller support, remapping UI, per-player configs |
+| **Modding** | You can boot games with created Mods (God mode etc) |
 
 ### Developer / power-user tooling
 
@@ -80,10 +80,14 @@ REAL-8 Explorer wraps the **Real8 VM + Shell** with a native host UI (windowing,
   - Repo games
   - Repo snapshots
   - Local snapshots
+ 
+In the gamesrepo.txt you can add a JSON repository of games URL
+You can also save directly the JSON file in the Config directory
+[JSON Games collection](https://github.com/naturelgass/real8games/blob/main/gameslist.json)
 
 ### Save / load state
 
-Use the corresponding actions from the menus (or your configured hotkeys, if available).
+Use the Windows Menu to Load/Save, or the Shell Menu.
 
 ---
 
@@ -99,12 +103,6 @@ Use the corresponding actions from the menus (or your configured hotkeys, if ava
 ![Windows Debug Console](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/WindowsDebugConsole.png)
 
 ---
-
-## Building
-
-This repository currently focuses on the **Explorer/host layer**. Depending on your setup, you may also need the Real8 VM/Shell components.
-
-If you maintain build scripts, place quick commands here (CMake, make, devkitPro, etc.). Example layout:
 
 ### Windows (SDL)
 - Toolchain: MSVC or MinGW
