@@ -1,24 +1,133 @@
 # REAL-8 Explorer
 
-REAL-8 Explorer provides a native SDL-based for window (libnx for Switch), menus, input, and tooling around the core Real8 VM and Shell so you can browse, load, and run REAL-8 carts.
+A **PICO-8–style explorer & emulator** front-end for multiple platforms.  
+REAL-8 Explorer wraps the **Real8 VM + Shell** with a native host UI (windowing, menus, input, tooling) so you can **browse, load, and run carts** comfortably on desktop and handheld targets.
+
+> **Not affiliated with** Lexaloffle Games, PICO-8, Nintendo, or RetroArch/Libretro.
+
+---
+
+## Table of contents
+
+- [Platforms](#platforms)
+- [Features](#features)
+- [Supported cart formats](#supported-cart-formats)
+- [Usage](#usage)
+- [Screenshots](#screenshots)
+- [Building](#building)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## Platforms
+
+| Target | Host / Integration | Status |
+|------:|---------------------|--------|
+| **Windows** | SDL host + native menus/tooling | ✅ |
+| **Nintendo Switch** | libnx host integration | ✅ |
+| **Libretro** | Libretro API core | ✅ |
+
+---
 
 ## Features
 
-- Windowed, resizable SDL host with fullscreen toggle, Stretch and drag-and-drop cart loading
-- Native Windows menu bar with File / Options / Settings / Effects / Extra actions
-- Load carts from disk (.p8 / .png) and set a games repository URL
-- Shell browser controls for showing repo games, repo snapshots, and local snapshots
-- Save and load VM state
-- Screenshot capture to Pictures\Real8 Screenshots (or project screenshots folder)
-- Wallpaper support with import, scaling, and on-disk persistence
-- Rendering options: CRT scanline filter and interpolation toggle
-- Audio controls: music and SFX toggles with queued-audio sync
-- Input: keyboard + SDL gamepad support with a remap UI and per-player configs
-- Debug Console with logging, pause/resume, step, breakpoints, memory tools
-- Real-time modding window with live variable editing, favorites, and command prompt
-- Export tools: GFX, MAP, and music tracks to a chosen folder
-- Crash handler that logs exceptions to logs.txt and shows a Windows dialog
+### Core experience
 
-## Scope
+| Area | Details |
+|------|---------|
+| **Cart loading** | Load carts from disk (`.p8` / `.png`), drag-and-drop on desktop |
+| **Library & browsing** | Repository URL support, browse repo games, repo snapshots, and local snapshots |
+| **Save states** | Save and load VM state |
+| **Screenshots** | Capture screenshots to `Pictures\Real8 Screenshots` (or project screenshots folder) |
+| **Wallpaper** | Import wallpaper, scale, persist to disk |
+| **Video** | Fullscreen toggle, stretch modes, interpolation toggle, optional CRT scanline filter |
+| **Audio** | Music + SFX toggles, queued-audio sync |
+| **Input** | Keyboard + controller support, remapping UI, per-player configs |
 
-This README describes the Windows host only. Core VM, Shell, and cross-platform features live elsewhere in the REAL-8 Browser codebase.
+### Developer / power-user tooling
+
+| Tooling | Details |
+|--------|---------|
+| **Debug console** | Logging, pause/resume, step, breakpoints, memory tools |
+| **Real-time modding** | Live variable editing, favorites, command prompt |
+| **Export tools** | Export **GFX**, **MAP**, and **music tracks** to a chosen folder |
+| **Crash handling (Windows)** | Exception logging to `logs.txt` + a Windows dialog |
+
+---
+
+## Supported cart formats
+
+| Format | Notes |
+|-------:|------|
+| `.p8` | Text cart source |
+| `.png` | Image/cart container |
+
+---
+
+## Usage
+
+### Load a cart (Windows)
+
+- **File → Open** and select a cart  
+  **or**
+- Drag a `.p8` / `.png` file onto the window
+
+### Browse a repository
+
+- Set the **Repository URL**
+- Use the browser controls to view:
+  - Repo games
+  - Repo snapshots
+  - Local snapshots
+
+### Save / load state
+
+Use the corresponding actions from the menus (or your configured hotkeys, if available).
+
+---
+
+## Screenshots
+
+Add screenshots here (highly recommended for emulator projects):
+
+- `screenshots/main.png`
+- `screenshots/browser.png`
+- `screenshots/debug.png`
+
+---
+
+## Building
+
+This repository currently focuses on the **Explorer/host layer**. Depending on your setup, you may also need the Real8 VM/Shell components.
+
+If you maintain build scripts, place quick commands here (CMake, make, devkitPro, etc.). Example layout:
+
+### Windows (SDL)
+- Toolchain: MSVC or MinGW
+- Dependencies: SDL2
+
+### Nintendo Switch (libnx)
+- Toolchain: devkitPro + libnx
+
+### Libretro
+- Build via your Libretro toolchain / RetroArch environment
+
+> If you want, I can tailor this section to your exact build commands once you share the current build instructions (CMakeLists, Makefile targets, etc.).
+
+---
+
+## Contributing
+
+Issues and PRs are welcome.
+
+When reporting bugs, please include:
+- Target (**Windows / Switch / Libretro**)
+- Cart format (`.p8` / `.png`) and a repro case
+- Logs (e.g., `logs.txt` on Windows) if available
+
+---
+
+## License
+
+This project is licensed under **GPL-3.0** (see `LICENSE`).
