@@ -1,0 +1,9 @@
+{
+    "cmake.cmakePath": "C:\\Program Files\\CMake\\bin\\cmake.exe",
+    "cmake.configureSettings": {
+        "CMAKE_TOOLCHAIN_FILE": "${workspaceFolder}/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-windows"
+    },
+    "cmake.sourceDirectory": "${workspaceFolder}/src/platforms/windows",
+    "C_Cpp.errorSquiggles": "disabled"
+}

@@ -1,0 +1,143 @@
+#pragma once
+#include "real8_vm.h"
+#include <vector>
+#include <string>
+#include <set>
+#include <map>
+#include <atomic>
+#include <thread>
+
+enum ShellState {
+    STATE_BOOT,
+    STATE_BROWSER,
+    STATE_OPTIONS_MENU,
+    STATE_PREVIEW_VIEW,
+    STATE_SETTINGS,
+    STATE_LOADING,
+    STATE_RUNNING,
+    STATE_INGAME_MENU,
+    STATE_ERROR,
+    STATE_WIFI_INFO,
+    STATE_STORAGE_INFO,
+    STATE_CREDITS
+};
+
+struct GameEntry {
+    std::string displayName;
+    std::string path;
+    //std::string author; 
+    bool isRemote;
+    bool isFavorite;
+    bool isFolder;
+    std::vector<uint8_t> cacheData;
+
+    bool operator<(const GameEntry &other) const {
+        if (isFolder != other.isFolder) return isFolder > other.isFolder;
+        if (isFavorite != other.isFavorite) return isFavorite > other.isFavorite;
+        return displayName < other.displayName;
+    }
+};
+
+class Real8Shell {
+public:
+    Real8Shell(IReal8Host* host, Real8VM* vm);
+    ~Real8Shell();
+
+    void update();
+    void refreshGameList(std::string selectPath = "");
+
+private:
+    IReal8Host* host;
+    Real8VM* vm; 
+    ShellState sysState = STATE_BOOT;
+    bool isSwitchPlatform = false;
+
+    Real8Gfx::GfxState menu_gfx_backup;
+    
+    // --- State Logic (Added missing declarations) ---
+    void updateBrowser();
+    void updateOptionsMenu();
+    void updateSettingsMenu(); // Added
+    void updateLoading();      // Added
+    void updateInGameMenu();   // Added
+    void buildInGameMenu();    // Added
+    void buildContextMenu();   // Added
+
+    // --- Rendering ---
+    void renderFileList();
+    void renderOptionsMenu();
+    void renderSettingsMenu();
+    void renderInGameMenu();
+    void renderStorageView();
+    void renderCredits();
+    void renderMessage(const char *header, std::string msg, int color);
+    void drawWifiScreen(const std::string &ssid, const std::string &ip, const std::string &status, float progress);
+    
+    // Added Graphics/Preview helpers
+    void drawStarfield();
+    void loadPreview(const uint8_t *data, size_t size);
+    void clearPreview();
+    void drawPreview(int x, int y, bool dim);
+
+    // --- Data Management ---
+    std::string current_vfs_path = "";
+    std::map<std::string, std::vector<GameEntry>> vfs;
+    std::vector<GameEntry> gameList;
+    std::set<std::string> favorites;
+    std::map<std::string, std::vector<uint8_t>> previewCache;
+    GameEntry targetGame;
+    
+    // Added Preview RAM
+    uint8_t preview_ram[128][128];
+    bool has_preview = false;
+
+    // Selection State
+    int fileSelection = 0;
+    int lastFileSelection = -1;
+    int menuSelection = 0;
+    int contextSelection = 0;
+    int inGameMenuSelection = 0;
+    std::string lastPreviewPath;
+    
+    // Added missing containers
+    std::vector<std::string> contextOptions;
+    std::vector<std::string> inGameOptions;
+
+    // --- Helpers ---
+    void parseJsonGames();
+    void parseJsonToVFS(const std::string &json);
+    void loadFavorites();
+    void saveFavorites();
+    void toggleFavorite(const std::string &path);
+    void deleteRemoteGameEntry(const std::string &url);
+    bool shouldShowPreviewForEntry(const GameEntry &e) const;
+    bool loadPreviewForEntry(GameEntry &e, bool normalMenu, bool allowFetch, bool showFetchMsg);
+
+    struct AsyncDownload {
+        std::atomic<bool> active{false};
+        std::atomic<bool> done{false};
+        std::atomic<bool> success{false};
+        std::string url;
+        std::string path;
+        std::thread worker;
+    };
+
+    void startAsyncDownload(AsyncDownload &task, const std::string &url, const std::string &path);
+    void updateAsyncDownloads();
+    bool isPreviewDownloadActiveFor(const std::string &url) const;
+
+    AsyncDownload repoDownload;
+    AsyncDownload previewDownload;
+    AsyncDownload gameDownload;
+    std::string pendingPreviewUrl;
+    bool pendingRepoRefresh = false;
+    bool inputLatch = false;
+    
+    // Background stars logic
+    struct Star { float x, y, speed; uint8_t col; };
+    std::vector<Star> bg_stars;
+    void initStars();
+    
+    std::string shellErrorMsg;
+    std::string errorTitle;
+};

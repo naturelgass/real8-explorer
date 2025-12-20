@@ -1,0 +1,129 @@
+#pragma once
+
+#include <cstdint>
+#include <cmath>
+#include <cstring>
+#include <algorithm>
+
+class Real8VM;
+class IReal8Host;
+
+struct AudioStateSnapshot;
+
+// 1. Define Channel State (Shared by Main and Child channels)
+struct ChannelState {
+    int sfx_id = -1;
+    float offset = 0; 
+    int last_note_idx = -1;
+
+    // Oscillators
+    float phi = 0;       
+    
+    // Noise
+    uint32_t lfsr = 0x7FFF; 
+    float noise_sample = 0; 
+
+    // Playback State
+    float current_vol = 0;
+    float current_pitch_val = 0; 
+    float slide_start_pitch = 0; 
+    float vib_phase = 0;
+    
+    // Loop
+    int loop_start = 0;
+    int loop_end = 0;
+    bool loop_active = false;
+    
+    // Timing
+    int tick_counter = 0;
+    int speed = 1;
+    int row = 0;
+};
+
+// 2. Define Channel (Inherits State + Child)
+struct Channel : public ChannelState
+{
+    // A channel can have a "child" channel for playing Custom Instruments (SFX 0-7)
+    ChannelState child; 
+    bool has_child = false;
+
+    bool is_music = false;
+    
+    // Effect State
+    int effect = 0;
+    int param = 0; 
+
+    // For crossfading (anti-pop) - Reserved for future use
+    ChannelState prev_state; 
+    bool is_crossfading = false;
+    float crossfade_progress = 0.0f;
+};
+
+struct AudioEngine
+{
+    bool muted = false;
+    static const int CHANNELS = 4;
+    static const int SAMPLE_RATE = 22050;
+    
+    // PICO-8 update rate is 120Hz (approx 183.75 samples per tick)
+    double samples_per_tick_accumulator = 0.0; 
+
+    // Buffer output
+    double samples_accumulator = 0.0;
+    float last_mixed_sample = 0.0f;
+    
+    // DECLARE CHANNELS HERE
+    Channel channels[CHANNELS];
+
+    // FIX: Buffer size
+    int16_t buffer[2048]; 
+    
+    Real8VM *vm = nullptr;
+
+    // Music State
+    int music_pattern = -1;
+    int music_tick_timer = 0; 
+    int music_speed = 1;
+    int music_loop_start = -1;
+    uint8_t music_mask = 0;
+    bool music_playing = false;
+
+    void init(Real8VM *parent);
+    void play_sfx(int idx, int ch, int offset = 0, int length = -1);
+    void play_music(int t);
+    
+    // Generate samples to specific buffer (Libretro)
+    void generateSamples(int16_t* out_buffer, int samples_to_generate);
+
+    // Main Update
+    void update(IReal8Host *host);
+    
+    // Internal Tickers
+    void run_tick();           
+    void update_channel_tick(int ch_idx); 
+    void update_music_tick(); 
+
+    // Updated Signature
+    float get_waveform_sample(int waveform, float phi, ChannelState &state, float freq_mult);
+    float note_to_freq(float note);
+    
+    // Inline getters now have visibility of 'channels'
+    int get_sfx_id(int ch) { return (ch>=0 && ch<4) ? channels[ch].sfx_id : -1; }
+    int get_note(int ch) { return (ch>=0 && ch<4) ? (int)channels[ch].offset : 0; }
+    int get_music_pattern() { return music_pattern; }
+    int get_music_row() { return channels[0].is_music ? channels[0].row : 0; } 
+    int get_music_speed() { return music_speed; }
+
+    AudioStateSnapshot getState();
+    void setState(const AudioStateSnapshot& s);
+};
+
+struct AudioStateSnapshot {
+    Channel channels[4];
+    int music_pattern;
+    int music_tick_timer;
+    int music_speed;
+    int music_loop_start;
+    uint8_t music_mask;
+    bool music_playing;
+};
