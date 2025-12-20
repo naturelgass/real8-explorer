@@ -89,11 +89,14 @@ Use the corresponding actions from the menus (or your configured hotkeys, if ava
 
 ## Screenshots
 
-Add screenshots here (highly recommended for emulator projects):
+### Windows – Shell
+![Windows Shell](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/WindowsShell.png)
 
-- `screenshots/main.png`
-- `screenshots/browser.png`
-- `screenshots/debug.png`
+### Nintendo Switch
+![REAL-8 on Switch](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8Switch.png)
+
+### Windows – Debug Console
+![Windows Debug Console](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/WindowsDebugConsole.png)
 
 ---
 
