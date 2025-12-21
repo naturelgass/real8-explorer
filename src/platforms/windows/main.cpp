@@ -317,7 +317,19 @@ int main(int argc, char *argv[])
                     LoadGameViaShell(vm, window, hMenuBar, std::string(droppedFile), host);
                     SDL_free(droppedFile);
                 }
-                else if (event.type == SDL_TEXTINPUT) vm->key_input_buffer += event.text.text; 
+                else if (event.type == SDL_TEXTINPUT) {
+                    const char *text = event.text.text;
+                    if (text) {
+                        for (size_t i = 0; text[i] != '\0'; ++i) {
+                            vm->key_queue.push_back(std::string(1, text[i]));
+                        }
+                    }
+                }
+                else if (event.type == SDL_MOUSEWHEEL) {
+                    int delta = event.wheel.y;
+                    if (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) delta = -delta;
+                    if (delta != 0) vm->mouse_wheel_event = delta;
+                }
                 else if (event.type == SDL_KEYDOWN) {
                     if (event.key.keysym.sym == SDLK_ESCAPE) {
                         if (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN_DESKTOP) {

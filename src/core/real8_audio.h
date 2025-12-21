@@ -33,6 +33,7 @@ struct ChannelState {
     int loop_start = 0;
     int loop_end = 0;
     bool loop_active = false;
+    int stop_row = -1;
     
     // Timing
     int tick_counter = 0;
@@ -64,6 +65,16 @@ struct AudioEngine
     bool muted = false;
     static const int CHANNELS = 4;
     static const int SAMPLE_RATE = 22050;
+    static constexpr int SNAP_COUNT = 256;
+
+    struct MixerTickSnap {
+        int sfx_id[CHANNELS];
+        int note_row[CHANNELS];
+        int music_pattern;
+        int patterns_played;
+        int ticks_on_pattern;
+        bool music_playing;
+    };
     
     // PICO-8 update rate is 120Hz (approx 183.75 samples per tick)
     double samples_per_tick_accumulator = 0.0; 
@@ -87,10 +98,16 @@ struct AudioEngine
     int music_loop_start = -1;
     uint8_t music_mask = 0;
     bool music_playing = false;
+    int music_patterns_played = 0;
+    int music_ticks_on_pattern = 0;
+
+    MixerTickSnap snaps[SNAP_COUNT];
+    int snap_w = 0;
+    bool snaps_ready = false;
 
     void init(Real8VM *parent);
     void play_sfx(int idx, int ch, int offset = 0, int length = -1);
-    void play_music(int t);
+    void play_music(int t, int fade_len = 0, int mask = 0x0f);
     
     // Generate samples to specific buffer (Libretro)
     void generateSamples(int16_t* out_buffer, int samples_to_generate);
@@ -108,11 +125,31 @@ struct AudioEngine
     float note_to_freq(float note);
     
     // Inline getters now have visibility of 'channels'
-    int get_sfx_id(int ch) { return (ch>=0 && ch<4) ? channels[ch].sfx_id : -1; }
-    int get_note(int ch) { return (ch>=0 && ch<4) ? (int)channels[ch].offset : 0; }
-    int get_music_pattern() { return music_pattern; }
-    int get_music_row() { return channels[0].is_music ? channels[0].row : 0; } 
-    int get_music_speed() { return music_speed; }
+    int get_sfx_id(int ch) const { return (ch>=0 && ch<4) ? channels[ch].sfx_id : -1; }
+    int get_note(int ch) const {
+        if (ch < 0 || ch >= 4) return -1;
+        if (channels[ch].sfx_id == -1) return -1;
+        return (channels[ch].last_note_idx >= 0) ? channels[ch].last_note_idx : channels[ch].row;
+    }
+    int get_note_row(int ch) const {
+        if (ch < 0 || ch >= 4) return -1;
+        const Channel &c = channels[ch];
+        if (c.sfx_id == -1) return -1;
+        return (c.last_note_idx < 0) ? 0 : c.last_note_idx;
+    }
+    int get_music_pattern() const { return music_pattern; }
+    int get_music_row() const { return channels[0].is_music ? channels[0].row : 0; } 
+    int get_music_speed() const { return music_speed; }
+    int get_music_patterns_played() const { return music_patterns_played; }
+    int get_music_ticks_on_pattern() const { return music_ticks_on_pattern; }
+    bool is_music_playing() const { return music_playing; }
+
+    int get_sfx_id_hp(int ch) const;
+    int get_note_row_hp(int ch) const;
+    int get_music_pattern_hp() const;
+    int get_music_patterns_played_hp() const;
+    int get_music_ticks_on_pattern_hp() const;
+    bool is_music_playing_hp() const;
 
     AudioStateSnapshot getState();
     void setState(const AudioStateSnapshot& s);
@@ -126,4 +163,6 @@ struct AudioStateSnapshot {
     int music_loop_start;
     uint8_t music_mask;
     bool music_playing;
+    int music_patterns_played;
+    int music_ticks_on_pattern;
 };

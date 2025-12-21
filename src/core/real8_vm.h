@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <string>
+#include <deque>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -39,6 +40,10 @@
 
 struct HwState {
     uint8_t distort = 0; // Bitmask for distortion per channel
+    uint8_t spriteSheetMemMapping = 0x00;
+    uint8_t screenDataMemMapping = 0x60;
+    uint8_t mapMemMapping = 0x20;
+    uint8_t widthOfTheMap = 128;
 };
 
 class Real8VM
@@ -145,10 +150,18 @@ public:
   uint32_t btn_mask = 0;
   uint8_t btn_counters[8][6]; 
   uint32_t btn_state = 0; 
-  int mouse_wheel_delta = 0;
+  int mouse_x = 0;
+  int mouse_y = 0;
+  int mouse_buttons = 0;
+  int mouse_rel_x = 0;
+  int mouse_rel_y = 0;
+  int mouse_last_x = 0;
+  int mouse_last_y = 0;
+  int mouse_wheel_event = 0;
   bool key_pressed_this_frame = false;
-  std::string key_input_buffer = "";
+  std::deque<std::string> key_queue;
   bool has_key_input = false;
+  int controller_count = 1;
 
   bool btn(int i, int p = 0);
   bool btnp(int i, int p = 0);

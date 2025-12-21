@@ -135,6 +135,8 @@ namespace z8 {
             return buttons;
         }
 
+        bool isKeyDownScancode(int scancode) override { return false; }
+
         // --- Logging ---
         void log(const char *fmt, ...) override {
             if (log_cb) {

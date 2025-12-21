@@ -1658,6 +1658,12 @@ public:
     uint32_t getPlayerInput(int playerIdx) override { return input.getMask(playerIdx); }
     void pollInput() override { input.update(); }
     void clearInputState() override { input.clearState(); }
+    bool isKeyDownScancode(int scancode) override
+    {
+        if (scancode < 0 || scancode >= SDL_NUM_SCANCODES) return false;
+        const Uint8 *state = SDL_GetKeyboardState(NULL);
+        return state && state[scancode];
+    }
     std::vector<uint8_t> getInputConfigData() override { return input.serialize(); }
     void setInputConfigData(const std::vector<uint8_t>& data) override { input.deserialize(data); }
 

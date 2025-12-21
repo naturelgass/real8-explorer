@@ -45,6 +45,8 @@ public:
     void line(int x0, int y0, int x1, int y1, uint8_t c);
     void rect(int x0, int y0, int x1, int y1, uint8_t c);
     void rectfill(int x0, int y0, int x1, int y1, uint8_t c);
+    void rrect(int x, int y, int w, int h, int r, uint8_t c);
+    void rrectfill(int x, int y, int w, int h, int r, uint8_t c);
     void circ(int cx, int cy, int r, uint8_t c);
     void circfill(int cx, int cy, int r, uint8_t c);
     
@@ -131,4 +133,6 @@ private:
     
     uint8_t get_pixel_ram(uint32_t base_addr, int x, int y);
     void set_pixel_ram(uint32_t base_addr, int x, int y, uint8_t color);
+
+    uint32_t sprite_base_addr() const;
 };

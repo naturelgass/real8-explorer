@@ -236,6 +236,7 @@ public:
     void clearInputState() override { input.clearState(); }
     std::vector<uint8_t> getInputConfigData() override { return input.serialize(); }
     void setInputConfigData(const std::vector<uint8_t>& data) override { input.deserialize(data); }
+    bool isKeyDownScancode(int scancode) override { return false; }
 
     MouseState getMouseState() override
     {

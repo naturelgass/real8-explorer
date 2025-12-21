@@ -75,6 +75,7 @@ public:
     virtual void clearInputState() {}
     
     virtual MouseState getMouseState() { return {0, 0, 0}; }
+    virtual bool isKeyDownScancode(int scancode) { return false; }
 
     // --- Input Configuration ---
     virtual void openGamepadConfigUI() = 0;

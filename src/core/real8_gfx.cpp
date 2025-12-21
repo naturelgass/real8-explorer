@@ -51,6 +51,10 @@ void Real8Gfx::reset() {
 
 // --- Helpers ---
 
+uint32_t Real8Gfx::sprite_base_addr() const {
+    return (vm && vm->hwState.spriteSheetMemMapping == 0x60) ? 0x6000 : 0x0000;
+}
+
 uint8_t Real8Gfx::get_pixel_ram(uint32_t base_addr, int x, int y) {
     if (!vm->ram || x < 0 || x > 127 || y < 0 || y > 127) return 0;
     uint32_t idx = base_addr + (y * 64) + (x >> 1);
@@ -248,6 +252,100 @@ void Real8Gfx::rectfill(int x0, int y0, int x1, int y1, uint8_t c) {
     vm->mark_dirty_rect(sx0, sy0, sx1, sy1);
 }
 
+static int clamp_rrect_radius(int r, int width, int height) {
+    if (r < 0) r = 0;
+    int max_r = std::min((width - 1) / 2, (height - 1) / 2);
+    if (r > max_r) r = max_r;
+    return r;
+}
+
+static void draw_rrect_corners(Real8Gfx* gfx, int x0, int y0, int x1, int y1, int r, uint8_t c) {
+    int tlx = x0 + r, tly = y0 + r;
+    int trx = x1 - r, try_ = y0 + r;
+    int blx = x0 + r, bly = y1 - r;
+    int brx = x1 - r, bry = y1 - r;
+
+    int x = r, y = 0, err = 0;
+    while (x >= y) {
+        gfx->put_pixel_checked(tlx - x, tly - y, c);
+        gfx->put_pixel_checked(tlx - y, tly - x, c);
+        gfx->put_pixel_checked(trx + x, try_ - y, c);
+        gfx->put_pixel_checked(trx + y, try_ - x, c);
+        gfx->put_pixel_checked(blx - x, bly + y, c);
+        gfx->put_pixel_checked(blx - y, bly + x, c);
+        gfx->put_pixel_checked(brx + x, bry + y, c);
+        gfx->put_pixel_checked(brx + y, bry + x, c);
+        y++; err += 1 + 2 * y;
+        if (2 * (err - x) + 1 > 0) { x--; err += 1 - 2 * x; }
+    }
+}
+
+static void fill_rrect_corners(Real8Gfx* gfx, int x0, int y0, int x1, int y1, int r, uint8_t c) {
+    int tlx = x0 + r, tly = y0 + r;
+    int trx = x1 - r, try_ = y0 + r;
+    int blx = x0 + r, bly = y1 - r;
+    int brx = x1 - r, bry = y1 - r;
+    int r2 = r * r;
+
+    for (int dy = 0; dy <= r; ++dy) {
+        int dx = (int)std::floor(std::sqrt((double)(r2 - dy * dy)));
+        int y_top = tly - dy;
+        int y_bot = bly + dy;
+
+        for (int x = tlx - dx; x <= tlx; ++x) gfx->put_pixel_checked(x, y_top, c);
+        for (int x = trx; x <= trx + dx; ++x) gfx->put_pixel_checked(x, y_top, c);
+        for (int x = blx - dx; x <= blx; ++x) gfx->put_pixel_checked(x, y_bot, c);
+        for (int x = brx; x <= brx + dx; ++x) gfx->put_pixel_checked(x, y_bot, c);
+    }
+}
+
+void Real8Gfx::rrect(int x, int y, int w, int h, int r, uint8_t c) {
+    if (w <= 0 || h <= 0) return;
+    int x0 = x, y0 = y;
+    int x1 = x + w - 1;
+    int y1 = y + h - 1;
+    int width = x1 - x0 + 1;
+    int height = y1 - y0 + 1;
+    int radius = clamp_rrect_radius(r, width, height);
+    if (radius <= 0) {
+        rect(x0, y0, x1, y1, c);
+        return;
+    }
+
+    line(x0 + radius, y0, x1 - radius, y0, c);
+    line(x0 + radius, y1, x1 - radius, y1, c);
+    line(x0, y0 + radius, x0, y1 - radius, c);
+    line(x1, y0 + radius, x1, y1 - radius, c);
+    draw_rrect_corners(this, x0, y0, x1, y1, radius, c);
+}
+
+void Real8Gfx::rrectfill(int x, int y, int w, int h, int r, uint8_t c) {
+    if (w <= 0 || h <= 0) return;
+    int x0 = x, y0 = y;
+    int x1 = x + w - 1;
+    int y1 = y + h - 1;
+    int width = x1 - x0 + 1;
+    int height = y1 - y0 + 1;
+    int radius = clamp_rrect_radius(r, width, height);
+    if (radius <= 0) {
+        rectfill(x0, y0, x1, y1, c);
+        return;
+    }
+
+    int inner_x0 = x0 + radius;
+    int inner_x1 = x1 - radius;
+    if (inner_x0 <= inner_x1) rectfill(inner_x0, y0, inner_x1, y1, c);
+
+    int side_y0 = y0 + radius;
+    int side_y1 = y1 - radius;
+    if (side_y0 <= side_y1) {
+        rectfill(x0, side_y0, x0 + radius - 1, side_y1, c);
+        rectfill(x1 - radius + 1, side_y0, x1, side_y1, c);
+    }
+
+    fill_rrect_corners(this, x0, y0, x1, y1, radius, c);
+}
+
 void Real8Gfx::circ(int cx, int cy, int r, uint8_t c) {
     int x = r, y = 0, err = 0;
     while (x >= y) {
@@ -285,6 +383,7 @@ void Real8Gfx::spr_fast(int n, int x, int y, int w, int h, bool fx, bool fy) {
 
     int sheet_base_x = (n % 16) * 8;
     int sheet_base_y = (n / 16) * 8;
+    uint32_t sprite_base = sprite_base_addr();
 
     for (int cy = y0; cy < y1; cy++) {
         int spy = cy - sy; if (fy) spy = (h * 8) - 1 - spy;
@@ -295,8 +394,8 @@ void Real8Gfx::spr_fast(int n, int x, int y, int w, int h, bool fx, bool fy) {
         for (int cx = x0; cx < x1; cx++) {
             int spx = cx - sx; if (fx) spx = (w * 8) - 1 - spx;
             int sheet_x = sheet_base_x + spx;
-            uint32_t addr = row_addr + (sheet_x >> 1);
-            if (addr < 0x2000) {
+            uint32_t addr = sprite_base + row_addr + (sheet_x >> 1);
+            if (addr < 0x8000) {
                 uint8_t byte = vm->ram[addr];
                 uint8_t col = (sheet_x & 1) ? (byte >> 4) : (byte & 0x0F);
                 if (!palt_map[col]) *dest_ptr = palette_map[col];
@@ -314,6 +413,7 @@ void Real8Gfx::spr(int n, int x, int y, int w, int h, bool fx, bool fy) {
     int dx1 = std::min(clip_x + clip_w - 1, (x - cam_x) + w * 8 - 1);
     int dy1 = std::min(clip_y + clip_h - 1, (y - cam_y) + h * 8 - 1);
     if (dx1 < dx0 || dy1 < dy0) return;
+    uint32_t sprite_base = sprite_base_addr();
 
     for (int ty = 0; ty < h; ++ty) {
         for (int tx = 0; tx < w; ++tx) {
@@ -329,7 +429,7 @@ void Real8Gfx::spr(int n, int x, int y, int w, int h, bool fx, bool fy) {
                 for (int px = 0; px < 8; ++px) {
                     int sx = (fx ? 7 - px : px); int dst_x = draw_x + px;
                     if (dst_x < dx0 || dst_x > dx1) continue;
-                    uint8_t col = get_pixel_ram(0x0000, base_x + sx, base_y + sy);
+                    uint8_t col = get_pixel_ram(sprite_base, base_x + sx, base_y + sy);
                     if (!palt_map[col]) put_pixel_raw(dst_x, dst_y, palette_map[col]);
                 }
             }
@@ -347,6 +447,7 @@ void Real8Gfx::sspr(int sx, int sy, int sw, int sh, int dx, int dy, int dw, int 
     int min_x = clip_x; int max_x = clip_x + clip_w;
     int dirty_x0 = 255, dirty_y0 = 255, dirty_x1 = -1, dirty_y1 = -1;
     bool drawn_any = false;
+    uint32_t sprite_base = sprite_base_addr();
 
     for (int yy = 0; yy < dh; ++yy) {
         int dst_y = screen_dy + yy;
@@ -362,7 +463,7 @@ void Real8Gfx::sspr(int sx, int sy, int sw, int sh, int dx, int dy, int dw, int 
                 int u_int = u >> 16; if (flip_x) u_int = sw - 1 - u_int;
                 if (u_int < 0) u_int = 0; if (u_int >= sw) u_int = sw - 1;
                 int srcx = sx + u_int;
-                uint8_t c = get_pixel_ram(0x0000, srcx, srcy);
+                uint8_t c = get_pixel_ram(sprite_base, srcx, srcy);
                 if (!palt_map[c]) {
                     vm->fb[dst_y][dst_x] = palette_map[c];
                     if (dst_x < dirty_x0) dirty_x0 = dst_x; if (dst_x > dirty_x1) dirty_x1 = dst_x;
@@ -379,24 +480,74 @@ void Real8Gfx::sspr(int sx, int sy, int sw, int sh, int dx, int dy, int dw, int 
 // --- Map ---
 
 uint8_t Real8Gfx::sget(int x, int y) {
-    return get_pixel_ram(0x0000, x, y);
+    return get_pixel_ram(sprite_base_addr(), x, y);
 }
 
 void Real8Gfx::sset(int x, int y, uint8_t v) {
-    set_pixel_ram(0x0000, x, y, v);
+    uint32_t base = sprite_base_addr();
+    set_pixel_ram(base, x, y, v);
+    if (base == 0x6000 && vm->ram) {
+        uint32_t idx = base + (y * 64) + (x >> 1);
+        if (idx < 0x8000) vm->screenByteToFB(idx - 0x6000, vm->ram[idx]);
+    }
 }
 
 uint8_t Real8Gfx::mget(int x, int y) {
-    if (!vm->ram || x < 0 || x > 127 || y < 0 || y > 63) return 0;
-    // Map is split: 0-31 (0x2000), 32-63 (shared with GFX bottom half 0x1000)
-    if (y < 32) return vm->map_data[y][x];
-    return vm->ram[0x1000 + (y - 32) * 128 + x];
+    if (!vm->ram) return 0;
+
+    const bool bigMap = vm->hwState.mapMemMapping >= 0x80;
+    int mapSize = bigMap ? (0x10000 - (vm->hwState.mapMemMapping << 8)) : 8192;
+    const int mapW = (vm->hwState.widthOfTheMap == 0) ? 256 : vm->hwState.widthOfTheMap;
+    if (mapW <= 0) return 0;
+    int mapH = mapSize / mapW;
+
+    if (x < 0 || y < 0 || x >= mapW || y >= mapH) return 0;
+    int idx = y * mapW + x;
+
+    if (bigMap) {
+        const int userDataSize = 0x8000 - 0x4300;
+        if (mapSize > userDataSize) mapSize = userDataSize;
+        mapH = mapSize / mapW;
+        if (x < 0 || y < 0 || x >= mapW || y >= mapH) return 0;
+        idx = y * mapW + x;
+        int offset = 0x8000 - mapSize;
+        if (offset < 0x4300) offset = 0x4300;
+        if (idx < 0 || idx >= mapSize) return 0;
+        return vm->ram[offset + idx];
+    }
+
+    if (idx < 4096) return vm->ram[0x2000 + idx];
+    if (idx < 8192) return vm->ram[0x1000 + (idx - 4096)];
+    return 0;
 }
 
 void Real8Gfx::mset(int x, int y, uint8_t v) {
-    if (!vm->ram || x < 0 || x > 127 || y < 0 || y > 63) return;
-    if (y < 32) vm->map_data[y][x] = v;
-    else vm->ram[0x1000 + (y - 32) * 128 + x] = v;
+    if (!vm->ram) return;
+
+    const bool bigMap = vm->hwState.mapMemMapping >= 0x80;
+    int mapSize = bigMap ? (0x10000 - (vm->hwState.mapMemMapping << 8)) : 8192;
+    const int mapW = (vm->hwState.widthOfTheMap == 0) ? 256 : vm->hwState.widthOfTheMap;
+    if (mapW <= 0) return;
+    int mapH = mapSize / mapW;
+
+    if (x < 0 || y < 0 || x >= mapW || y >= mapH) return;
+    int idx = y * mapW + x;
+
+    if (bigMap) {
+        const int userDataSize = 0x8000 - 0x4300;
+        if (mapSize > userDataSize) mapSize = userDataSize;
+        mapH = mapSize / mapW;
+        if (x < 0 || y < 0 || x >= mapW || y >= mapH) return;
+        idx = y * mapW + x;
+        int offset = 0x8000 - mapSize;
+        if (offset < 0x4300) offset = 0x4300;
+        if (idx < 0 || idx >= mapSize) return;
+        vm->ram[offset + idx] = v;
+        return;
+    }
+
+    if (idx < 4096) vm->ram[0x2000 + idx] = v;
+    else if (idx < 8192) vm->ram[0x1000 + (idx - 4096)] = v;
 }
 
 void Real8Gfx::map(int mx, int my, int sx, int sy, int w, int h, int layer) {

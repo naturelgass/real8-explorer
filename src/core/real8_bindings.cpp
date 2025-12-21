@@ -1,6 +1,7 @@
 #include "real8_bindings.h"
 #include "real8_vm.h"
 #include "real8_gfx.h"
+#include "real8_fonts.h"
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -54,6 +55,12 @@ static unsigned long l_millis(lua_State *L)
 
 static unsigned long start_ms = 0;
 
+// Helper to sync RAM changes back to internal VM caches/registers
+static void vm_sync_ram(Real8VM *vm, uint32_t start_addr, int length);
+
+// Forward declaration for helper used before definition
+static uint8_t read_mapped_byte(Real8VM *vm, uint32_t addr);
+
 // Safe conversion that handles Infinity/NaN/Overflow without crashing the CPU
 static inline int to_int_floor(lua_State *L, int idx)
 {
@@ -81,33 +88,43 @@ static int l_stat(lua_State *L)
 {
     auto *vm = get_vm(L);
     int id = to_int_floor(L, 1);
+    bool devkit_enabled = false;
+    bool ptr_lock = false;
+    if (vm && vm->ram) {
+        uint8_t flags = vm->ram[0x5F2D];
+        devkit_enabled = (flags & 0x01) != 0;
+        ptr_lock = (flags & 0x04) != 0;
+    }
 
     switch (id)
     {
     // --- MEMORY & CPU ---
     case 0: // Memory Usage (KB)
     {
-        // Lua 5.2+ GC count returns KB directly
+        lua_gc(L, LUA_GCCOLLECT, 0);
         int kbytes = lua_gc(L, LUA_GCCOUNT, 0);
-        // Returns fractional part in older Luas, but integer count is sufficient for P8
-        lua_pushnumber(L, (double)kbytes); 
+        int bytes = lua_gc(L, LUA_GCCOUNTB, 0);
+        lua_pushnumber(L, (double)kbytes + ((double)bytes / 1024.0));
         return 1;
     }
     case 1: // CPU Usage (0.0 - 1.0)
     {
-        // Assuming 16.666ms budget (60fps)
-        float cpu_usage = (vm->debugFrameMS > 0) ? (vm->debugFrameMS / 16.666f) : 0.0f;
+        float budget_ms = (vm && vm->targetFPS > 30) ? 16.666f : 33.333f;
+        float cpu_usage = (vm && vm->debugFrameMS > 0 && budget_ms > 0.0f) ? (vm->debugFrameMS / budget_ms) : 0.0f;
         lua_pushnumber(L, cpu_usage);
         return 1;
     }
     case 2: // System CPU (stub)
         lua_pushnumber(L, 0);
         return 1;
+    case 3: // Current display
+        lua_pushinteger(L, 0);
+        return 1;
 
     // --- DISPLAY & SYSTEM ---
     case 4: // Clipboard
     {
-        if (vm->host) {
+        if (vm && vm->host) {
             std::string clip = vm->host->getClipboardText();
             lua_pushstring(L, clip.c_str());
         } else {
@@ -116,21 +133,33 @@ static int l_stat(lua_State *L)
         return 1;
     }
     case 5: // PICO-8 Version
-        lua_pushnumber(L, 32); // 32 corresponds to 0.2.0 approximately
+        lua_pushnumber(L, 41); // 41 corresponds to 0.2.5g approximately
         return 1;
     case 6: // Parameter String (cmdline args)
         // Fixed: Added L arg
-        lua_pushstring(L, vm->param_str.c_str()); 
+        lua_pushstring(L, vm ? vm->param_str.c_str() : ""); 
         return 1;
     case 7: // Current FPS
-        lua_pushnumber(L, vm->debugFPS);
+        lua_pushnumber(L, vm ? vm->debugFPS : 0);
         return 1;
     case 8: // Target FPS
         // Fixed: target_fps -> targetFPS, added L arg
-        lua_pushnumber(L, vm->targetFPS > 30 ? 60 : 30);
+        lua_pushnumber(L, (vm && vm->targetFPS > 30) ? 60 : 30);
         return 1;
-    case 9: // System FPS (Host refresh rate)
-        lua_pushnumber(L, 60);
+    case 9: // PICO-8 App FPS
+        lua_pushnumber(L, vm ? vm->debugFPS : 0);
+        return 1;
+    case 10: // Unknown
+        lua_pushinteger(L, 0);
+        return 1;
+    case 11: // Number of displays
+        lua_pushinteger(L, 1);
+        return 1;
+    case 12: // Pause menu rectangle x0
+    case 13: // Pause menu rectangle y0
+    case 14: // Pause menu rectangle x1
+    case 15: // Pause menu rectangle y1
+        lua_pushinteger(L, 0);
         return 1;
 
     // --- AUDIO INFO (16-26) ---
@@ -140,7 +169,7 @@ static int l_stat(lua_State *L)
     case 19: // SFX index on Channel 3
     {
         int ch = id - 16;
-        int sfx = (vm->host) ? vm->audio.get_sfx_id(ch) : -1; 
+        int sfx = (vm && vm->host) ? vm->audio.get_sfx_id(ch) : -1; 
         lua_pushinteger(L, sfx);
         return 1;
     }
@@ -151,57 +180,133 @@ static int l_stat(lua_State *L)
     case 23: // Note (Pitch) on Channel 3
     {
         int ch = id - 20;
-        int note = (vm->host) ? vm->audio.get_note(ch) : 0;
+        int note = (vm && vm->host) ? vm->audio.get_note(ch) : -1;
         lua_pushinteger(L, note);
         return 1;
     }
 
     case 24: // Current Music Pattern (-1 if stopped)
     {
-        lua_pushinteger(L, vm->audio.get_music_pattern());
+        lua_pushinteger(L, vm ? vm->audio.get_music_pattern() : -1);
         return 1;
     }
-    case 25: // Current Music Row Number (0-63) - Critical for Sync
+    case 25: // Total Patterns Played (since last music())
     {
-        // If music is stopped (pattern is -1), return -1 for the row as well.
-        // This allows games to check "if stat(25) == -1" to detect silence.
-        if (vm->audio.get_music_pattern() == -1) 
-        {
-            lua_pushinteger(L, -1);
-        } 
-        else 
-        {
-            lua_pushinteger(L, vm->audio.get_music_row());
-        }
+        lua_pushinteger(L, vm ? vm->audio.get_music_patterns_played() : 0);
         return 1;
     }
-    case 26: // Current Music Speed (Ticks per row)
+    case 26: // Ticks Played on Current Pattern
     {
-        lua_pushinteger(L, vm->audio.get_music_speed());
+        lua_pushinteger(L, vm ? vm->audio.get_music_ticks_on_pattern() : 0);
         return 1;
     }
 
     // --- INPUT ---
-    case 30: // Key pressed? (Boolean logic often used here)
-        lua_pushboolean(L, vm->key_pressed_this_frame); 
+    case 28: // Raw keyboard (SDL scancode)
+    {
+        if (lua_gettop(L) < 2) {
+            lua_pushboolean(L, 0);
+            return 1;
+        }
+        int scan_code = to_int_floor(L, 2);
+        bool down = (vm && vm->host) ? vm->host->isKeyDownScancode(scan_code) : false;
+        lua_pushboolean(L, down);
         return 1;
+    }
+    case 29: // Controller count (fixed-point)
+    {
+        int count = vm ? vm->controller_count : 0;
+        lua_pushnumber(L, (double)count / 65536.0);
+        return 1;
+    }
+    case 30: // Key pressed? (Boolean logic often used here)
+    {
+        if (!devkit_enabled) {
+            lua_pushboolean(L, 0);
+            return 1;
+        }
+        bool has_key = vm && !vm->key_queue.empty();
+        lua_pushboolean(L, has_key);
+        return 1;
+    }
 
     case 31: // String input characters
-        lua_pushstring(L, vm->key_input_buffer.c_str());
-        vm->key_input_buffer = ""; // Consumed on read
-        return 1;
-
+    {
+        if (!devkit_enabled || !vm || vm->key_queue.empty()) {
+            lua_pushnil(L);
+            return 1;
+        }
+        std::string key = vm->key_queue.front();
+        vm->key_queue.pop_front();
+        lua_pushlstring(L, key.c_str(), key.size());
+        lua_pushinteger(L, 0);
+        return 2;
+    }
     case 32: // Mouse X
-        lua_pushinteger(L, vm->ram ? vm->ram[0x5F2C] : 0);
+        lua_pushinteger(L, (vm && devkit_enabled) ? vm->mouse_x : 0);
         return 1;
     case 33: // Mouse Y
-        lua_pushinteger(L, vm->ram ? vm->ram[0x5F2D] : 0);
+        lua_pushinteger(L, (vm && devkit_enabled) ? vm->mouse_y : 0);
         return 1;
     case 34: // Mouse Buttons (Bitmask: 1=Left, 2=Right, 4=Middle)
-        lua_pushinteger(L, vm->ram ? vm->ram[0x5F2E] : 0);
+        lua_pushinteger(L, (vm && devkit_enabled) ? vm->mouse_buttons : 0);
+        return 1;
+    case 35: // Mouse horizontal wheel
+        lua_pushinteger(L, 0);
         return 1;
     case 36: // Mouse Wheel
-        lua_pushinteger(L, vm->mouse_wheel_delta); 
+    {
+        int event = (vm && devkit_enabled) ? vm->mouse_wheel_event : 0;
+        if (event > 0) event = 1;
+        else if (event < 0) event = -1;
+        lua_pushinteger(L, event);
+        return 1;
+    }
+    case 37: // Mouse wheel (unused)
+        lua_pushinteger(L, 0);
+        return 1;
+    case 38: // Mouse relative X
+        lua_pushinteger(L, (vm && devkit_enabled && ptr_lock) ? vm->mouse_rel_x : 0);
+        return 1;
+    case 39: // Mouse relative Y
+        lua_pushinteger(L, (vm && devkit_enabled && ptr_lock) ? vm->mouse_rel_y : 0);
+        return 1;
+
+
+    // --- AUDIO INFO (46-57) ---
+    case 46:
+    case 47:
+    case 48:
+    case 49:
+    {
+        int ch = id - 46;
+        int sfx = (vm && vm->host) ? vm->audio.get_sfx_id_hp(ch) : -1; 
+        lua_pushinteger(L, sfx);
+        return 1;
+    }
+
+    case 50:
+    case 51:
+    case 52:
+    case 53:
+    {
+        int ch = id - 50;
+        int row = (vm && vm->host) ? vm->audio.get_note_row_hp(ch) : -1;
+        lua_pushinteger(L, row);
+        return 1;
+    }
+
+    case 54: // Current Music Pattern
+        lua_pushinteger(L, vm ? vm->audio.get_music_pattern_hp() : -1);
+        return 1;
+    case 55: // Patterns Played since last music()
+        lua_pushinteger(L, vm ? vm->audio.get_music_patterns_played_hp() : 0);
+        return 1;
+    case 56: // Ticks Played on Current Pattern
+        lua_pushinteger(L, vm ? vm->audio.get_music_ticks_on_pattern_hp() : 0);
+        return 1;
+    case 57: // Music Playing?
+        lua_pushboolean(L, vm && vm->audio.is_music_playing());
         return 1;
 
     // --- RTC (Real Time Clock) ---
@@ -219,7 +324,7 @@ static int l_stat(lua_State *L)
     case 95: // System Second
     {
         time_t t = time(NULL);
-        struct tm *tm = localtime(&t);
+        struct tm *tm = (id >= 90) ? localtime(&t) : gmtime(&t);
         
         int val = 0;
         int local_id = (id >= 90) ? (id - 10) : id;
@@ -237,9 +342,39 @@ static int l_stat(lua_State *L)
     }
 
     // --- METADATA ---
+    case 99: // Raw GC count (bytes)
+    {
+        int kbytes = lua_gc(L, LUA_GCCOUNT, 0);
+        int bytes = lua_gc(L, LUA_GCCOUNTB, 0);
+        lua_pushnumber(L, (double)kbytes * 1024.0 + (double)bytes);
+        return 1;
+    }
     case 100: // Breadcrumb label (Current cart filename/label)
-        // Fixed: cart_name -> currentGameId, added L arg
-        lua_pushstring(L, vm->currentGameId.c_str()); 
+        if (vm && !vm->currentGameId.empty()) {
+            lua_pushstring(L, vm->currentGameId.c_str()); 
+        } else {
+            lua_pushnil(L);
+        }
+        return 1;
+    case 101: // BBS cart id
+        lua_pushinteger(L, 0);
+        return 1;
+    case 102: // Site / environment
+        lua_pushinteger(L, 0);
+        return 1;
+    case 108: // PCM buffer info (stub)
+    case 109: // PCM buffer info (stub)
+        lua_pushinteger(L, 0);
+        return 1;
+    case 110: // Frame-by-frame mode flag
+        lua_pushboolean(L, vm && vm->debug.step_mode);
+        return 1;
+    case 120: // Bytestream availability
+    case 121: // Bytestream availability
+        lua_pushboolean(L, 0);
+        return 1;
+    case 124: // Current path
+        lua_pushstring(L, vm ? vm->currentCartPath.c_str() : "");
         return 1;
 
     default:
@@ -1015,6 +1150,38 @@ static int l_rect(lua_State *L)
     vm->gpu.rect(x0, y0, x1, y1, (uint8_t)c);
     return 0;
 }
+static int l_rrectfill(lua_State *L)
+{
+    auto *vm = get_vm(L);
+    int x = to_int_floor(L, 1);
+    int y = to_int_floor(L, 2);
+    int w = to_int_floor(L, 3);
+    int h = to_int_floor(L, 4);
+    int r = (lua_gettop(L) >= 5 && !lua_isnil(L, 5)) ? to_int_floor(L, 5) : 0;
+    int c = vm->gpu.getPen();
+    if (lua_gettop(L) >= 6 && !lua_isnil(L, 6))
+    {
+        c = to_int_floor(L, 6) & 0x0F;
+    }
+    vm->gpu.rrectfill(x, y, w, h, r, (uint8_t)c);
+    return 0;
+}
+static int l_rrect(lua_State *L)
+{
+    auto *vm = get_vm(L);
+    int x = to_int_floor(L, 1);
+    int y = to_int_floor(L, 2);
+    int w = to_int_floor(L, 3);
+    int h = to_int_floor(L, 4);
+    int r = (lua_gettop(L) >= 5 && !lua_isnil(L, 5)) ? to_int_floor(L, 5) : 0;
+    int c = vm->gpu.getPen();
+    if (lua_gettop(L) >= 6 && !lua_isnil(L, 6))
+    {
+        c = to_int_floor(L, 6) & 0x0F;
+    }
+    vm->gpu.rrect(x, y, w, h, r, (uint8_t)c);
+    return 0;
+}
 
 // --- P8SCII HELPERS ---
 
@@ -1024,6 +1191,20 @@ static int p8_hex_val(char c) {
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     return 0;
+}
+
+// Helper: Convert PICO-8 param char (0-9, a-z) to integer (0-35)
+static int p8_param_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
+    return 0;
+}
+
+static int p8_pow2_frames(int n) {
+    if (n < 1) return 0;
+    if (n > 9) n = 9;
+    return 1 << (n - 1);
 }
 
 // Helper: Get character width (Standard PICO-8 is fixed 4, but good for future var-width)
@@ -1064,11 +1245,122 @@ static int l_print(lua_State *L)
     }
 
     // 2. State Machine for P8SCII Parsing
-    int start_x = x;
     int cur_x = x;
     int cur_y = y;
     int cur_c = c;
     int cur_bg = -1; // -1 = Transparent
+    int home_x = x;
+    int home_y = y;
+    int tab_stop = 4;
+    int line_height = 0;
+    int wrap_border = 128;
+    int frames_between_chars = 0;
+    int force_char_w = -1;
+    int force_char_h = -1;
+    int last_adv_w = 4;
+    int last_char_x = x;
+    int last_char_y = y;
+    bool has_last_char = false;
+    bool wrap_mode = true;
+    bool wide_mode = false;
+    bool tall_mode = false;
+    bool stripey_mode = false;
+    bool pinball_mode = false;
+    bool invert_mode = false;
+    bool padding_mode = false;
+    bool solid_bg_mode = false;
+    bool custom_font_mode = false;
+    bool hit_null = false;
+
+    auto draw_glyph = [&](const uint8_t *rows, int src_w, int src_h, int draw_x, int draw_y, int dst_w, int dst_h, uint8_t fg, int bg) {
+        int bg_col = bg;
+        if (solid_bg_mode && bg_col < 0) bg_col = 0;
+        if (invert_mode) {
+            int inv_bg = (bg_col >= 0) ? bg_col : 0;
+            bg_col = fg;
+            fg = inv_bg;
+        }
+
+        int pad = padding_mode ? 1 : 0;
+        if (bg_col >= 0) {
+            vm->gpu.rectfill(draw_x - pad, draw_y - pad, draw_x + dst_w - 1 + pad, draw_y + dst_h - 1 + pad, (uint8_t)bg_col);
+        }
+
+        for (int ty = 0; ty < dst_h; ++ty) {
+            int sy = (ty * src_h) / std::max(1, dst_h);
+            uint8_t row = rows[sy];
+            for (int tx = 0; tx < dst_w; ++tx) {
+                if (stripey_mode && (tx & 1)) continue;
+                int sx = (tx * src_w) / std::max(1, dst_w);
+                if (row & (0x80 >> sx)) {
+                    vm->gpu.pset(draw_x + tx, draw_y + ty, fg);
+                }
+            }
+        }
+    };
+
+    auto render_char = [&](uint8_t ch, int draw_x, int draw_y, int &out_adv_w, int &out_h) {
+        int base_w = 4;
+        int base_h = 6;
+        int draw_off_x = 0;
+        int draw_off_y = 0;
+
+        if (custom_font_mode) {
+            uint8_t *a = vm->cf_attr();
+            int wdef = (ch < 128) ? a[0x000] : a[0x001];
+            int h = a[0x002];
+            int xo = (int8_t)a[0x003];
+            int yo = (int8_t)a[0x004];
+            if (h > 0) {
+                int adj = 0;
+                int yup = 0;
+                if (ch >= 16) {
+                    uint8_t nib = vm->cf_adj()[(ch - 16) >> 1];
+                    nib = (ch & 1) ? (nib >> 4) : (nib & 0x0F);
+                    static const int8_t map[8] = {0, 1, 2, 3, -4, -3, -2, -1};
+                    adj = map[nib & 7];
+                    if (nib & 8) yup = 1;
+                }
+
+                int offset = (int)ch * 8;
+                if (offset + 8 <= 0x780) {
+                    base_w = 8;
+                    base_h = std::min(8, h);
+                    draw_off_x = xo;
+                    draw_off_y = yo + yup;
+                    out_adv_w = std::max(0, wdef + adj);
+                    if (out_adv_w == 0) out_adv_w = wdef;
+                    if (force_char_w > 0) out_adv_w = force_char_w;
+
+                    int target_w = (force_char_w > 0) ? force_char_w : base_w;
+                    int target_h = (force_char_h > 0) ? force_char_h : base_h;
+                    target_w = std::max(1, target_w);
+                    target_h = std::max(1, target_h);
+                    if (wide_mode || pinball_mode) target_w *= 2;
+                    if (tall_mode || pinball_mode) target_h *= 2;
+
+                    const uint8_t *rows = vm->cf_gfx() + offset;
+                    draw_glyph(rows, 8, base_h, draw_x + draw_off_x, draw_y + draw_off_y, target_w, target_h, (uint8_t)cur_c, cur_bg);
+                    out_h = target_h;
+                    if (wide_mode || pinball_mode) out_adv_w *= 2;
+                    return;
+                }
+            }
+        }
+
+        const uint8_t *rows = p8_4x6_bits(ch);
+        int target_w = (force_char_w > 0) ? force_char_w : base_w;
+        int target_h = (force_char_h > 0) ? force_char_h : base_h;
+        target_w = std::max(1, target_w);
+        target_h = std::max(1, target_h);
+        if (wide_mode || pinball_mode) target_w *= 2;
+        if (tall_mode || pinball_mode) target_h *= 2;
+
+        out_adv_w = (force_char_w > 0) ? force_char_w : base_w;
+        out_h = target_h;
+        draw_glyph(rows, base_w, base_h, draw_x, draw_y, target_w, target_h, (uint8_t)cur_c, cur_bg);
+        if (wide_mode || pinball_mode) out_adv_w *= 2;
+    };
 
     for (size_t i = 0; i < len; ++i) {
         unsigned char b = (unsigned char)str[i];
@@ -1091,16 +1383,117 @@ static int l_print(lua_State *L)
             continue;
         }
 
+        // \* (0x01): Repeat Next Character P0 times
+        if (b == 0x01) {
+            if (i + 2 < len) {
+                int times = p8_param_val(str[++i]);
+                uint8_t ch = (uint8_t)str[++i];
+                for (int t = 0; t < times; ++t) {
+                    int adv = 0;
+                    int h = 0;
+                    last_char_x = cur_x;
+                    last_char_y = cur_y;
+                    render_char(ch, cur_x, cur_y, adv, h);
+                    has_last_char = true;
+                    last_adv_w = adv;
+                    cur_x += adv;
+                    line_height = std::max(line_height, h);
+                    for (int f = 0; f < frames_between_chars; ++f) l_flip(L);
+                }
+            }
+            continue;
+        }
+
+        // \- (0x03): Cursor X Offset
+        if (b == 0x03) {
+            if (i + 1 < len) {
+                int delta = p8_param_val(str[++i]) - 16;
+                cur_x += delta;
+            }
+            continue;
+        }
+
+        // \| (0x04): Cursor Y Offset
+        if (b == 0x04) {
+            if (i + 1 < len) {
+                int delta = p8_param_val(str[++i]) - 16;
+                cur_y += delta;
+            }
+            continue;
+        }
+
+        // \+ (0x05): Cursor XY Offset
+        if (b == 0x05) {
+            if (i + 2 < len) {
+                int delta_x = p8_param_val(str[++i]) - 16;
+                int delta_y = p8_param_val(str[++i]) - 16;
+                cur_x += delta_x;
+                cur_y += delta_y;
+            }
+            continue;
+        }
+
         // \n (0x0a): Newline
         if (b == 0x0a) {
-            cur_x = start_x;
-            cur_y += 6; // Standard line height
+            cur_x = home_x;
+            int lh = (line_height > 0) ? line_height : 6;
+            cur_y += lh;
+            line_height = 0;
             continue;
         }
         
         // \r (0x0d): Carriage Return
         if (b == 0x0d) {
-            cur_x = start_x;
+            cur_x = home_x;
+            continue;
+        }
+
+        // \t (0x09): Tab
+        if (b == 0x09) {
+            int tab_px = std::max(1, tab_stop) * 4;
+            int rel = cur_x - home_x;
+            cur_x = ((rel + tab_px) / tab_px) * tab_px + home_x;
+            continue;
+        }
+
+        // \b (0x08): Backspace
+        if (b == 0x08) {
+            cur_x -= last_adv_w;
+            continue;
+        }
+
+        // \v (0x0b): Decorate previous character
+        if (b == 0x0b) {
+            if (i + 2 < len && has_last_char) {
+                int offset = p8_param_val(str[++i]);
+                uint8_t ch = (uint8_t)str[++i];
+                int x_off = (offset % 4) - 2;
+                int y_off = (offset / 4) - 8;
+                int adv = 0;
+                int h = 0;
+                render_char(ch, last_char_x + x_off, last_char_y + y_off, adv, h);
+            }
+            continue;
+        }
+
+        // \a (0x07): Audio command (consume until space)
+        if (b == 0x07) {
+            while (i + 1 < len && str[i + 1] != ' ') {
+                ++i;
+            }
+            if (i + 1 < len && str[i + 1] == ' ') ++i;
+            continue;
+        }
+
+        // \014 (0x0e): Switch to custom font
+        if (b == 0x0e) {
+            custom_font_mode = true;
+            continue;
+        }
+
+        // \015 (0x0f): Switch back to default font
+        if (b == 0x0f) {
+            custom_font_mode = false;
             continue;
         }
 
@@ -1108,37 +1501,175 @@ static int l_print(lua_State *L)
         if (b == 0x06) {
             if (i + 1 < len) {
                 char cmd = str[++i];
-                // \^1 .. \^9 : Special logic (often skip pixels or speed)
-                // For now, we consume them. Extend here for \^w (wide), \^t (tall)
-                
-                // Example: \^g (Home)
-                if (cmd == 'g') { cur_x = 0; cur_y = 0; }
-                // Example: \^x (Set X) - usually consumes 2 bytes, minimal impl here:
-                // if (cmd == 'x') { /* read next 2 bytes for coords */ i+=2; }
+                if (cmd >= '1' && cmd <= '9') {
+                    int frames = p8_pow2_frames(p8_param_val(cmd));
+                    for (int f = 0; f < frames; ++f) l_flip(L);
+                } else if (cmd == 'd' && i + 1 < len) {
+                    frames_between_chars = p8_param_val(str[++i]);
+                } else if (cmd == 'c' && i + 1 < len) {
+                    int col = p8_param_val(str[++i]) & 0x0F;
+                    vm->gpu.cls(col);
+                    cur_x = 0;
+                    cur_y = 0;
+                    home_x = 0;
+                    home_y = 0;
+                    line_height = 0;
+                } else if (cmd == 'g') {
+                    cur_x = home_x;
+                    cur_y = home_y;
+                } else if (cmd == 'h') {
+                    home_x = cur_x;
+                    home_y = cur_y;
+                } else if (cmd == 'j' && i + 2 < len) {
+                    int x4 = p8_param_val(str[++i]) * 4;
+                    int y4 = p8_param_val(str[++i]) * 4;
+                    cur_x = x4;
+                    cur_y = y4;
+                } else if (cmd == 's' && i + 1 < len) {
+                    tab_stop = p8_param_val(str[++i]);
+                } else if (cmd == 'r' && i + 1 < len) {
+                    wrap_border = p8_param_val(str[++i]) * 4;
+                } else if (cmd == 'x' && i + 1 < len) {
+                    force_char_w = p8_param_val(str[++i]);
+                } else if (cmd == 'y' && i + 1 < len) {
+                    force_char_h = p8_param_val(str[++i]);
+                } else if (cmd == 'w') {
+                    wide_mode = true;
+                } else if (cmd == 't') {
+                    tall_mode = true;
+                } else if (cmd == '=') {
+                    stripey_mode = true;
+                } else if (cmd == 'p') {
+                    pinball_mode = true;
+                    wide_mode = true;
+                    tall_mode = true;
+                    stripey_mode = true;
+                } else if (cmd == 'i') {
+                    invert_mode = true;
+                } else if (cmd == 'b') {
+                    padding_mode = true;
+                } else if (cmd == '#') {
+                    solid_bg_mode = true;
+                } else if (cmd == '$') {
+                    wrap_mode = true;
+                } else if (cmd == ':') {
+                    if (i + 16 < len) {
+                        uint8_t rows[8] = {0};
+                        for (int r = 0; r < 8; ++r) {
+                            char hi = str[++i];
+                            char lo = str[++i];
+                            rows[r] = (uint8_t)((p8_hex_val(hi) << 4) | p8_hex_val(lo));
+                        }
+                        int adv = (force_char_w > 0) ? force_char_w : 8;
+                        int target_w = std::max(1, adv);
+                        int target_h = (force_char_h > 0) ? force_char_h : 8;
+                        target_h = std::max(1, target_h);
+                        if (wide_mode || pinball_mode) target_w *= 2;
+                        if (tall_mode || pinball_mode) target_h *= 2;
+                        draw_glyph(rows, 8, 8, cur_x, cur_y, target_w, target_h, (uint8_t)cur_c, cur_bg);
+                        cur_x += (wide_mode || pinball_mode) ? adv * 2 : adv;
+                        line_height = std::max(line_height, target_h);
+                        last_adv_w = (wide_mode || pinball_mode) ? adv * 2 : adv;
+                        last_char_x = cur_x - last_adv_w;
+                        last_char_y = cur_y;
+                        has_last_char = true;
+                        for (int f = 0; f < frames_between_chars; ++f) l_flip(L);
+                    }
+                } else if (cmd == '.') {
+                    if (i + 8 < len) {
+                        uint8_t rows[8] = {0};
+                        for (int r = 0; r < 8; ++r) {
+                            rows[r] = (uint8_t)str[++i];
+                        }
+                        int adv = (force_char_w > 0) ? force_char_w : 8;
+                        int target_w = std::max(1, adv);
+                        int target_h = (force_char_h > 0) ? force_char_h : 8;
+                        target_h = std::max(1, target_h);
+                        if (wide_mode || pinball_mode) target_w *= 2;
+                        if (tall_mode || pinball_mode) target_h *= 2;
+                        draw_glyph(rows, 8, 8, cur_x, cur_y, target_w, target_h, (uint8_t)cur_c, cur_bg);
+                        cur_x += (wide_mode || pinball_mode) ? adv * 2 : adv;
+                        line_height = std::max(line_height, target_h);
+                        last_adv_w = (wide_mode || pinball_mode) ? adv * 2 : adv;
+                        last_char_x = cur_x - last_adv_w;
+                        last_char_y = cur_y;
+                        has_last_char = true;
+                        for (int f = 0; f < frames_between_chars; ++f) l_flip(L);
+                    }
+                } else if (cmd == '!') {
+                    if (i + 4 < len && vm->ram) {
+                        int addr = (p8_hex_val(str[++i]) << 12) |
+                                   (p8_hex_val(str[++i]) << 8) |
+                                   (p8_hex_val(str[++i]) << 4) |
+                                   (p8_hex_val(str[++i]));
+                        int remaining = (int)(len - (i + 1));
+                        if (remaining > 0 && addr < 0x8000) {
+                            int max_write = std::min(remaining, 0x8000 - addr);
+                            std::memcpy(&vm->ram[addr], &str[i + 1], max_write);
+                            vm_sync_ram(vm, addr, max_write);
+                            i += max_write;
+                        }
+                    }
+                } else if (cmd == '@') {
+                    if (i + 8 < len && vm->ram) {
+                        int addr = (p8_hex_val(str[++i]) << 12) |
+                                   (p8_hex_val(str[++i]) << 8) |
+                                   (p8_hex_val(str[++i]) << 4) |
+                                   (p8_hex_val(str[++i]));
+                        int size = (p8_hex_val(str[++i]) << 12) |
+                                   (p8_hex_val(str[++i]) << 8) |
+                                   (p8_hex_val(str[++i]) << 4) |
+                                   (p8_hex_val(str[++i]));
+                        int remaining = (int)(len - (i + 1));
+                        if (remaining > 0 && size > 0 && addr < 0x8000) {
+                            int max_write = std::min(size, remaining);
+                            max_write = std::min(max_write, 0x8000 - addr);
+                            if (max_write > 0) {
+                                std::memcpy(&vm->ram[addr], &str[i + 1], max_write);
+                                vm_sync_ram(vm, addr, max_write);
+                                i += max_write;
+                            }
+                        }
+                    }
+                } else if (cmd == '-') {
+                    if (i + 1 < len) {
+                        char off = str[++i];
+                        if (off == 'w') wide_mode = false;
+                        else if (off == 't') tall_mode = false;
+                        else if (off == '=') stripey_mode = false;
+                        else if (off == 'p') { pinball_mode = false; wide_mode = false; tall_mode = false; stripey_mode = false; }
+                        else if (off == 'i') invert_mode = false;
+                        else if (off == 'b') padding_mode = false;
+                        else if (off == '#') solid_bg_mode = false;
+                        else if (off == '$') wrap_mode = false;
+                    }
+                }
             }
             continue;
         }
 
         // \- (0x00?): Terminator (PICO-8 strings often null-term, but lua strings have explicit len)
-        if (b == 0) break; 
+        if (b == 0) { hit_null = true; break; } 
 
         // --- DRAW CHARACTER ---
-        
-        int w = p8_char_width(b);
+        int adv = 0;
+        int h = 0;
+        last_char_x = cur_x;
+        last_char_y = cur_y;
+        render_char(b, cur_x, cur_y, adv, h);
+        has_last_char = true;
+        last_adv_w = (adv > 0) ? adv : last_adv_w;
+        cur_x += adv;
+        line_height = std::max(line_height, h);
 
-        // 1. Draw Background (if active)
-        if (cur_bg >= 0) {
-            vm->gpu.rectfill(cur_x, cur_y, cur_x + w - 1, cur_y + 5, (uint8_t)cur_bg);
+        for (int f = 0; f < frames_between_chars; ++f) l_flip(L);
+
+        if (wrap_mode && wrap_border > 0 && cur_x >= wrap_border) {
+            cur_x = home_x;
+            int lh = (line_height > 0) ? line_height : 6;
+            cur_y += lh;
+            line_height = 0;
         }
-
-        // 2. Draw Foreground Glyph
-        // We reuse vm->pprint for a single char to leverage existing font rendering.
-        // vm->pprint expects a pointer and length.
-        char buf[1] = { (char)b };
-        vm->gpu.pprint(buf, 1, cur_x, cur_y, (uint8_t)cur_c);
-
-        // 3. Advance Cursor
-        cur_x += w;
     }
 
     // 3. Update Persistent Cursor
@@ -1150,7 +1681,12 @@ static int l_print(lua_State *L)
         // Standard print(str) implies a newline at the end in some contexts, 
         // but strictly print() just sets the cursor to the next line start usually.
         // We align with PICO-8: cursor moves to start of next line + scroll handling (scrolling not impl here)
-        vm->gpu.setCursor(0, cur_y + 6);
+        if (hit_null) {
+            vm->gpu.setCursor(cur_x, cur_y);
+        } else {
+            int lh = (line_height > 0) ? line_height : 6;
+            vm->gpu.setCursor(0, cur_y + lh);
+        }
     }
 
     // Return the final X position (undocumented but common in some Lua variants, PICO-8 returns nothing usually)
@@ -1206,13 +1742,11 @@ static int l_peek(lua_State *L)
         return 1;
     }
 
-    // Direct read is now safe
-    uint8_t result = vm->ram[addr];
+    uint8_t result = read_mapped_byte(vm, (uint32_t)addr);
     lua_pushinteger(L, result);
     return 1;
 }
 
-// Helper to sync RAM changes back to internal VM caches/registers
 static void vm_sync_ram(Real8VM *vm, uint32_t start_addr, int length)
 {
     if (!vm->ram)
@@ -1264,6 +1798,19 @@ static void vm_sync_ram(Real8VM *vm, uint32_t start_addr, int length)
     // 4. Draw State Registers (0x5F00 - 0x5F5F)
     if (end_addr > 0x5F00 && start_addr < 0x5F60)
     {
+        // Memory Mapping Registers (0x5F54 - 0x5F57)
+        if (end_addr > 0x5F54 && start_addr <= 0x5F57)
+        {
+            if (start_addr <= 0x5F54 && end_addr > 0x5F54)
+                vm->hwState.spriteSheetMemMapping = vm->ram[0x5F54];
+            if (start_addr <= 0x5F55 && end_addr > 0x5F55)
+                vm->hwState.screenDataMemMapping = vm->ram[0x5F55];
+            if (start_addr <= 0x5F56 && end_addr > 0x5F56)
+                vm->hwState.mapMemMapping = vm->ram[0x5F56];
+            if (start_addr <= 0x5F57 && end_addr > 0x5F57)
+                vm->hwState.widthOfTheMap = vm->ram[0x5F57];
+        }
+
         // Draw Palette (0x5F00 - 0x5F0F)
         for (int i = 0; i < 16; ++i)
         {
@@ -1315,6 +1862,100 @@ static void vm_sync_ram(Real8VM *vm, uint32_t start_addr, int length)
     }
 }
 
+struct MappedAddr {
+    uint32_t addr;
+    bool is_screen;
+    bool is_sprite;
+};
+
+static MappedAddr map_ram_address(Real8VM *vm, uint32_t addr)
+{
+    MappedAddr out{addr, false, false};
+    if (!vm)
+        return out;
+
+    if (addr < 0x2000)
+    {
+        if (vm->hwState.screenDataMemMapping == 0)
+        {
+            out.addr = addr + 0x6000;
+            out.is_screen = true;
+        }
+        else
+        {
+            out.is_sprite = true;
+        }
+    }
+    else if (addr >= 0x6000 && addr < 0x8000)
+    {
+        if (vm->hwState.spriteSheetMemMapping == 0x60)
+        {
+            out.addr = addr - 0x6000;
+            out.is_sprite = true;
+        }
+        else
+        {
+            out.is_screen = true;
+        }
+    }
+
+    return out;
+}
+
+static uint8_t read_screen_byte(Real8VM *vm, uint32_t addr)
+{
+    if (!vm || !vm->ram)
+        return 0;
+    if (addr < 0x6000 || addr >= 0x8000)
+        return vm->ram[addr];
+
+    uint32_t offset = addr - 0x6000;
+    if (!vm->fb)
+        return vm->ram[addr];
+
+    int y = offset >> 6;
+    int x = (offset & 63) << 1;
+    if (y >= 128)
+        return 0;
+
+    uint8_t p1 = vm->fb[y][x];
+    uint8_t p2 = vm->fb[y][x + 1];
+    uint8_t val = (p1 & 0x0F) | ((p2 & 0x0F) << 4);
+    vm->ram[addr] = val;
+    return val;
+}
+
+static uint8_t read_mapped_byte(Real8VM *vm, uint32_t addr)
+{
+    if (!vm || !vm->ram)
+        return 0;
+    MappedAddr mapped = map_ram_address(vm, addr);
+    if (mapped.addr >= 0x8000)
+        return 0;
+    if (mapped.is_screen)
+        return read_screen_byte(vm, mapped.addr);
+    return vm->ram[mapped.addr];
+}
+
+static void write_mapped_byte(Real8VM *vm, uint32_t addr, uint8_t val)
+{
+    if (!vm || !vm->ram)
+        return;
+    MappedAddr mapped = map_ram_address(vm, addr);
+    if (mapped.addr >= 0x8000)
+        return;
+    vm->ram[mapped.addr] = val;
+
+    if (mapped.is_screen && mapped.addr >= 0x6000 && mapped.addr < 0x8000)
+    {
+        vm->screenByteToFB(mapped.addr - 0x6000, val);
+    }
+    else if (mapped.addr < 0x6000)
+    {
+        vm_sync_ram(vm, mapped.addr, 1);
+    }
+}
+
 // [real8_bindings.cpp]
 
 static int l_poke(lua_State *L)
@@ -1345,35 +1986,7 @@ static int l_poke(lua_State *L)
             val = 0x3F; 
         }
 
-        // 1. Write to RAM (The Source of Truth)
-        if (vm->ram && addr < 0x8000)
-        {
-            vm->ram[addr] = val;
-        }
-
-        // 2. Specific Optimizations / Hooks
-        if (addr < 0x2000)
-        {
-            int base_idx = addr * 2;
-            int y1 = base_idx >> 7;
-            int x1 = base_idx & 0x7F;
-            if (y1 < 128)
-                vm->gfx[y1][x1] = val & 0x0F;
-            int y2 = (base_idx + 1) / 128;
-            int x2 = (base_idx + 1) % 128;
-            if (y2 < 128)
-                vm->gfx[y2][x2] = (val >> 4) & 0x0F;
-        }
-        else if (addr >= 0x6000 && addr <= 0x7FFF)
-        {
-            vm->screenByteToFB(addr - 0x6000, val);
-        }
-
-        // 3. Sync Registers (Palette, Flags, Camera, etc)
-        if ((addr >= 0x3000 && addr <= 0x30FF) || (addr >= 0x5F00 && addr <= 0x5FFF))
-        {
-            vm_sync_ram(vm, addr, 1);
-        }
+        write_mapped_byte(vm, addr, val);
 
         addr++;
     }
@@ -1397,6 +2010,17 @@ static int l_memcpy(lua_State *L)
         len = 0x8000 - dest;
     if (src + len > 0x8000)
         len = 0x8000 - src;
+
+    bool mapping_active = (vm->hwState.spriteSheetMemMapping == 0x60 || vm->hwState.screenDataMemMapping == 0);
+    if (mapping_active)
+    {
+        std::vector<uint8_t> temp(len);
+        for (int i = 0; i < len; ++i)
+            temp[i] = read_mapped_byte(vm, src + i);
+        for (int i = 0; i < len; ++i)
+            write_mapped_byte(vm, dest + i, temp[i]);
+        return 0;
+    }
 
     // If reading FROM Screen (0x6000+), we must reconstruct the RAM data from the
     // visual Framebuffer because vm->spr() likely bypasses screen_ram for speed.
@@ -1477,6 +2101,14 @@ static int l_memset(lua_State *L)
         return 0;
     if (dest + len > 0x8000)
         len = 0x8000 - dest;
+
+    bool mapping_active = (vm->hwState.spriteSheetMemMapping == 0x60 || vm->hwState.screenDataMemMapping == 0);
+    if (mapping_active)
+    {
+        for (int i = 0; i < len; ++i)
+            write_mapped_byte(vm, dest + i, val);
+        return 0;
+    }
 
     // 1. Write to Main RAM (The Source of Truth)
     // We do this once, globally. No split paths for RAM writing.
@@ -2018,13 +2650,23 @@ static int l_map(lua_State *L)
     int n = lua_gettop(L);
     int mx, my, sx, sy, w, h, layer;
 
+    const bool bigMap = vm->hwState.mapMemMapping >= 0x80;
+    int mapSize = bigMap ? (0x10000 - (vm->hwState.mapMemMapping << 8)) : 8192;
+    if (bigMap) {
+        const int userDataSize = 0x8000 - 0x4300;
+        if (mapSize > userDataSize) mapSize = userDataSize;
+    }
+    int mapW = (vm->hwState.widthOfTheMap == 0) ? 256 : vm->hwState.widthOfTheMap;
+    if (mapW <= 0) mapW = 128;
+    int mapH = (mapW > 0) ? (mapSize / mapW) : 0;
+
     // Defaults
     mx = 0;
     my = 0;
     sx = 0;
     sy = 0;
-    w = 128;
-    h = 32;
+    w = mapW;
+    h = mapH;
     layer = 0; // Layer 0 acts as "all layers" often, or -1 in some implementations
 
     if (n > 0)
@@ -2162,6 +2804,7 @@ static int l_btnp(lua_State *L)
 static int l_sfx(lua_State *L)
 {
     auto *vm = get_vm(L);
+    if (!vm) return 0;
     int idx = to_int_floor(L, 1);
     int ch = (int)luaL_optinteger(L, 2, -1);
     int offset = (int)luaL_optinteger(L, 3, 0);
@@ -2173,8 +2816,11 @@ static int l_sfx(lua_State *L)
 static int l_music(lua_State *L)
 {
     auto *vm = get_vm(L);
+    if (!vm) return 0;
     int pat = to_int_floor(L, 1);
-    vm->audio.play_music(pat);
+    int fade_len = (int)luaL_optinteger(L, 2, 0);
+    int mask = (int)luaL_optinteger(L, 3, 0x0f);
+    vm->audio.play_music(pat, fade_len, mask);
     return 0;
 }
 
@@ -2348,8 +2994,8 @@ static int l_peek2(lua_State *L)
     }
 
     // Safe read of 2 bytes (Handle edge case at 0x7FFF)
-    uint8_t low = vm->ram[addr];
-    uint8_t high = (addr < 0x7FFF) ? vm->ram[addr + 1] : 0;
+    uint8_t low = read_mapped_byte(vm, (uint32_t)addr);
+    uint8_t high = (addr < 0x7FFF) ? read_mapped_byte(vm, (uint32_t)addr + 1) : 0;
 
     lua_pushinteger(L, low | (high << 8));
     return 1;
@@ -2366,38 +3012,8 @@ static int l_poke2(lua_State *L)
         int val = to_int_floor(L, 2);
         if (addr >= 0 && addr < 0x7FFF)
         {
-            vm->ram[addr] = val & 0xFF;
-            vm->ram[addr + 1] = (val >> 8) & 0xFF;
-        }
-
-        else if (addr == 0x5F26)
-        {
-            vm->gpu.clip_x = val;
-        }
-        else if (addr == 0x5F27)
-        {
-            vm->gpu.clip_y = val;
-        }
-
-        // When writing via poke2 to the start of the register, take the FULL value.
-        // Do not OR with the previous high byte.
-        else if (addr == 0x5F28)
-        {
-            vm->gpu.cam_x = (int16_t)val;
-        } // Full 16-bit write
-        else if (addr == 0x5F2A)
-        {
-            vm->gpu.cam_y = (int16_t)val;
-        } // Full 16-bit write
-
-        // Edge case: writing to high byte address directly via poke2 (rare but valid)
-        else if (addr == 0x5F29)
-        {
-            vm->gpu.cam_x = (vm->gpu.cam_x & 0x00FF) | (val << 8);
-        }
-        else if (addr == 0x5F2B)
-        {
-            vm->gpu.cam_y = (vm->gpu.cam_y & 0x00FF) | (val << 8);
+            write_mapped_byte(vm, addr, val & 0xFF);
+            write_mapped_byte(vm, addr + 1, (val >> 8) & 0xFF);
         }
     }
     return 0;
@@ -2415,7 +3031,10 @@ static int l_peek4(lua_State *L)
         if (addr >= 0 && addr < 0x7FFC)
         {
             // Read 4 bytes as 16.16 fixed point
-            int32_t raw = vm->ram[addr] | (vm->ram[addr + 1] << 8) | (vm->ram[addr + 2] << 16) | (vm->ram[addr + 3] << 24);
+            int32_t raw = read_mapped_byte(vm, (uint32_t)addr)
+                        | (read_mapped_byte(vm, (uint32_t)addr + 1) << 8)
+                        | (read_mapped_byte(vm, (uint32_t)addr + 2) << 16)
+                        | (read_mapped_byte(vm, (uint32_t)addr + 3) << 24);
             lua_pushnumber(L, (double)raw / 65536.0);
             return 1;
         }
@@ -2443,35 +3062,10 @@ static int l_poke4(lua_State *L)
         int32_t fixed = (int32_t)(val * 65536.0);
         if (addr >= 0 && addr < 0x7FFC)
         {
-            vm->ram[addr] = fixed & 0xFF;
-            vm->ram[addr + 1] = (fixed >> 8) & 0xFF;
-            vm->ram[addr + 2] = (fixed >> 16) & 0xFF;
-            vm->ram[addr + 3] = (fixed >> 24) & 0xFF;
-        }
-        // Explicitly cast (int)val because val is a double here
-        else if (addr == 0x5F26)
-        {
-            vm->gpu.clip_x = (int)val;
-        }
-        else if (addr == 0x5F27)
-        {
-            vm->gpu.clip_y = (int)val;
-        }
-        else if (addr == 0x5F28)
-        {
-            vm->gpu.cam_x = (vm->gpu.cam_x & 0xFF00) | ((int)val & 0xFF);
-        }
-        else if (addr == 0x5F29)
-        {
-            vm->gpu.cam_x = (vm->gpu.cam_x & 0x00FF) | ((int)val << 8);
-        }
-        else if (addr == 0x5F2A)
-        {
-            vm->gpu.cam_y = (vm->gpu.cam_y & 0xFF00) | ((int)val & 0xFF);
-        }
-        else if (addr == 0x5F2B)
-        {
-            vm->gpu.cam_y = (vm->gpu.cam_y & 0x00FF) | ((int)val << 8);
+            write_mapped_byte(vm, addr, fixed & 0xFF);
+            write_mapped_byte(vm, addr + 1, (fixed >> 8) & 0xFF);
+            write_mapped_byte(vm, addr + 2, (fixed >> 16) & 0xFF);
+            write_mapped_byte(vm, addr + 3, (fixed >> 24) & 0xFF);
         }
     }
     return 0;
@@ -3692,6 +4286,8 @@ void register_pico8_api(lua_State *L)
     reg(L, "line", l_line);
     reg(L, "rect", l_rect);
     reg(L, "rectfill", l_rectfill);
+    reg(L, "rrect", l_rrect);
+    reg(L, "rrectfill", l_rrectfill);
     reg(L, "circ", l_circ);
     reg(L, "circfill", l_circfill);
     reg(L, "oval", l_oval);

@@ -225,6 +225,16 @@ void Real8VM::rebootVM()
     gpu.reset();
 
     hwState.distort = 0;
+    hwState.spriteSheetMemMapping = 0x00;
+    hwState.screenDataMemMapping = 0x60;
+    hwState.mapMemMapping = 0x20;
+    hwState.widthOfTheMap = 128;
+    if (ram) {
+        ram[0x5F54] = hwState.spriteSheetMemMapping;
+        ram[0x5F55] = hwState.screenDataMemMapping;
+        ram[0x5F56] = hwState.mapMemMapping;
+        ram[0x5F57] = hwState.widthOfTheMap;
+    }
     
     resetInputState();
 
@@ -268,9 +278,16 @@ void Real8VM::resetInputState()
     btn_mask = 0;
     btn_state = 0;
     last_btn_state = 0;
-    mouse_wheel_delta = 0;
+    mouse_x = 0;
+    mouse_y = 0;
+    mouse_buttons = 0;
+    mouse_rel_x = 0;
+    mouse_rel_y = 0;
+    mouse_last_x = 0;
+    mouse_last_y = 0;
+    mouse_wheel_event = 0;
     key_pressed_this_frame = false;
-    key_input_buffer.clear();
+    key_queue.clear();
     has_key_input = false;
     if (host) host->clearInputState();
 }
@@ -365,9 +382,14 @@ void Real8VM::runFrame()
         int mx = (ms.x < 0) ? 0 : (ms.x > 127) ? 127 : ms.x;
         int my = (ms.y < 0) ? 0 : (ms.y > 127) ? 127 : ms.y;
 
-        ram[0x5F2C] = (uint8_t)mx;
-        ram[0x5F2D] = (uint8_t)my;
-        ram[0x5F2E] = ms.btn;
+        mouse_rel_x = mx - mouse_last_x;
+        mouse_rel_y = my - mouse_last_y;
+        mouse_last_x = mx;
+        mouse_last_y = my;
+        mouse_x = mx;
+        mouse_y = my;
+        mouse_buttons = ms.btn;
+
         ram[0x5F30] = (uint8_t)(btn_state & 0xFF);
         ram[0x5F34] = (uint8_t)((btn_state >> 8) & 0xFF);
     }
@@ -501,6 +523,8 @@ void Real8VM::runFrame()
     else {
         audio.update(host);
     }
+
+    mouse_wheel_event = 0;
 }
 
 bool Real8VM::loadGame(const GameData& game)

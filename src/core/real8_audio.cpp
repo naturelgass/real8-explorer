@@ -69,7 +69,7 @@ static float osc_phaser(float t) {
 
 static float get_sample_for_state(ChannelState &state, int waveform, float freq) {
     // 1. Update Phase Accumulator
-    float dt = freq / 22050.0f;
+    float dt = freq / float(AudioEngine::SAMPLE_RATE);
     float old_phi = state.phi;
     state.phi += dt;
     
@@ -106,6 +106,17 @@ static float get_sample_for_state(ChannelState &state, int waveform, float freq)
 
 void AudioEngine::init(Real8VM *parent) { 
     vm = parent; 
+
+    for (int i = 0; i < SNAP_COUNT; i++) {
+        for (int c = 0; c < CHANNELS; c++) {
+            snaps[i].sfx_id[c] = -1;
+            snaps[i].note_row[c] = -1;
+        }
+        snaps[i].music_pattern = -1;
+        snaps[i].patterns_played = 0;
+        snaps[i].ticks_on_pattern = 0;
+        snaps[i].music_playing = false;
+    }
 }
 
 float AudioEngine::note_to_freq(float note) {
@@ -114,14 +125,64 @@ float AudioEngine::note_to_freq(float note) {
 
 // Stub for the interface method (now handled by internal helper)
 float AudioEngine::get_waveform_sample(int waveform, float phi, ChannelState &state, float freq_mult) {
-    // This is kept for compatibility if called externally, but we use get_sample_for_state internally
-    // We estimate frequency from dt? No, we can't.
-    // Ideally this function should just call the appropriate osc function.
-    return get_sample_for_state(state, waveform, freq_mult); 
+    // This is kept for compatibility if called externally.
+    // Use the provided phase and avoid mutating state or interpreting freq_mult as Hz.
+    (void)freq_mult;
+    switch (waveform) {
+        case 0: return osc_tri(phi);
+        case 1: return osc_tilted_saw(phi);
+        case 2: return osc_saw(phi);
+        case 3: return osc_square(phi);
+        case 4: return osc_pulse(phi);
+        case 5: return osc_organ(phi);
+        case 6: return state.noise_sample;
+        case 7: return osc_phaser(phi);
+        default: return 0.0f;
+    }
 }
 
 void AudioEngine::play_sfx(int idx, int ch, int offset, int length) {
-    if (muted || idx < 0 || idx > 63) return;
+    if (muted) return;
+    if (idx < -2 || idx > 63) return;
+    if (ch < -2 || ch >= CHANNELS) return;
+
+    auto stop_channel = [this](int i) {
+        if (i < 0 || i >= CHANNELS) return;
+        channels[i].sfx_id = -1;
+        channels[i].current_vol = 0;
+        channels[i].current_pitch_val = 0;
+        channels[i].last_note_idx = -1;
+        channels[i].stop_row = -1;
+    };
+
+    if (ch == -2) {
+        for (int i = 0; i < CHANNELS; i++) {
+            if (channels[i].sfx_id == idx) {
+                stop_channel(i);
+            }
+        }
+        return;
+    }
+
+    if (idx == -1) {
+        if (ch == -1) {
+            for (int i = 0; i < CHANNELS; i++) stop_channel(i);
+        } else {
+            stop_channel(ch);
+        }
+        return;
+    }
+
+    if (idx == -2) {
+        if (ch == -1) {
+            for (int i = 0; i < CHANNELS; i++) {
+                channels[i].loop_active = false;
+            }
+        } else if (ch >= 0 && ch < CHANNELS) {
+            channels[ch].loop_active = false;
+        }
+        return;
+    }
 
     int target_ch = -1;
     if (ch >= 0 && ch < CHANNELS) {
@@ -142,13 +203,14 @@ void AudioEngine::play_sfx(int idx, int ch, int offset, int length) {
     
     c.sfx_id = idx;
     c.is_music = (ch >= 0 && music_playing); 
-    c.row = offset; 
+    c.row = std::clamp(offset, 0, 31); 
     c.phi = 0.0f; 
     c.lfsr = 0x5205; 
     c.noise_sample = 0.0f;
     c.current_vol = 0; 
     c.current_pitch_val = 0; 
     c.last_note_idx = -1;
+    c.stop_row = (length >= 0) ? std::min(32, c.row + length) : -1;
     
     // Reset Child
     c.child.sfx_id = -1;
@@ -161,7 +223,10 @@ void AudioEngine::play_sfx(int idx, int ch, int offset, int length) {
     c.tick_counter = 1; 
 }
 
-void AudioEngine::play_music(int pattern) {
+void AudioEngine::play_music(int pattern, int fade_len, int mask) {
+    (void)fade_len;
+    music_patterns_played = 0;
+    music_ticks_on_pattern = 0;
     if (pattern < 0) {
         music_playing = false;
         music_pattern = -1;
@@ -171,6 +236,7 @@ void AudioEngine::play_music(int pattern) {
     music_playing = true;
     music_tick_timer = 1; 
     music_loop_start = -1;
+    music_mask = (uint8_t)((mask == 0) ? 0x0f : (mask & 0x0f));
 
     if (pattern < 64) {
         uint8_t m0 = vm->music_ram[pattern * 4 + 0];
@@ -178,9 +244,11 @@ void AudioEngine::play_music(int pattern) {
     }
     
     for(int i=0; i<4; i++) {
-        if (!(music_mask & (1<<i))) {
-             channels[i].sfx_id = -1; 
-             channels[i].is_music = true;
+        if (music_mask & (1<<i)) {
+            channels[i].sfx_id = -1; 
+            channels[i].is_music = true;
+        } else {
+            channels[i].is_music = false;
         }
     }
 }
@@ -192,8 +260,19 @@ void AudioEngine::play_music(int pattern) {
 void AudioEngine::update_music_tick() {
     if (!music_playing || music_pattern < 0) return;
 
-    music_tick_timer--;
+    if (music_tick_timer > 0) {
+        music_tick_timer--;
+    }
+
+    int total_ticks = 32 * std::max(1, music_speed);
+    int elapsed = total_ticks - music_tick_timer;
+    if (elapsed < 0) elapsed = 0;
+    if (elapsed >= total_ticks) elapsed = total_ticks - 1;
+    music_ticks_on_pattern = (music_speed > 0) ? (elapsed / music_speed) : 0;
     if (music_tick_timer > 0) return;
+
+    music_patterns_played++;
+    music_ticks_on_pattern = 0;
 
     int ram_addr = music_pattern * 4;
     uint8_t m[4];
@@ -202,7 +281,7 @@ void AudioEngine::update_music_tick() {
     int fastest_speed = 0;
 
     for (int i = 0; i < 4; i++) {
-        if (music_mask & (1 << i)) continue;
+        if ((music_mask & (1 << i)) == 0) continue;
 
         int sfx = m[i] & 0x3F;
         bool empty = (m[i] & 0x40) || (sfx > 63);
@@ -272,6 +351,11 @@ void AudioEngine::update_channel_tick(int idx) {
     
     c.last_note_idx = c.row;
     c.row++;
+    if (c.stop_row >= 0 && c.row >= c.stop_row) {
+        c.sfx_id = -1;
+        c.stop_row = -1;
+        return;
+    }
     if (c.row >= 32) {
         if (c.loop_active) {
             c.row = c.loop_start;
@@ -286,6 +370,21 @@ void AudioEngine::run_tick() {
     for (int i = 0; i < 4; i++) {
         update_channel_tick(i);
     }
+
+    MixerTickSnap &s = snaps[snap_w++ & (SNAP_COUNT - 1)];
+    for (int i = 0; i < 4; i++) {
+        s.sfx_id[i] = channels[i].sfx_id;
+        if (channels[i].sfx_id == -1) {
+            s.note_row[i] = -1;
+        } else {
+            s.note_row[i] = (channels[i].last_note_idx < 0) ? 0 : channels[i].last_note_idx;
+        }
+    }
+    s.music_pattern = music_pattern;
+    s.patterns_played = music_patterns_played;
+    s.ticks_on_pattern = music_ticks_on_pattern;
+    s.music_playing = music_playing;
+    snaps_ready = true;
 }
 
 // --------------------------------------------------------------------------
@@ -442,6 +541,8 @@ AudioStateSnapshot AudioEngine::getState() {
     s.music_loop_start = music_loop_start;
     s.music_mask = music_mask;
     s.music_playing = music_playing;
+    s.music_patterns_played = music_patterns_played;
+    s.music_ticks_on_pattern = music_ticks_on_pattern;
     return s;
 }
 
@@ -453,4 +554,44 @@ void AudioEngine::setState(const AudioStateSnapshot& s) {
     music_loop_start = s.music_loop_start;
     music_mask = s.music_mask;
     music_playing = s.music_playing;
+    music_patterns_played = s.music_patterns_played;
+    music_ticks_on_pattern = s.music_ticks_on_pattern;
+}
+
+static const AudioEngine::MixerTickSnap* get_last_snap(const AudioEngine &audio) {
+    if (!audio.snaps_ready) return nullptr;
+    int idx = (audio.snap_w - 1) & (AudioEngine::SNAP_COUNT - 1);
+    return &audio.snaps[idx];
+}
+
+int AudioEngine::get_sfx_id_hp(int ch) const {
+    if (ch < 0 || ch >= CHANNELS) return -1;
+    const MixerTickSnap *snap = get_last_snap(*this);
+    return snap ? snap->sfx_id[ch] : get_sfx_id(ch);
+}
+
+int AudioEngine::get_note_row_hp(int ch) const {
+    if (ch < 0 || ch >= CHANNELS) return -1;
+    const MixerTickSnap *snap = get_last_snap(*this);
+    return snap ? snap->note_row[ch] : get_note_row(ch);
+}
+
+int AudioEngine::get_music_pattern_hp() const {
+    const MixerTickSnap *snap = get_last_snap(*this);
+    return snap ? snap->music_pattern : get_music_pattern();
+}
+
+int AudioEngine::get_music_patterns_played_hp() const {
+    const MixerTickSnap *snap = get_last_snap(*this);
+    return snap ? snap->patterns_played : get_music_patterns_played();
+}
+
+int AudioEngine::get_music_ticks_on_pattern_hp() const {
+    const MixerTickSnap *snap = get_last_snap(*this);
+    return snap ? snap->ticks_on_pattern : get_music_ticks_on_pattern();
+}
+
+bool AudioEngine::is_music_playing_hp() const {
+    const MixerTickSnap *snap = get_last_snap(*this);
+    return snap ? snap->music_playing : is_music_playing();
 }
