@@ -153,6 +153,18 @@ struct AudioEngine
 
     AudioStateSnapshot getState();
     void setState(const AudioStateSnapshot& s);
+
+    // 3DS
+    static constexpr int OUT_BLOCK_SAMPLES = 1024;
+    static constexpr int OUT_BLOCK_RING    = 4;
+    static constexpr int FIFO_SAMPLES      = OUT_BLOCK_SAMPLES * 8;
+
+    int16_t fifo[FIFO_SAMPLES];
+    int fifo_r = 0, fifo_w = 0, fifo_count = 0;
+
+    int16_t out_blocks[OUT_BLOCK_RING][OUT_BLOCK_SAMPLES];
+    int out_block_idx = 0;
+
 };
 
 struct AudioStateSnapshot {

@@ -48,6 +48,9 @@ public:
     
     // --- Graphics ---
     virtual void flipScreen(uint8_t (*framebuffer)[128], uint8_t *palette_map) = 0;
+    virtual void flipScreens(uint8_t (*top)[128], uint8_t (*bottom)[128], uint8_t *palette_map) {
+        flipScreen(bottom, palette_map);
+    }
 
     // --- System ---
     virtual unsigned long getMillis() = 0;

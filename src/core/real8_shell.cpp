@@ -16,6 +16,10 @@
 static const int FONT_WIDTH = 5;
 static const int SCREEN_CENTER_X = 64;
 
+// 3DS: remember the user's skin setting while the in-game menu is open
+static bool s_menuSavedShowSkinValid = false;
+static bool s_menuSavedShowSkin = false;
+
 static int getCenteredX(const char *text)
 {
     int textLenInPixels = (int)strlen(text) * FONT_WIDTH;
@@ -32,6 +36,63 @@ static std::string formatBytes(size_t bytes)
     else
         snprintf(buf, 32, "%.2f MB", bytes / 1024.0 / 1024.0);
     return std::string(buf);
+}
+
+// --------------------------------------------------------------------------
+// 3DS: Pause overlay effect (PICO-8-ish fillp(0xA5A5) checkerboard)
+//
+// The 3DS port uses a dedicated 128x128 buffer for the top screen while the
+// in-game menu is open (STATE_INGAME_MENU). We apply a simple 50% checkerboard
+// darken to that frozen frame to make it feel "paused".
+// --------------------------------------------------------------------------
+void Real8Shell::applyPauseCheckerboardToTop()
+{
+    // Classic checkerboard. fillp(0xA5A5) is essentially alternating pixels,
+    // so parity works well as a lightweight approximation.
+    for (int y = 0; y < 128; ++y) {
+        for (int x = 0; x < 128; ++x) {
+            // Darken half the pixels by forcing them to color 0.
+            // Keep existing black pixels as-is.
+            if (((x ^ y) & 1) == 0) {
+                if ((top_screen_fb[y][x] & 0x0F) != 0) {
+                    top_screen_fb[y][x] = 0;
+                }
+            }
+        }
+    }
+}
+
+static void drawWrapped(IReal8Host* host, Real8VM* vm, const std::string& text, int x, int y, int color, int maxChars, int maxLines)
+{
+    std::string s = text;
+    int line = 0;
+    size_t pos = 0;
+
+    while (pos < s.size() && line < maxLines) {
+        // handle explicit newlines
+        size_t nl = s.find('\n', pos);
+        size_t end = (nl == std::string::npos) ? s.size() : nl;
+
+        while (pos < end && line < maxLines) {
+            size_t len = std::min((size_t)maxChars, end - pos);
+            // try break on space
+            size_t cut = len;
+            if (pos + len < end) {
+                size_t sp = s.rfind(' ', pos + len);
+                if (sp != std::string::npos && sp > pos) cut = sp - pos;
+            }
+            std::string chunk = s.substr(pos, cut);
+            while (!chunk.empty() && chunk[0] == ' ') chunk.erase(chunk.begin());
+
+            vm->gpu.pprint(chunk.c_str(), chunk.size(), x, y + (line * 8), color);
+            line++;
+
+            pos += cut;
+            while (pos < end && s[pos] == ' ') pos++;
+        }
+
+        if (nl != std::string::npos) pos = nl + 1;
+    }
 }
 
 // Helper to extract value by key from a JSON object string
@@ -93,6 +154,7 @@ Real8Shell::Real8Shell(IReal8Host* h, Real8VM* v) : host(h), vm(v)
     
     // Clear preview buffer
     memset(preview_ram, 0, sizeof(preview_ram));
+    memset(top_screen_fb, 0, sizeof(top_screen_fb));
 }
 
 Real8Shell::~Real8Shell()
@@ -108,6 +170,26 @@ void Real8Shell::update()
     // 1. Poll Hardware
     host->pollInput();
     updateAsyncDownloads();
+
+    if (strcmp(host->getPlatform(), "3DS") == 0) {
+
+        if (sysState == STATE_RUNNING) {
+            // Normal gameplay: single framebuffer (both screens show the game)
+            vm->clearAltFramebuffer();
+        }
+        else if (sysState == STATE_INGAME_MENU) {
+            // In-game menu: keep the frozen game frame on the TOP screen
+            // (top_screen_fb is filled when the menu is opened)
+            vm->setAltFramebuffer(top_screen_fb);
+        }
+        else if (sysState != STATE_BROWSER) {
+            // Other menus: top screen uses the dedicated buffer
+            memset(top_screen_fb, 0, sizeof(top_screen_fb));
+            vm->setAltFramebuffer(top_screen_fb);
+        }
+    }
+
+
 
     // 2. Sync Input to VM
     // [FIX] Only perform manual sync if the VM is NOT running.
@@ -164,150 +246,182 @@ void Real8Shell::update()
     }
 
     // 3. State Machine
-    switch (sysState)
-    {
-    case STATE_BOOT:
-        sysState = STATE_BROWSER;
-        break;
+    switch (sysState) {
 
-    case STATE_BROWSER:
-        updateBrowser();
-        renderFileList();
-        vm->show_frame();
-        break;
+        case STATE_BOOT:
+            sysState = STATE_BROWSER;
+            break;
 
-    case STATE_OPTIONS_MENU:
-        updateOptionsMenu();
-        renderOptionsMenu();
-        vm->show_frame();
-        break;
+        case STATE_BROWSER:
+            updateBrowser();
+            renderFileList();
+            vm->show_frame();
+            break;
 
-    case STATE_PREVIEW_VIEW: {
-        const char* platform = host->getPlatform();
-        bool normalMenu =
-            (strcmp(platform, "Windows") == 0) ||
-            (strcmp(platform, "Switch")  == 0);
+        case STATE_OPTIONS_MENU:
+            updateOptionsMenu();
+            renderOptionsMenu();
+            vm->show_frame();
+            break;
 
-        if (targetGame.path != lastPreviewPath) {
-            lastPreviewPath = targetGame.path;
-            loadPreviewForEntry(targetGame, normalMenu, true, true);
-        }
+        case STATE_PREVIEW_VIEW: {
+            const char* platform = host->getPlatform();
+            bool normalMenu =
+                (strcmp(platform, "Windows") == 0) ||
+                (strcmp(platform, "3DS") == 0) ||
+                (strcmp(platform, "Switch")  == 0);
 
-        vm->gpu.cls(0);
-        vm->gpu.setMenuFont(true);
+            if (targetGame.path != lastPreviewPath) {
+                lastPreviewPath = targetGame.path;
+                loadPreviewForEntry(targetGame, normalMenu, true, true);
+            }
 
-        bool previewPending = isSwitchPlatform && isPreviewDownloadActiveFor(targetGame.path);
-        if (has_preview) {
-            drawPreview(0, 0, false);
-        } else if (previewPending) {
-            const char *fetching = "FETCHING PREVIEW";
-            vm->gpu.pprint(fetching, strlen(fetching), getCenteredX(fetching), 60, 11);
-        } else {
-            const char *noprevMsg = "NO PREVIEW DATA";
-            vm->gpu.pprint(noprevMsg, strlen(noprevMsg), getCenteredX(noprevMsg), 60, 8);
-        }
+            vm->gpu.cls(0);
+            vm->gpu.setMenuFont(true);
 
-        vm->gpu.rectfill(0, 118, 128, 128, 1);
-        const char *pressxMsg = isSwitchPlatform ? "PRESS A TO START" : "PRESS X TO START";
-        vm->gpu.pprint(pressxMsg, strlen(pressxMsg), getCenteredX(pressxMsg), 120, 7);    
-        vm->show_frame();
+            bool previewPending = isSwitchPlatform && isPreviewDownloadActiveFor(targetGame.path);
+            if (has_preview) {
+                drawPreview(0, 0, false);
+            } else if (previewPending) {
+                const char *fetching = "FETCHING PREVIEW";
+                vm->gpu.pprint(fetching, strlen(fetching), getCenteredX(fetching), 60, 11);
+            } else {
+                const char *noprevMsg = "NO PREVIEW DATA";
+                vm->gpu.pprint(noprevMsg, strlen(noprevMsg), getCenteredX(noprevMsg), 60, 8);
+            }
 
-        vm->gpu.setMenuFont(false);
-
-        if (vm->btnp(5)) {
-            vm->resetInputState();
-            sysState = STATE_LOADING; // X
-        }
-        if (vm->btnp(0) || vm->btnp(4)) {
-            vm->resetInputState();
-            inputLatch = true;
-            sysState = STATE_BROWSER; // Left or O
-        }
-        break;
-    }
-
-    case STATE_SETTINGS:
-        updateSettingsMenu();
-        renderSettingsMenu();
-        vm->show_frame();
-        break;
-
-    case STATE_STORAGE_INFO:
-        renderStorageView();
-        vm->show_frame();
-        if (vm->btnp(5) || vm->isMenuPressed()) sysState = STATE_SETTINGS;
-        break;
-
-    case STATE_CREDITS:
-        renderCredits();
-        vm->show_frame();
-        if (vm->btnp(5) || vm->btnp(4) || vm->isMenuPressed()) sysState = STATE_SETTINGS;
-        break;
-    case STATE_WIFI_INFO:
-    {
-        NetworkInfo net = host->getNetworkInfo();
-        drawWifiScreen(net.connected ? "CONNECTED" : "DISCONNECTED",
-                       net.ip, net.statusMsg, net.transferProgress);
-        vm->show_frame();
-        if (vm->isMenuPressed() || vm->btnp(4)) sysState = STATE_SETTINGS;
-        break;
-    }
-
-    case STATE_LOADING:
-        updateLoading();
-        break;
-
-    case STATE_RUNNING:
-        if (vm->isMenuPressed()) {
-            vm->gpu.saveState(menu_gfx_backup);
-            vm->gpu.reset();
-            buildInGameMenu();
-            sysState = STATE_INGAME_MENU;
-        }
-        else {
-            vm->runFrame();
+            vm->gpu.rectfill(0, 118, 128, 128, 1);
+            const char *pressxMsg = isSwitchPlatform ? "PRESS A TO START" : "PRESS X TO START";
+            vm->gpu.pprint(pressxMsg, strlen(pressxMsg), getCenteredX(pressxMsg), 120, 7);    
             vm->show_frame();
 
-            // Check if Game requested exit/reset
-            if (vm->exit_requested) {
-                vm->exit_requested = false;
+            vm->gpu.setMenuFont(false);
+
+            if (vm->btnp(5)) {
+                vm->resetInputState();
+                sysState = STATE_LOADING; // X
+            }
+            if (vm->btnp(0) || vm->btnp(4)) {
+                vm->resetInputState();
+                inputLatch = true;
+                sysState = STATE_BROWSER; // Left or O
+            }
+            break;
+        }
+
+        case STATE_SETTINGS:
+            updateSettingsMenu();
+            renderSettingsMenu();
+            vm->show_frame();
+            break;
+
+        case STATE_STORAGE_INFO:
+            renderStorageView();
+            vm->show_frame();
+            if (vm->btnp(5) || vm->isMenuPressed()) sysState = STATE_SETTINGS;
+            break;
+
+        case STATE_CREDITS:
+            renderCredits();
+            vm->show_frame();
+            if (vm->btnp(5) || vm->btnp(4) || vm->isMenuPressed()) sysState = STATE_SETTINGS;
+            break;
+        case STATE_WIFI_INFO:
+        {
+            NetworkInfo net = host->getNetworkInfo();
+            drawWifiScreen(net.connected ? "CONNECTED" : "DISCONNECTED",
+                        net.ip, net.statusMsg, net.transferProgress);
+            vm->show_frame();
+            if (vm->isMenuPressed() || vm->btnp(4)) sysState = STATE_SETTINGS;
+            break;
+        }
+
+        case STATE_LOADING:
+            updateLoading();
+            break;
+
+        case STATE_RUNNING:
+            if (vm->isMenuPressed()) {
+
+                // 3DS: freeze the current game frame to the TOP screen buffer
+                if (strcmp(host->getPlatform(), "3DS") == 0) {
+                    memcpy(top_screen_fb, vm->fb, sizeof(top_screen_fb));
+
+                    // Apply paused overlay effect (checkerboard like fillp(0xA5A5))
+                    applyPauseCheckerboardToTop();
+
+                    vm->setAltFramebuffer(top_screen_fb);
+                }
+
+                vm->gpu.saveState(menu_gfx_backup);
+                vm->gpu.reset();
+                buildInGameMenu();
+                sysState = STATE_INGAME_MENU;
+            }
+            else {
+                vm->runFrame();
+                vm->show_frame();
+
+                // Check if Game requested exit/reset
+                if (vm->exit_requested) {
+                    vm->exit_requested = false;
+                    vm->forceExit();
+                    vm->resetInputState();
+                    sysState = STATE_BROWSER;
+                    refreshGameList();
+                }
+                if (vm->reset_requested) {
+                    // vm->runFrame handles internal Lua reset logic usually,
+                    // but if it propagates up here:
+                    vm->rebootVM();
+                    if (!vm->next_cart_path.empty()) {
+                        targetGame.path = vm->next_cart_path;
+                        sysState = STATE_LOADING;
+                    } else {
+                        // Reload current
+                        sysState = STATE_LOADING;
+                    }
+                    vm->reset_requested = false;
+                }
+            }
+            break;
+
+        case STATE_INGAME_MENU:
+            updateInGameMenu();
+            renderInGameMenu();
+            vm->show_frame();
+            break;
+
+        case STATE_ERROR: {
+            vm->gpu.setMenuFont(true);
+            vm->gpu.cls(0);
+
+            vm->gpu.rectfill(0, 12, 127, 30, 8);
+            vm->gpu.pprint(errorTitle.c_str(), errorTitle.size(), getCenteredX(errorTitle.c_str()), 16, 7);
+
+            std::string detail = shellErrorMsg;
+            if (vm->hasLastError) {
+                // Prefer VM detail if available
+                errorTitle = vm->lastErrorTitle;
+                detail = vm->lastErrorDetail;
+            }
+
+            drawWrapped(host, vm, detail, 4, 38, 7, 24, 8);
+
+            vm->gpu.pprint("B OR X TO GO BACK", 16, getCenteredX("B OR X TO GO BACK"), 118, 6);
+            vm->gpu.setMenuFont(false);
+
+            vm->show_frame();
+
+            if (vm->btnp(4) || vm->btnp(5)) {
                 vm->forceExit();
                 vm->resetInputState();
                 sysState = STATE_BROWSER;
-                refreshGameList();
             }
-            if (vm->reset_requested) {
-                 // vm->runFrame handles internal Lua reset logic usually,
-                 // but if it propagates up here:
-                 vm->rebootVM();
-                 if (!vm->next_cart_path.empty()) {
-                     targetGame.path = vm->next_cart_path;
-                     sysState = STATE_LOADING;
-                 } else {
-                     // Reload current
-                     sysState = STATE_LOADING;
-                 }
-                 vm->reset_requested = false;
-            }
+            break;
         }
-        break;
-
-    case STATE_INGAME_MENU:
-        updateInGameMenu();
-        renderInGameMenu();
-        vm->show_frame();
-        break;
-
-    case STATE_ERROR:
-        renderMessage(errorTitle.c_str(), shellErrorMsg, 8);
-        vm->show_frame();
-        if (vm->btnp(4) || vm->btnp(5)) {
-            vm->forceExit(); // Reset VM state
-            vm->resetInputState();
-            sysState = STATE_BROWSER;
-        }
-        break;
     }
+
 }
 
 void Real8Shell::startAsyncDownload(AsyncDownload &task, const std::string &url, const std::string &path)
@@ -390,7 +504,7 @@ void Real8Shell::updateAsyncDownloads()
 bool Real8Shell::shouldShowPreviewForEntry(const GameEntry &e) const
 {
     if (e.isFolder) return false;
-    return e.isRemote ? vm->showRepoSnap : vm->showLocalSnap;
+    return e.isRemote ? vm->showRepoSnap : true;
 }
 
 bool Real8Shell::loadPreviewForEntry(GameEntry &e, bool normalMenu, bool allowFetch, bool showFetchMsg)
@@ -460,17 +574,16 @@ void Real8Shell::updateBrowser()
     const char* platform = host->getPlatform();
     bool normalMenu =
         (strcmp(platform, "Windows") == 0) ||
+        (strcmp(platform, "3DS") == 0) ||
         (strcmp(platform, "Switch")  == 0);
 
     static bool lastRepoSnapState = vm->showRepoSnap;
-    static bool lastLocalSnapState = vm->showLocalSnap;
-    if (vm->showRepoSnap != lastRepoSnapState || vm->showLocalSnap != lastLocalSnapState) {
+    if (vm->showRepoSnap != lastRepoSnapState) {
         lastFileSelection = -1; // force preview reload when snaps are re-enabled
         if (gameList.empty() || fileSelection < 0 || fileSelection >= (int)gameList.size() || !shouldShowPreviewForEntry(gameList[fileSelection])) {
             clearPreview();
         }
         lastRepoSnapState = vm->showRepoSnap;
-        lastLocalSnapState = vm->showLocalSnap;
     }
 
     // Allow backing out of empty folders instead of trapping the user
@@ -615,9 +728,10 @@ void Real8Shell::updateSettingsMenu()
     const char* platform = host->getPlatform();
     bool normalMenu =
         (strcmp(platform, "Windows") == 0) ||
+        (strcmp(platform, "3DS") == 0) ||
         (strcmp(platform, "Switch")  == 0);
 
-    int menuMax = normalMenu ? 9 : 8; 
+    int menuMax = normalMenu ? 8 : 7; 
 
     if (vm->btnp(2)) { menuSelection--; if (menuSelection < 0) menuSelection = menuMax; }
     if (vm->btnp(3)) { menuSelection++; if (menuSelection > menuMax) menuSelection = 0; }
@@ -629,8 +743,11 @@ void Real8Shell::updateSettingsMenu()
         // Helper lambda to handle Skin Toggle Logic
         auto toggleSkin = [&]() {
             vm->showSkin = !vm->showSkin;
-            if (vm->showSkin) Real8Tools::LoadSkin(vm, host);
-            else host->clearWallpaper();
+            if (vm->showSkin) {
+                Real8Tools::LoadSkin(vm, host);
+            } else if (strcmp(platform, "3DS") != 0) {
+                host->clearWallpaper();
+            }
             changed = true;
         };
 
@@ -638,34 +755,32 @@ void Real8Shell::updateSettingsMenu()
             // Windows indices
             switch (menuSelection) {
             case 0: vm->showRepoSnap = !vm->showRepoSnap; changed = true; break;
-            case 1: vm->showLocalSnap = !vm->showLocalSnap; changed = true; break;
-            case 2: toggleSkin(); break; // [FIXED] Now calls load/clear logic
-            case 3: vm->showRepoGames = !vm->showRepoGames; changed = true; listRefresh = true; break;
-            case 4: vm->stretchScreen = !vm->stretchScreen; changed = true; break;
-            case 5:
+            case 1: toggleSkin(); break; // [FIXED] Now calls load/clear logic
+            case 2: vm->showRepoGames = !vm->showRepoGames; changed = true; listRefresh = true; break;
+            case 3: vm->stretchScreen = !vm->stretchScreen; changed = true; break;
+            case 4:
                 vm->crt_filter = !vm->crt_filter;
                 changed = true;
                 break;
-            case 6:
+            case 5:
                 vm->interpolation = !vm->interpolation;
                 changed = true;
                 break;
-            case 7: sysState = STATE_CREDITS; break;
-            case 8: vm->quit_requested = true; break;
-            case 9: sysState = STATE_BROWSER; break;
+            case 6: sysState = STATE_CREDITS; break;
+            case 7: vm->quit_requested = true; break;
+            case 8: sysState = STATE_BROWSER; break;
             }
         } else {
             // Standard indices
             switch (menuSelection) {
             case 0: sysState = STATE_STORAGE_INFO; break;
             case 1: vm->showRepoSnap = !vm->showRepoSnap; changed = true; break;
-            case 2: vm->showLocalSnap = !vm->showLocalSnap; changed = true; break;
-            case 3: toggleSkin(); break; // [FIXED] Now calls load/clear logic
-            case 4: vm->showRepoGames = !vm->showRepoGames; changed = true; listRefresh = true; break;
-            case 5: vm->stretchScreen = !vm->stretchScreen; changed = true; break;
-            case 6: sysState = STATE_WIFI_INFO; break;
-            case 7: sysState = STATE_CREDITS; break;
-            case 8: sysState = STATE_BROWSER; break;
+            case 2: toggleSkin(); break; // [FIXED] Now calls load/clear logic
+            case 3: vm->showRepoGames = !vm->showRepoGames; changed = true; listRefresh = true; break;
+            case 4: vm->stretchScreen = !vm->stretchScreen; changed = true; break;
+            case 5: sysState = STATE_WIFI_INFO; break;
+            case 6: sysState = STATE_CREDITS; break;
+            case 7: sysState = STATE_BROWSER; break;
             }
         }
         
@@ -722,6 +837,17 @@ void Real8Shell::updateLoading()
         }
     }
 
+    // 3DS: Free network buffers BEFORE we parse/load the cart.
+    if (strcmp(host->getPlatform(), "3DS") == 0) {
+        host->setNetworkActive(false);
+
+        // Release menu/preview caches before parsing/compiling Lua (reduces peak heap).
+        clearPreview();
+        previewCache.clear();
+        pendingPreviewUrl.clear();
+        for (auto &e : gameList) e.cacheData.clear();
+    }
+
     // Keep host menu items in sync by tracking the active game id
     vm->currentCartPath = sourcePath;
     vm->next_cart_path = targetGame.path;
@@ -750,12 +876,25 @@ void Real8Shell::updateLoading()
     
     // Using unique_ptr automatically handles 'delete' when it goes out of scope.
     // This moves the ~17KB payload to the Heap, preventing Stack Overflow.
-    auto gameData = std::make_unique<GameData>();
+    
+    //auto gameData = std::make_unique<GameData>();
+
+    std::unique_ptr<GameData> gameData(new (std::nothrow) GameData());
+    if (!gameData) {
+        errorTitle = "OUT OF MEMORY";
+        shellErrorMsg = "HEAP TOO LOW";
+        sysState = STATE_ERROR;
+        return;
+    }
 
     // Pass the dereferenced pointer (*gameData) to the loader
     bool parseSuccess = Real8CartLoader::LoadFromBuffer(host, fileData, *gameData);
 
     if (parseSuccess) {
+
+        // Free raw cart buffer before Lua compile (peak-memory point).
+        std::vector<uint8_t>().swap(fileData);
+
         // Pass the dereferenced pointer (*gameData) to the VM
         if (vm->loadGame(*gameData)) { 
             host->setNetworkActive(false);
@@ -764,6 +903,7 @@ void Real8Shell::updateLoading()
         } else {
             errorTitle = "VM ERROR";
             shellErrorMsg = "EXECUTION FAILED";
+            // If VM set specifics, STATE_ERROR renderer will show them
             sysState = STATE_ERROR;
         }
     } else {
@@ -824,11 +964,25 @@ void Real8Shell::updateInGameMenu()
         std::string action = inGameOptions[inGameMenuSelection];
 
         if (action == "CONTINUE") {
-            // RESTORE
+
+            if (strcmp(host->getPlatform(), "3DS") == 0 && s_menuSavedShowSkinValid) {
+                vm->showSkin = s_menuSavedShowSkin;
+                s_menuSavedShowSkinValid = false;
+            }
+
             vm->gpu.restoreState(menu_gfx_backup);
             sysState = STATE_RUNNING;
         }
-        else if (action == "RESET GAME") { vm->rebootVM(); sysState = STATE_LOADING; }
+        else if (action == "RESET GAME") {
+            vm->rebootVM();
+
+            if (strcmp(host->getPlatform(), "3DS") == 0 && s_menuSavedShowSkinValid) {
+                vm->showSkin = s_menuSavedShowSkin;
+                s_menuSavedShowSkinValid = false;
+            }
+
+            sysState = STATE_LOADING;
+        }
         else if (action == "SAVE STATE") {
             vm->gpu.restoreState(menu_gfx_backup);
             vm->saveState();
@@ -841,6 +995,10 @@ void Real8Shell::updateInGameMenu()
             if (vm->loadState()) {
                 renderMessage("SYSTEM", "STATE LOADED", 12);
                 vm->show_frame();
+                if (strcmp(host->getPlatform(), "3DS") == 0 && s_menuSavedShowSkinValid) {
+                    vm->showSkin = s_menuSavedShowSkin;
+                    s_menuSavedShowSkinValid = false;
+                }
                 sysState = STATE_RUNNING;
             } else {
                 renderMessage("ERROR", "LOAD FAILED", 8);
@@ -867,6 +1025,12 @@ void Real8Shell::updateInGameMenu()
             vm->forceExit();
             vm->resetInputState();
             inputLatch = true;
+
+            if (strcmp(host->getPlatform(), "3DS") == 0 && s_menuSavedShowSkinValid) {
+                vm->showSkin = s_menuSavedShowSkin;
+                s_menuSavedShowSkinValid = false;
+            }
+
             sysState = STATE_BROWSER;
             refreshGameList();
         }
@@ -883,6 +1047,12 @@ void Real8Shell::updateInGameMenu()
     }
 
     if (vm->btnp(4)) {
+
+        if (strcmp(host->getPlatform(), "3DS") == 0 && s_menuSavedShowSkinValid) {
+            vm->showSkin = s_menuSavedShowSkin;
+            s_menuSavedShowSkinValid = false;
+        }
+
         vm->gpu.restoreState(menu_gfx_backup);
         sysState = STATE_RUNNING;
     }
@@ -895,9 +1065,14 @@ void Real8Shell::updateInGameMenu()
 
 void Real8Shell::renderFileList()
 {
+    bool is3ds = (strcmp(host->getPlatform(), "3DS") == 0);
+    if (is3ds) renderTopPreview3ds();
+    else vm->clearAltFramebuffer();
+
     vm->gpu.setMenuFont(true);
     vm->gpu.cls(0);
-    bool snapEnabled = (!gameList.empty() && fileSelection >= 0 && fileSelection < (int)gameList.size() && shouldShowPreviewForEntry(gameList[fileSelection]));
+    bool snapEnabled = (!is3ds && !gameList.empty() && fileSelection >= 0 && fileSelection < (int)gameList.size() &&
+                        shouldShowPreviewForEntry(gameList[fileSelection]));
     if (snapEnabled && has_preview) drawPreview(0, 0, true);
     else drawStarfield();
 
@@ -918,7 +1093,7 @@ void Real8Shell::renderFileList()
     for (int i = 0; i < items; i++) {
         int idx = page_start + i;
         if (idx >= (int)gameList.size()) break;
-        int y = 18 + (i * 9);
+        int y = (is3ds ? 15 : 18) + (i * 9);
 
         GameEntry &e = gameList[idx];
         bool isSelected = (idx == fileSelection);
@@ -947,6 +1122,19 @@ void Real8Shell::renderFileList()
     }
     */
     vm->gpu.setMenuFont(false);
+}
+
+void Real8Shell::renderTopPreview3ds()
+{
+    memset(top_screen_fb, 0, sizeof(top_screen_fb));
+    if (has_preview) {
+        for (int y = 0; y < 128; ++y) {
+            for (int x = 0; x < 128; ++x) {
+                top_screen_fb[y][x] = preview_ram[y][x] & 0x0F;
+            }
+        }
+    }
+    vm->setAltFramebuffer(top_screen_fb);
 }
 
 void Real8Shell::renderOptionsMenu()
@@ -982,8 +1170,8 @@ void Real8Shell::renderSettingsMenu()
     drawStarfield();
 
     // Graphics primitives accessed via vm->gpu
-    vm->gpu.rectfill(10, 5, 117, 120, 0); 
-    vm->gpu.rect(10, 5, 117, 120, 1);
+    vm->gpu.rectfill(10, 5, 117, 110, 0); 
+    vm->gpu.rect(10, 5, 117, 110, 1);
     vm->gpu.rectfill(10, 5, 117, 14, 1);
 
     const char *title = "SETTINGS";
@@ -993,21 +1181,21 @@ void Real8Shell::renderSettingsMenu()
     const char* platform = host->getPlatform();
     bool normalMenu =
         (strcmp(platform, "Windows") == 0) ||
+        (strcmp(platform, "3DS") == 0) ||
         (strcmp(platform, "Switch")  == 0);
 
     static const char *labels_win[] = {
-        "REPO PREVIEW", "LOCAL PREVIEW", "SHOW SKIN", "REPO GAMES", "STRETCH SCREEN",
+        "REPO PREVIEW", "SHOW SKIN", "REPO GAMES", "STRETCH SCREEN",
         "CRT FILTER", "INTERPOLATION", "CREDITS", "EXIT REAL8", "BACK"};
         
     static const char *labels_std[] = {
-        "STORAGE INFO", "REPO PREVIEW", "LOCAL PREVIEW", "SHOW SKIN", "REPO GAMES", "STRETCH SCREEN", "WIFI STATUS", "CREDITS", "BACK"};
+        "STORAGE INFO", "REPO PREVIEW", "SHOW SKIN", "REPO GAMES", "STRETCH SCREEN", "WIFI STATUS", "CREDITS", "BACK"};
 
     const char **labels = normalMenu ? labels_win : labels_std;
-    int itemCount = normalMenu ? 10 : 9; 
+    int itemCount = normalMenu ? 9 : 8; 
 
     // Settings variables are inside vm structure
     const char *val_repo_snap = vm->showRepoSnap ? "ON" : "OFF";
-    const char *val_local_snap = vm->showLocalSnap ? "ON" : "OFF";
     const char *val_skin = vm->showSkin ? "ON" : "OFF";
     const char *val_stretch = vm->stretchScreen ? "ON" : "OFF";
     const char *val_crt = vm->crt_filter ? "ON" : "OFF";
@@ -1038,21 +1226,19 @@ void Real8Shell::renderSettingsMenu()
         if (normalMenu)
         {
             if (i == 0) drawVal(val_repo_snap, vm->showRepoSnap);
-            if (i == 1) drawVal(val_local_snap, vm->showLocalSnap);
-            if (i == 2) drawVal(val_skin, vm->showSkin);
-            if (i == 3) drawVal(vm->showRepoGames ? "ON" : "OFF", vm->showRepoGames);
-            if (i == 4) drawVal(val_stretch, vm->stretchScreen);
-            if (i == 5) drawVal(val_crt, vm->crt_filter);
-            if (i == 6) drawVal(val_interp, vm->interpolation);
+            if (i == 1) drawVal(val_skin, vm->showSkin);
+            if (i == 2) drawVal(vm->showRepoGames ? "ON" : "OFF", vm->showRepoGames);
+            if (i == 3) drawVal(val_stretch, vm->stretchScreen);
+            if (i == 4) drawVal(val_crt, vm->crt_filter);
+            if (i == 5) drawVal(val_interp, vm->interpolation);
         }
         else
         {
             if (i == 1) drawVal(val_repo_snap, vm->showRepoSnap);
-            if (i == 2) drawVal(val_local_snap, vm->showLocalSnap);
-            if (i == 3) drawVal(val_skin, vm->showSkin);
-            if (i == 4) drawVal(vm->showRepoGames ? "ON" : "OFF", vm->showRepoGames); 
-            if (i == 5) drawVal(val_stretch, vm->stretchScreen);
-            if (i == 6) drawVal(val_wifi, net.connected);
+            if (i == 2) drawVal(val_skin, vm->showSkin);
+            if (i == 3) drawVal(vm->showRepoGames ? "ON" : "OFF", vm->showRepoGames); 
+            if (i == 4) drawVal(val_stretch, vm->stretchScreen);
+            if (i == 5) drawVal(val_wifi, net.connected);
         }
     }
     vm->gpu.setMenuFont(false);
@@ -1062,16 +1248,21 @@ void Real8Shell::renderInGameMenu()
 {
 
     vm->gpu.setMenuFont(true);
-
-    // Note: We do NOT cls here to keep game background
-    vm->gpu.fillp(0xA5A5);
-    vm->gpu.rectfill(0, 0, 128, 128, 0);
-    vm->gpu.fillp(0);
+    bool is3ds = (strcmp(host->getPlatform(), "3DS") == 0);
+    if (is3ds) {
+        vm->gpu.cls(0);
+        drawStarfield();
+    } else {
+        // Keep game background on other platforms
+        vm->gpu.fillp(0xA5A5);
+        vm->gpu.rectfill(0, 0, 128, 128, 0);
+        vm->gpu.fillp(0);
+    }
 
     int mw = 100;
     int mh = (inGameOptions.size() * 11) + 16;
     int mx = (128 - mw) / 2;
-    int my = (128 - mh) / 2;
+    int my = (128 - mh) / 2 - (is3ds ? 8 : 0);
 
     vm->gpu.rectfill(mx, my, mx + mw, my + mh, 0);
     vm->gpu.rect(mx, my, mx + mw, my + mh, 1);

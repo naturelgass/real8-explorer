@@ -44,6 +44,21 @@ struct fix32
     // one as explicit.
     inline fix32(int32_t x)  : m_bits(int32_t(x << 16)) {}
 
+    // On some platforms (eg. devkitARM), int32_t is a typedef to long (not int).
+    // Then an 'int' literal can match fix32(int16_t) and fix32(int32_t) with the
+    // same conversion rank, causing ambiguity. Add exact-match overloads for int.
+    template<typename T,
+            typename std::enable_if<std::is_same<T, int>::value &&
+                                    !std::is_same<T, int32_t>::value &&
+                                    !std::is_same<T, int64_t>::value>::type *...>
+    inline fix32(T x) : m_bits(int32_t(int64_t(x) << 16)) {}
+
+    template<typename T,
+            typename std::enable_if<std::is_same<T, unsigned int>::value &&
+                                    !std::is_same<T, uint32_t>::value &&
+                                    !std::is_same<T, uint64_t>::value>::type *...>
+    inline explicit fix32(T x) : m_bits(int32_t(uint64_t(x) << 16)) {}
+
     inline explicit fix32(uint16_t x) : m_bits(int32_t(x << 16)) {}
     inline explicit fix32(uint32_t x) : m_bits(int32_t(x << 16)) {}
     inline explicit fix32(int64_t x)  : m_bits(int32_t(x << 16)) {}

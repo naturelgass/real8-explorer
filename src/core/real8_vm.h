@@ -53,6 +53,19 @@ public:
   static const int HEIGHT = 128;
   static const int RAW_WIDTH = 128;
 
+
+  bool hasLastError = false;
+  char lastErrorTitle[32] = {0};
+  char lastErrorDetail[256] = {0};
+
+  void clearLastError() {
+    hasLastError = false;
+    lastErrorTitle[0] = 0;
+    lastErrorDetail[0] = 0;
+  }
+
+  void setLastError(const char* title, const char* fmt, ...);
+
   // --------------------------------------------------------------------------
   // CORE LIFECYCLE
   // --------------------------------------------------------------------------
@@ -65,6 +78,9 @@ public:
   
   void runFrame();     
   void show_frame();   
+  void setAltFramebuffer(uint8_t (*alt)[RAW_WIDTH]) { alt_fb = alt; }
+  void clearAltFramebuffer() { alt_fb = nullptr; }
+  bool hasAltFramebuffer() const { return alt_fb != nullptr; }
 
   // --------------------------------------------------------------------------
   // STATE & CONFIG
@@ -85,7 +101,6 @@ public:
   bool showStats = false;
   bool crt_filter = false;
   bool showRepoSnap = true;
-  bool showLocalSnap = true;
   bool showSkin = false;
   bool showRepoGames = false;
   bool stretchScreen = false;
@@ -118,6 +133,7 @@ public:
   uint8_t *ram = nullptr;
   uint8_t *rom = nullptr;
   uint8_t (*fb)[RAW_WIDTH] = nullptr; 
+  uint8_t (*alt_fb)[RAW_WIDTH] = nullptr;
 
   // Aliases
   uint8_t (*gfx)[128] = nullptr;

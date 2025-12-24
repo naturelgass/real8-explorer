@@ -25,7 +25,7 @@ macro(nx_generate_nacp VARname)
 endmacro()
 
 macro(nx_add_nro target)
-    set(oneValueArgs NACP ICON)
+    set(oneValueArgs NACP ICON ROMFS)
     cmake_parse_arguments(ARG "" "${oneValueArgs}" "" ${ARGN})
     set(NRO_OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${target}.nro)
     if(ARG_NACP)
@@ -38,8 +38,13 @@ macro(nx_add_nro target)
     else()
         set(ICON_FLAG "")
     endif()
+    if(ARG_ROMFS)
+        set(ROMFS_FLAG --romfsdir=${ARG_ROMFS})
+    else()
+        set(ROMFS_FLAG "")
+    endif()
     add_custom_command(TARGET ${target} POST_BUILD
-        COMMAND ${ELF2NRO} $<TARGET_FILE:${target}> ${NRO_OUTPUT} ${NACP_FLAG} ${ICON_FLAG}
+        COMMAND ${ELF2NRO} $<TARGET_FILE:${target}> ${NRO_OUTPUT} ${NACP_FLAG} ${ICON_FLAG} ${ROMFS_FLAG}
         COMMENT "Converting ELF to NRO..."
     )
 endmacro()
@@ -109,4 +114,5 @@ target_link_libraries(Real8Switch PRIVATE
 nx_add_nro(Real8Switch 
     NACP ${APP_NACP}
     ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg"
+    ROMFS "${CMAKE_CURRENT_SOURCE_DIR}/romfs"
 )

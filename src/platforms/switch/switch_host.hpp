@@ -35,6 +35,7 @@ private:
     bool curlReady = false;
     bool nifmReady = false;
     bool sdmcMounted = false;
+    bool romfsMounted = false;
     
     uint32_t screenBuffer[128 * 128];
     std::vector<uint32_t> wallBuffer;
@@ -123,6 +124,64 @@ private:
         return written;
     }
 
+    static bool copyFile(const std::string& srcPath, const std::string& dstPath)
+    {
+        FILE* in = fopen(srcPath.c_str(), "rb");
+        if (!in) return false;
+
+        FILE* out = fopen(dstPath.c_str(), "wb");
+        if (!out) {
+            fclose(in);
+            return false;
+        }
+
+        char buf[16 * 1024];
+        bool ok = true;
+        while (true) {
+            size_t n = fread(buf, 1, sizeof(buf), in);
+            if (n > 0) {
+                if (fwrite(buf, 1, n, out) != n) { ok = false; break; }
+            }
+            if (n < sizeof(buf)) {
+                if (ferror(in)) ok = false;
+                break;
+            }
+        }
+
+        fclose(out);
+        fclose(in);
+        return ok;
+    }
+
+    void ensureBundledConfigFiles()
+    {
+        // Destination: sdmc:/real8/config/ (or fallback working dir)
+        fs::path cfgDir = rootPath / "config";
+        fs::create_directories(cfgDir);
+
+        struct Entry { const char* name; const char* romfsPath; };
+        const Entry bundled[] = {
+            {"gamesrepo.txt", "romfs:/real8/config/gamesrepo.txt"},
+            {"wallpaper.png", "romfs:/real8/config/wallpaper.png"},
+        };
+
+        for (const auto& e : bundled) {
+            fs::path dst = cfgDir / e.name;
+            if (fs::exists(dst)) continue;
+
+            if (!romfsMounted) {
+                log("[Switch] ROMFS not mounted; cannot seed %s", e.name);
+                continue;
+            }
+
+            if (copyFile(e.romfsPath, dst.string())) {
+                log("[Switch] Seeded %s from ROMFS", e.name);
+            } else {
+                log("[Switch] Failed to seed %s from %s", e.name, e.romfsPath);
+            }
+        }
+    }
+
 public:
     Real8VM* debugVMRef = nullptr;
     bool crt_filter = false;
@@ -180,6 +239,17 @@ public:
         fs::create_directories(rootPath / "mods");
         fs::create_directories(rootPath / "config");
         fs::create_directories(rootPath / "saves");
+
+        // Mount ROMFS (bundled files inside the NRO)
+        Result romfs_rc = romfsInit();
+        if (R_FAILED(romfs_rc)) {
+            printf("romfsInit failed: 0x%08X\n", romfs_rc);
+        } else {
+            romfsMounted = true;
+        }
+
+        // Copy bundled defaults on first run (if missing)
+        ensureBundledConfigFiles();
     }
 
     ~SwitchHost()
@@ -189,6 +259,7 @@ public:
         socketExit();
         if (nifmReady) nifmExit();
         if (sdmcMounted) fsdevUnmountDevice("sdmc");
+        if (romfsMounted) romfsExit();
 
         if (audioDevice) SDL_CloseAudioDevice(audioDevice);
         if (wallpaperTex) SDL_DestroyTexture(wallpaperTex);

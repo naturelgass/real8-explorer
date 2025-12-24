@@ -502,8 +502,6 @@ void AudioEngine::generateSamples(int16_t* out_buffer, int count) {
         }
 
         // --- 3. HARDWARE DISTORTION ---
-        // Changed hw_state -> hwState (Common convention, adjust if error persists)
-        // If this still fails, check Real8VM definition. Assuming `hwState` for now.
         if (vm->hwState.distort > 0) {
              float dist_val = mixed_sample * 0.5f; 
              int16_t d = (int16_t)(dist_val * 32767.0f);
@@ -522,14 +520,46 @@ void AudioEngine::update(IReal8Host *host) {
     if (!host) return;
 
     samples_accumulator += (double)SAMPLE_RATE / 60.0;
-    int count = (int)samples_accumulator;
-    samples_accumulator -= count;
+    int gen = (int)samples_accumulator;
+    samples_accumulator -= gen;
 
-    if (count > 2048) count = 2048; 
+    if (gen <= 0) return;
+    if (gen > 2048) gen = 2048;
 
-    generateSamples(buffer, count);
+    // Generate into scratch
+    generateSamples(buffer, gen);
 
-    host->pushAudio(buffer, count);
+    // FIFO write
+    auto fifo_write = [&](const int16_t* in, int n) {
+        for (int i = 0; i < n; i++) {
+            if (fifo_count >= FIFO_SAMPLES) break; // drop if overflow
+            fifo[fifo_w] = in[i];
+            fifo_w = (fifo_w + 1) % FIFO_SAMPLES;
+            fifo_count++;
+        }
+    };
+
+    auto fifo_read_block = [&](int16_t* out, int n) -> bool {
+        if (fifo_count < n) return false;
+        for (int i = 0; i < n; i++) {
+            out[i] = fifo[fifo_r];
+            fifo_r = (fifo_r + 1) % FIFO_SAMPLES;
+            fifo_count--;
+        }
+        return true;
+    };
+
+    fifo_write(buffer, gen);
+
+    // Push in stable, fixed blocks
+    while (fifo_count >= OUT_BLOCK_SAMPLES) {
+        int16_t* out = out_blocks[out_block_idx];
+        if (!fifo_read_block(out, OUT_BLOCK_SAMPLES)) break;
+
+        host->pushAudio(out, OUT_BLOCK_SAMPLES);
+
+        out_block_idx = (out_block_idx + 1) % OUT_BLOCK_RING;
+    }
 }
 
 AudioStateSnapshot AudioEngine::getState() {

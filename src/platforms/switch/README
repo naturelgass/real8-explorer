@@ -1,68 +1,54 @@
-#Install devkitProUpdater-3.0.3.exe
-#Run C:\msys64\msys2.exe
+# Install devkitProUpdater
+# Run C:\msys64\msys2.exe
 
-# 1) (Optional but often helps) reset pacman's keyring
+# --- (Optional but often helps) reset pacman's keyring ---
+
 rm -rf /etc/pacman.d/gnupg
 pacman-key --init
 pacman-key --populate
 
-# 2) Import + locally trust the devkitPro keys
+# --- Import + locally trust the devkitPro keys ---
+
 pacman-key --recv-keys 62C7609ADA219C60 F7FD5492264BB9D0 --keyserver keyserver.ubuntu.com
 pacman-key --lsign-key 62C7609ADA219C60
 pacman-key --lsign-key F7FD5492264BB9D0
 
-# 3) Delete the now-"bad" repo DB files and re-sync
+# Delete the now-"bad" repo DB files and re-sync
 rm -f /var/lib/pacman/sync/dkp-libs* /var/lib/pacman/sync/dkp-windows*
 
-# ---------------------------
+# --- switch-sdl2 ---
 
 pacman -Syu
 pacman -S --needed switch-sdl2
 
-# ---------------------------
+# --- switch-zlib ---
 
 pacman -Syu
 pacman -S --needed switch-zlib
 
-# ---------------------------
+# --- switch-curl ---
 
 pacman -Syu
 pacman -S --needed switch-curl
 
-# ---------------------------
-
 # toolchain/cmake bits that provide dkp-toolchain-common + Switch CMake files
+
 pacman -Syu
 pacman -S --needed dkp-cmake-common-utils devkita64-cmake switch-cmake dkp-toolchain-vars devkit-env
 
-# ---------------------------
-# Optional if needed
+# -- (Optional if needed) ---
 pacman -S --needed make
-
-# ---------------------------
 
 # Navigate to Build folder /switch/build/
 
-# And then in the Terminal:
-# 1. Update the variable to point to the REAL location
+# --- Update the variable to point to the REAL location ---
 export DEVKITPRO=/c/devkitPro
 
-# 2. Clear the old broken configuration
+# --- Clear the old broken configuration  ---
 rm -rf *
 
-# 3. Run CMake using the physical path
+# --- Run CMake using the physical path  ---
 cmake -DCMAKE_TOOLCHAIN_FILE=/c/devkitPro/cmake/Switch.cmake -G "Unix Makefiles" ..
 
-# 4. Compile
+# --- Compile ---
 make
-
-Summary of Next Steps
-Install devkitPro on your PC.
-
-Organize Assets: Put your games.json and .p8 files into a clean assets folder in your project root.
-
-Adapt the Host: Copy your windows_host.hpp to switch_host.hpp.
-
-Change the paths: romfs:/games.json instead of ./data/games.json.
-
-The rest (Audio/Graphics) remains 100% identical to Windows because of SDL2.

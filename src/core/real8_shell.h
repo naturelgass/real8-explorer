@@ -46,6 +46,9 @@ public:
     void update();
     void refreshGameList(std::string selectPath = "");
 
+    // 3DS: visual effect when the in-game pause/menu is open (PICO-8 style fillp checkerboard)
+    void applyPauseCheckerboardToTop();
+
 private:
     IReal8Host* host;
     Real8VM* vm; 
@@ -78,6 +81,7 @@ private:
     void loadPreview(const uint8_t *data, size_t size);
     void clearPreview();
     void drawPreview(int x, int y, bool dim);
+    void renderTopPreview3ds();
 
     // --- Data Management ---
     std::string current_vfs_path = "";
@@ -90,6 +94,7 @@ private:
     // Added Preview RAM
     uint8_t preview_ram[128][128];
     bool has_preview = false;
+    uint8_t top_screen_fb[128][128];
 
     // Selection State
     int fileSelection = 0;

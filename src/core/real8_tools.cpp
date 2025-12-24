@@ -109,6 +109,7 @@ void Real8Tools::LoadSettings(Real8VM* vm, IReal8Host* host)
 {
     // Libretro handles settings via Core Options (retro_variables), not files.
     if (strcmp(host->getPlatform(), "Libretro") == 0) return;
+    const bool is3ds = (strcmp(host->getPlatform(), "3DS") == 0);
 
     if (!vm || !host) return;
     std::vector<uint8_t> data = host->loadFile("/config.dat");
@@ -118,7 +119,6 @@ void Real8Tools::LoadSettings(Real8VM* vm, IReal8Host* host)
         vm->crt_filter = false;
         vm->showStats = false;
         vm->interpolation = false;
-        vm->showLocalSnap = true;
         vm->showRepoGames = true;
         vm->stretchScreen = false;
         SaveSettings(vm, host);
@@ -144,7 +144,6 @@ void Real8Tools::LoadSettings(Real8VM* vm, IReal8Host* host)
     if (data.size() > offset) {
         uint8_t flags2 = data[offset];
         vm->showRepoGames = (flags2 & (1 << 0));
-        vm->showLocalSnap = (flags2 & (1 << 1));
         vm->stretchScreen = (flags2 & (1 << 2));
         offset++;
     }
@@ -172,7 +171,7 @@ void Real8Tools::LoadSettings(Real8VM* vm, IReal8Host* host)
         vm->volume_sfx = data[offset++];
     }
 
-    if (vm->showSkin) { LoadSkin(vm, host); }
+    if (vm->showSkin || is3ds) { LoadSkin(vm, host); }
 }
 
 void Real8Tools::SaveSettings(Real8VM* vm, IReal8Host* host)
@@ -202,7 +201,6 @@ void Real8Tools::SaveSettings(Real8VM* vm, IReal8Host* host)
 
     uint8_t flags2 = 0;
     if (vm->showRepoGames) flags2 |= (1 << 0);
-    if (vm->showLocalSnap) flags2 |= (1 << 1);
     if (vm->stretchScreen) flags2 |= (1 << 2);
     buffer.push_back(flags2);
 

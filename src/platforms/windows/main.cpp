@@ -26,7 +26,6 @@ enum MenuID
     ID_SET_INPUT_CONFIG = 120,
     ID_SET_REPO_GAMES,
     ID_SET_SHOW_REPO_SNAP,
-    ID_SET_SHOW_LOCAL_SNAP,
     ID_SET_SHOW_FPS,
     ID_SET_SHOW_SKIN,
     ID_SET_MUSIC,
@@ -99,7 +98,6 @@ void UpdateMenuState(HMENU hMenu, Real8VM *vm, SDL_Window *window, WindowsHost* 
     CheckMenuItem(hMenu, ID_SET_SHOW_SKIN, vm->showSkin ? MF_CHECKED : MF_UNCHECKED);
     CheckMenuItem(hMenu, ID_SET_CRT_FILTER, vm->crt_filter ? MF_CHECKED : MF_UNCHECKED);
     CheckMenuItem(hMenu, ID_SET_SHOW_REPO_SNAP, vm->showRepoSnap ? MF_CHECKED : MF_UNCHECKED);
-    CheckMenuItem(hMenu, ID_SET_SHOW_LOCAL_SNAP, vm->showLocalSnap ? MF_CHECKED : MF_UNCHECKED);
     CheckMenuItem(hMenu, ID_SET_STRETCH_SCREEN, vm->stretchScreen ? MF_CHECKED : MF_UNCHECKED);
     CheckMenuItem(hMenu, ID_SET_MUSIC, (vm->volume_music > 0) ? MF_CHECKED : MF_UNCHECKED);
     CheckMenuItem(hMenu, ID_SET_SFX,   (vm->volume_sfx > 0)   ? MF_CHECKED : MF_UNCHECKED);
@@ -246,7 +244,6 @@ int main(int argc, char *argv[])
     AppendMenu(hSetMenu, MF_SEPARATOR, 0, NULL);
     AppendMenu(hSetMenu, MF_STRING, ID_SET_REPO_GAMES, "Show Repo Games");
     AppendMenu(hSetMenu, MF_STRING, ID_SET_SHOW_REPO_SNAP, "Show Repo Snap");
-    AppendMenu(hSetMenu, MF_STRING, ID_SET_SHOW_LOCAL_SNAP, "Show Local Snap");
     AppendMenu(hSetMenu, MF_STRING, ID_SET_SHOW_FPS, "Show FPS");
     AppendMenu(hSetMenu, MF_STRING, ID_SET_SHOW_SKIN, "Show Skin");
     AppendMenu(hSetMenu, MF_STRING, ID_SET_STRETCH_SCREEN, "Stretch Screen");
@@ -425,11 +422,6 @@ int main(int argc, char *argv[])
                                 UpdateMenuState(hMenuBar, vm, window, host); 
                                 break;
 
-                            case ID_SET_SHOW_LOCAL_SNAP: 
-                                vm->showLocalSnap = !vm->showLocalSnap; 
-                                Real8Tools::SaveSettings(vm, host);     // FIXED
-                                UpdateMenuState(hMenuBar, vm, window, host); 
-                                break;
 
                             case ID_SET_SHOW_FPS: 
                                 vm->showStats = !vm->showStats; 

@@ -53,6 +53,20 @@ static uint8_t find_closest_p8_color(uint8_t r, uint8_t g, uint8_t b)
 // ERROR HANDLING (Using Debugger)
 // --------------------------------------------------------------------------
 
+void Real8VM::setLastError(const char* title, const char* fmt, ...) {
+    hasLastError = true;
+
+    snprintf(lastErrorTitle, sizeof(lastErrorTitle), "%s", title ? title : "VM ERROR");
+
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(lastErrorDetail, sizeof(lastErrorDetail), fmt ? fmt : "", args);
+    va_end(args);
+
+    // Also log it
+    if (host) host->log("[VM] %s: %s", lastErrorTitle, lastErrorDetail);
+}
+
 static int traceback(lua_State *L) {
     lua_getglobal(L, "__pico8_vm_ptr");
     Real8VM *vm = (Real8VM *)lua_touserdata(L, -1);
@@ -197,18 +211,42 @@ void Real8VM::rebootVM()
     reset_requested = false;
     next_cart_path = "";
 
+    // Run lib loading + API registration in protected calls.
     if (L) {
-        luaL_openlibs(L);
-        lua_pushlightuserdata(L, (void *)this);
+        lua_pushcfunction(L, [](lua_State* L_) -> int {
+            luaL_openlibs(L_);
+            return 0;
+        });
+        if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+            const char* err = lua_tostring(L, -1);
+            if (host) host->log("[VM] ERROR: luaL_openlibs failed: %s", err ? err : "(no message)");
+            lua_pop(L, 1);
+            lua_close(L);
+            L = nullptr;
+        }
+    }
+
+    if (L) {
+        lua_pushlightuserdata(L, (void*)this);
         lua_setglobal(L, "__pico8_vm_ptr");
-        
-        // Debug Hook
         lua_sethook(L, Real8Debugger::luaHook, LUA_MASKLINE, 0);
 
-        // Register API
-        register_pico8_api(L);
-    } else {
-        host->log("[ERROR] Failed to recreate Lua state!");
+        lua_pushcfunction(L, [](lua_State* L_) -> int {
+            register_pico8_api(L_);
+            return 0;
+        });
+        if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+            const char* err = lua_tostring(L, -1);
+            if (host) host->log("[VM] ERROR: register_pico8_api failed: %s", err ? err : "(no message)");
+            lua_pop(L, 1);
+            lua_close(L);
+            L = nullptr;
+        }
+    }
+
+    if (!L) {
+        if (host) host->log("[ERROR] Failed to recreate Lua state!");
+        // Continue resetting non-Lua state so the shell can show an error instead of exploding.
     }
 
     // Reset Core State
@@ -527,9 +565,18 @@ void Real8VM::runFrame()
     mouse_wheel_event = 0;
 }
 
+/*
 bool Real8VM::loadGame(const GameData& game)
 {
     rebootVM();
+
+    // 3DS can get very tight on heap during cart loads (PNG decode + parse + Lua compile).
+    // If Lua state creation fails, gracefully abort instead of crashing when calling Lua API.
+    if (!L) {
+        if (host) host->log("[VM] ERROR: Failed to create Lua state (out of memory?)");
+        return false;
+    }
+
     if (ram) {
         memcpy(ram + 0x0000, game.gfx, 0x2000);
         memcpy(ram + 0x2000, game.map, 0x1000);
@@ -590,6 +637,86 @@ bool Real8VM::loadGame(const GameData& game)
     // Mark the entire screen as dirty so the host renders the first frame immediately
     mark_dirty_rect(0, 0, 128, 128);
     
+    return true;
+}
+*/
+
+bool Real8VM::loadGame(const GameData& game)
+{
+    clearLastError();
+    rebootVM();
+
+    if (!L) {
+        setLastError("VM INIT", "Failed to create Lua state (OOM or init failure)");
+        return false;
+    }
+
+    if (ram) {
+        memcpy(ram + 0x0000, game.gfx, 0x2000);
+        memcpy(ram + 0x2000, game.map, 0x1000);
+        memcpy(ram + 0x3000, game.sprite_flags, 0x100);
+        memcpy(ram + 0x3100, game.music, 0x100);
+        memcpy(ram + 0x3200, game.sfx, 0x1100);
+        if (rom) memcpy(rom, ram, 0x8000);
+        gpu.pal_reset(); 
+    }
+
+    if (host) host->pushAudio(nullptr, 0);
+
+    auto applyMods = [&]() {
+        if (!host) return;
+        std::string modCartPath;
+        if (!currentCartPath.empty()) modCartPath = currentCartPath;
+        else if (!game.cart_id.empty()) modCartPath = game.cart_id;
+        else modCartPath = currentGameId;
+        Real8Tools::ApplyMods(this, host, modCartPath);
+    };
+
+    // Install traceback handler for better error messages
+    lua_pushcfunction(L, traceback);
+    int errHandler = lua_gettop(L);
+
+    if (!game.lua_code.empty()) {
+        debug.setSource(game.lua_code);
+
+        if (luaL_loadbuffer(L, game.lua_code.c_str(), game.lua_code.length(), "cart") != LUA_OK) {
+            const char* err = lua_tostring(L, -1);
+            setLastError("LUA PARSE", "%s", err ? err : "(unknown parse error)");
+            lua_pop(L, 2); // error + traceback
+            return false;
+        }
+
+        // pcall with traceback
+        if (lua_pcall(L, 0, 0, errHandler) != LUA_OK) {
+            const char* err = lua_tostring(L, -1);
+            if (err && strstr(err, "HALT")) { lua_pop(L, 2); return true; }
+            setLastError("LUA RUNTIME", "%s", err ? err : "(unknown runtime error)");
+            lua_pop(L, 2); // error + traceback
+            return false;
+        }
+
+        applyMods();
+
+        // _init (make it fatal so you see it immediately)
+        lua_getglobal(L, "_init");
+        if (lua_isfunction(L, -1)) {
+            if (lua_pcall(L, 0, 0, errHandler) != LUA_OK) {
+                const char* err = lua_tostring(L, -1);
+                setLastError("_INIT ERROR", "%s", err ? err : "(unknown _init error)");
+                lua_pop(L, 2); // error + traceback
+                return false;
+            }
+        } else {
+            lua_pop(L, 1);
+        }
+    } else {
+        applyMods();
+    }
+
+    lua_pop(L, 1); // pop traceback handler
+
+    detectCartFPS();
+    mark_dirty_rect(0, 0, 128, 128);
     return true;
 }
 
@@ -728,17 +855,23 @@ void Real8VM::show_frame()
     // --------------------------------------------------------
     // STANDALONE / OTHER PATH (Existing Logic)
     // --------------------------------------------------------
+
     if (!host) return;
-    uint8_t final_palette[16];
-    if (ram) {
-        for (int i = 0; i < 16; i++) final_palette[i] = ram[0x5F10 + i];
-    } else {
-        gpu.get_screen_palette(final_palette);
+
+    // If nothing drew since last present, don’t re-upload/re-render.
+    if (dirty_x1 < 0 || dirty_y1 < 0) {
+        return;
     }
-    host->flipScreen(fb, final_palette);
-    
-    // Reset dirty rects
+
+    uint8_t final_palette[16];
+    if (ram) for (int i=0;i<16;i++) final_palette[i] = ram[0x5F10+i];
+    else gpu.get_screen_palette(final_palette);
+
+    if (alt_fb) host->flipScreens(alt_fb, fb, final_palette);
+    else        host->flipScreen(fb, final_palette);
+
     dirty_x0 = WIDTH; dirty_y0 = HEIGHT; dirty_x1 = -1; dirty_y1 = -1;
+
 }
 
 void Real8VM::log(LogChannel ch, const char* fmt, ...)
