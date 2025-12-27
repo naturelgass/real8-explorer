@@ -22,3 +22,23 @@ REAL-8 Explorer provides a native SDL-based for window (libnx for Switch), menus
 ## Scope
 
 This README describes the Windows host only. Core VM, Shell, and cross-platform features live elsewhere in the REAL-8 Browser codebase.
+
+## PSVita build
+
+Prereqs:
+- VitaSDK installed and `VITASDK` set
+- vita2dlib available in your VitaSDK toolchain
+
+Build (from repo root):
+```
+cd src/platforms/vita
+make
+```
+
+Output:
+- `REAL8.vpk` (install with VitaShell)
+- `eboot.bin` (inside the build output)
+
+Carts:
+- Copy `.p8` or `.png` carts to `ux0:/data/real8/`
+- Saves/config live under `ux0:/data/real8/saves` and `ux0:/data/real8/config`

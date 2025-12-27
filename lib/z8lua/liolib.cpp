@@ -348,16 +348,18 @@ static int io_lines (lua_State *L) {
 
 
 static int read_number (lua_State *L, FILE *f) {
-  lua_Number d;
-  if (fscanf(f, LUA_NUMBER_SCAN, &d) == 1) {
+  double tmp;
+  if (fscanf(f, LUA_NUMBER_SCAN, &tmp) == 1) {
+    lua_Number d = (lua_Number)tmp;   // if this doesn't compile, use your fix32 "from double" helper here
     lua_pushnumber(L, d);
     return 1;
   }
   else {
-   lua_pushnil(L);  /* "result" to be removed */
-   return 0;  /* read fails */
+    lua_pushnil(L);
+    return 0;
   }
 }
+
 
 
 static int test_eof (lua_State *L, FILE *f) {
@@ -517,8 +519,9 @@ static int g_write (lua_State *L, FILE *f, int arg) {
   for (; nargs--; arg++) {
     if (lua_type(L, arg) == LUA_TNUMBER) {
       /* optimization: could be done exactly as for strings */
-      status = status &&
-          fprintf(f, LUA_NUMBER_FMT, lua_tonumber(L, arg)) > 0;
+      double out = (double)lua_tonumber(L, arg);
+      status = status && (fprintf(f, LUA_NUMBER_FMT, out) > 0);
+
     }
     else {
       size_t l;

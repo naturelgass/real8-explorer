@@ -29,7 +29,7 @@
 #endif
 
 
-#if !defined(LUA_ANSI) && defined(_WIN32) && !defined(_WIN32_WCE)
+#if !defined(LUA_ANSI) && defined(_WIN32) && !defined(_WIN32_WCE) && !defined(NXDK)
 #define LUA_WIN		/* enable goodies for regular Windows platforms */
 #endif
 
@@ -401,7 +401,7 @@
 */
 #define LUA_NUMBER_SCAN		"%lf"
 #define LUA_NUMBER_FMT		"%.14g"
-#define lua_number2str(s,n)	sprintf((s), LUA_NUMBER_FMT, (n))
+#define lua_number2str(s,n) sprintf((s), LUA_NUMBER_FMT, (double)(n))
 #define LUAI_MAXNUMBER2STR	32 /* 16 digits, sign, point, and \0 */
 
 

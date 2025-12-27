@@ -26,6 +26,14 @@ static int getCenteredX(const char *text)
     return SCREEN_CENTER_X - (textLenInPixels / 2);
 }
 
+static bool isRepoSupportedPlatform(const char *platform)
+{
+    return (strcmp(platform, "Windows") == 0) ||
+        (strcmp(platform, "Linux") == 0) ||
+        (strcmp(platform, "Switch") == 0) ||
+        (strcmp(platform, "3DS") == 0);
+}
+
 static std::string formatBytes(size_t bytes)
 {
     char buf[32];
@@ -266,10 +274,8 @@ void Real8Shell::update()
 
         case STATE_PREVIEW_VIEW: {
             const char* platform = host->getPlatform();
-            bool normalMenu =
-                (strcmp(platform, "Windows") == 0) ||
-                (strcmp(platform, "3DS") == 0) ||
-                (strcmp(platform, "Switch")  == 0);
+            bool RepoSupport = isRepoSupportedPlatform(platform);
+            bool normalMenu = RepoSupport;
 
             if (targetGame.path != lastPreviewPath) {
                 lastPreviewPath = targetGame.path;
@@ -504,7 +510,9 @@ void Real8Shell::updateAsyncDownloads()
 bool Real8Shell::shouldShowPreviewForEntry(const GameEntry &e) const
 {
     if (e.isFolder) return false;
-    return e.isRemote ? vm->showRepoSnap : true;
+    const char* platform = host->getPlatform();
+    bool RepoSupport = isRepoSupportedPlatform(platform);
+    return e.isRemote ? (RepoSupport && vm->showRepoSnap) : true;
 }
 
 bool Real8Shell::loadPreviewForEntry(GameEntry &e, bool normalMenu, bool allowFetch, bool showFetchMsg)
@@ -572,18 +580,17 @@ bool Real8Shell::loadPreviewForEntry(GameEntry &e, bool normalMenu, bool allowFe
 void Real8Shell::updateBrowser()
 {
     const char* platform = host->getPlatform();
-    bool normalMenu =
-        (strcmp(platform, "Windows") == 0) ||
-        (strcmp(platform, "3DS") == 0) ||
-        (strcmp(platform, "Switch")  == 0);
+    bool RepoSupport = isRepoSupportedPlatform(platform);
+    bool normalMenu = RepoSupport;
 
-    static bool lastRepoSnapState = vm->showRepoSnap;
-    if (vm->showRepoSnap != lastRepoSnapState) {
+    bool repoSnapEnabled = RepoSupport && vm->showRepoSnap;
+    static bool lastRepoSnapState = repoSnapEnabled;
+    if (repoSnapEnabled != lastRepoSnapState) {
         lastFileSelection = -1; // force preview reload when snaps are re-enabled
         if (gameList.empty() || fileSelection < 0 || fileSelection >= (int)gameList.size() || !shouldShowPreviewForEntry(gameList[fileSelection])) {
             clearPreview();
         }
-        lastRepoSnapState = vm->showRepoSnap;
+        lastRepoSnapState = repoSnapEnabled;
     }
 
     // Allow backing out of empty folders instead of trapping the user
@@ -726,12 +733,11 @@ void Real8Shell::updateOptionsMenu()
 void Real8Shell::updateSettingsMenu()
 {   
     const char* platform = host->getPlatform();
-    bool normalMenu =
-        (strcmp(platform, "Windows") == 0) ||
-        (strcmp(platform, "3DS") == 0) ||
-        (strcmp(platform, "Switch")  == 0);
+    bool RepoSupport = isRepoSupportedPlatform(platform);
+    int menuMax = RepoSupport ? 8 : 6;
 
-    int menuMax = normalMenu ? 8 : 7; 
+    if (menuSelection > menuMax) menuSelection = menuMax;
+    if (menuSelection < 0) menuSelection = 0;
 
     if (vm->btnp(2)) { menuSelection--; if (menuSelection < 0) menuSelection = menuMax; }
     if (vm->btnp(3)) { menuSelection++; if (menuSelection > menuMax) menuSelection = 0; }
@@ -751,8 +757,7 @@ void Real8Shell::updateSettingsMenu()
             changed = true;
         };
 
-        if (normalMenu) {
-            // Windows indices
+        if (RepoSupport) {
             switch (menuSelection) {
             case 0: vm->showRepoSnap = !vm->showRepoSnap; changed = true; break;
             case 1: toggleSkin(); break; // [FIXED] Now calls load/clear logic
@@ -771,16 +776,20 @@ void Real8Shell::updateSettingsMenu()
             case 8: sysState = STATE_BROWSER; break;
             }
         } else {
-            // Standard indices
             switch (menuSelection) {
-            case 0: sysState = STATE_STORAGE_INFO; break;
-            case 1: vm->showRepoSnap = !vm->showRepoSnap; changed = true; break;
-            case 2: toggleSkin(); break; // [FIXED] Now calls load/clear logic
-            case 3: vm->showRepoGames = !vm->showRepoGames; changed = true; listRefresh = true; break;
-            case 4: vm->stretchScreen = !vm->stretchScreen; changed = true; break;
-            case 5: sysState = STATE_WIFI_INFO; break;
-            case 6: sysState = STATE_CREDITS; break;
-            case 7: sysState = STATE_BROWSER; break;
+            case 0: toggleSkin(); break;
+            case 1: vm->stretchScreen = !vm->stretchScreen; changed = true; break;
+            case 2:
+                vm->crt_filter = !vm->crt_filter;
+                changed = true;
+                break;
+            case 3:
+                vm->interpolation = !vm->interpolation;
+                changed = true;
+                break;
+            case 4: sysState = STATE_CREDITS; break;
+            case 5: vm->quit_requested = true; break;
+            case 6: sysState = STATE_BROWSER; break;
             }
         }
         
@@ -1179,20 +1188,18 @@ void Real8Shell::renderSettingsMenu()
     vm->gpu.pprint(title, (int)strlen(title), getCenteredX(title), 7, 6);
 
     const char* platform = host->getPlatform();
-    bool normalMenu =
-        (strcmp(platform, "Windows") == 0) ||
-        (strcmp(platform, "3DS") == 0) ||
-        (strcmp(platform, "Switch")  == 0);
+    bool RepoSupport = isRepoSupportedPlatform(platform);
 
-    static const char *labels_win[] = {
+    static const char *labels_repo[] = {
         "REPO PREVIEW", "SHOW SKIN", "REPO GAMES", "STRETCH SCREEN",
         "CRT FILTER", "INTERPOLATION", "CREDITS", "EXIT REAL8", "BACK"};
-        
-    static const char *labels_std[] = {
-        "STORAGE INFO", "REPO PREVIEW", "SHOW SKIN", "REPO GAMES", "STRETCH SCREEN", "WIFI STATUS", "CREDITS", "BACK"};
-
-    const char **labels = normalMenu ? labels_win : labels_std;
-    int itemCount = normalMenu ? 9 : 8; 
+    static const char *labels_no_repo[] = {
+        "SHOW SKIN", "STRETCH SCREEN", "CRT FILTER", "INTERPOLATION",
+        "CREDITS", "EXIT REAL8", "BACK"};
+    const char **labels = RepoSupport ? labels_repo : labels_no_repo;
+    const int itemCount = RepoSupport ?
+        (int)(sizeof(labels_repo) / sizeof(labels_repo[0])) :
+        (int)(sizeof(labels_no_repo) / sizeof(labels_no_repo[0]));
 
     // Settings variables are inside vm structure
     const char *val_repo_snap = vm->showRepoSnap ? "ON" : "OFF";
@@ -1200,12 +1207,6 @@ void Real8Shell::renderSettingsMenu()
     const char *val_stretch = vm->stretchScreen ? "ON" : "OFF";
     const char *val_crt = vm->crt_filter ? "ON" : "OFF";
     const char *val_interp = vm->interpolation ? "ON" : "OFF";
-    NetworkInfo net = {};
-    const char *val_wifi = nullptr;
-    if (!normalMenu) {
-        net = host->getNetworkInfo();
-        val_wifi = net.connected ? "CONN" : "DISC";
-    }
 
     for (int i = 0; i < itemCount; i++)
     {
@@ -1223,22 +1224,18 @@ void Real8Shell::renderSettingsMenu()
             vm->gpu.pprint(txt, (int)strlen(txt), 95, y, active ? 11 : 8);
         };
 
-        if (normalMenu)
-        {
+        if (RepoSupport) {
             if (i == 0) drawVal(val_repo_snap, vm->showRepoSnap);
             if (i == 1) drawVal(val_skin, vm->showSkin);
             if (i == 2) drawVal(vm->showRepoGames ? "ON" : "OFF", vm->showRepoGames);
             if (i == 3) drawVal(val_stretch, vm->stretchScreen);
             if (i == 4) drawVal(val_crt, vm->crt_filter);
             if (i == 5) drawVal(val_interp, vm->interpolation);
-        }
-        else
-        {
-            if (i == 1) drawVal(val_repo_snap, vm->showRepoSnap);
-            if (i == 2) drawVal(val_skin, vm->showSkin);
-            if (i == 3) drawVal(vm->showRepoGames ? "ON" : "OFF", vm->showRepoGames); 
-            if (i == 4) drawVal(val_stretch, vm->stretchScreen);
-            if (i == 5) drawVal(val_wifi, net.connected);
+        } else {
+            if (i == 0) drawVal(val_skin, vm->showSkin);
+            if (i == 1) drawVal(val_stretch, vm->stretchScreen);
+            if (i == 2) drawVal(val_crt, vm->crt_filter);
+            if (i == 3) drawVal(val_interp, vm->interpolation);
         }
     }
     vm->gpu.setMenuFont(false);
@@ -1395,6 +1392,8 @@ void Real8Shell::refreshGameList(std::string selectPath)
 void Real8Shell::parseJsonGames()
 {
     vfs.clear();
+    const char* platform = host->getPlatform();
+    bool RepoSupport = isRepoSupportedPlatform(platform);
 
     // 1. Local JSON (always load so local lists remain visible)
     std::vector<uint8_t> localData = host->loadFile("/gameslist.json");
@@ -1403,7 +1402,7 @@ void Real8Shell::parseJsonGames()
     }
 
     // 2. Remote JSON (Repo) — only when repo games are enabled
-    if (vm->showRepoGames) {
+    if (RepoSupport && vm->showRepoGames) {
         const char *repoPath = "/repo_games.json";
         if (isSwitchPlatform) {
             std::vector<uint8_t> remoteData = host->loadFile(repoPath);
