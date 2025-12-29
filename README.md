@@ -32,6 +32,7 @@ A PICO-8 explorer + emulator front-end for multiple platforms.
 | **Nintendo 3DS** | citro2d / citro3d | ✅ |
 | **Sony PSP** | PSP Software Development Kit | ✅ |
 | **Libretro** | Libretro API core | ✅ |
+| **PICO-8 to GBA** | devkitARM / GBA Sdk | ✅ |
 
 ---
 
