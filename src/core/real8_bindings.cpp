@@ -5,12 +5,15 @@
 #include <cmath>
 #include <algorithm>
 #include <cstring>
+#include <cstdint>
 #include <string>
 #include <ctime>
 #include <cctype>
 #include <cstdlib>
 #include <sstream>
 #include <vector>
+
+#include "../../lib/z8lua/trigtables.h"
 
 // z8lua is based on Lua 5.2, which lacks the Lua 5.3 function 'lua_isyieldable'.
 // We define it here to always return 1 (true), allowing the VM to yield.
@@ -29,19 +32,50 @@ int debug_cls_count = 0;
 // CONSTANT: Tau is 2*PI
 static const float TAU = 6.28318530718f;
 
+#if defined(__GBA__)
+#define REAL8_EWRAM __attribute__((section(".ewram")))
+#else
+#define REAL8_EWRAM
+#endif
+
+static Real8VM *g_vm = nullptr;
+
+static constexpr int kTrigLutSize = 1024;
+static constexpr int kTrigLutMask = kTrigLutSize - 1;
+static constexpr int kTrigLutQuarter = kTrigLutSize / 4;
+static int16_t g_sinLut[kTrigLutSize] REAL8_EWRAM;
+static bool g_trigLutReady = false;
+
+static void initTrigLut()
+{
+    if (g_trigLutReady)
+        return;
+    const float step = TAU / (float)kTrigLutSize;
+    for (int i = 0; i < kTrigLutSize; ++i)
+    {
+        float angle = (float)i * step;
+        g_sinLut[i] = (int16_t)(sinf(angle) * 32767.0f);
+    }
+    g_trigLutReady = true;
+}
+
+static inline int trig_lut_index(lua_Number a)
+{
+    uint32_t frac = (uint32_t)a.bits() & 0xffff;
+    return (int)((frac * kTrigLutSize) >> 16) & kTrigLutMask;
+}
+
 static void reg(lua_State *L, const char *n, lua_CFunction f)
 {
     lua_pushcfunction(L, f);
     lua_setglobal(L, n);
 }
 
-// Helper to fetch VM pointer placed in __pico8_vm_ptr
-static Real8VM *get_vm(lua_State *L)
+// Helper to fetch cached VM pointer
+static inline Real8VM *get_vm(lua_State *L)
 {
-    lua_getglobal(L, "__pico8_vm_ptr");
-    auto *vm = (Real8VM *)lua_touserdata(L, -1);
-    lua_pop(L, 1);
-    return vm;
+    (void)L;
+    return g_vm;
 }
 
 // Platform-agnostic millis()
@@ -61,22 +95,19 @@ static void vm_sync_ram(Real8VM *vm, uint32_t start_addr, int length);
 // Forward declaration for helper used before definition
 static uint8_t read_mapped_byte(Real8VM *vm, uint32_t addr);
 
-// Safe conversion that handles Infinity/NaN/Overflow without crashing the CPU
+// Fast conversion used by most API calls (avoid heavy math on GBA)
 static inline int to_int_floor(lua_State *L, int idx)
 {
-    double v = lua_tonumber(L, idx);
-
-    // 1. Check for NaN or Infinity (Requires <cmath>)
-    if (!std::isfinite(v))
-        return 0;
-
-    // 2. Clamp to integer limits to prevent Undefined Behavior on cast
-    if (v > 2147483647.0)
-        return 2147483647;
-    if (v < -2147483648.0)
-        return -2147483648;
-
-    return (int)floor(v);
+    if (lua_isboolean(L, idx)) {
+        return lua_toboolean(L, idx) ? 1 : 0;
+    }
+    lua_Number v = lua_tonumber(L, idx);
+    int32_t bits = v.bits();
+    int32_t i = bits >> 16;
+    if (bits < 0 && (bits & 0xffff)) {
+        --i;
+    }
+    return (int)i;
 }
 
 static inline int to_int(lua_State *L, int idx)
@@ -628,26 +659,48 @@ static int l_sin(lua_State *L)
 {
     // z8lua does not strictly replace math functions unless using their lib.
     // We keep the inverted Y logic here.
-    float a = (float)lua_tonumber(L, 1);
-    lua_pushnumber(L, -sinf(a * TAU));
+    initTrigLut();
+    lua_Number a = lua_tonumber(L, 1);
+    int idx = trig_lut_index(a);
+    int32_t bits = (int32_t)g_sinLut[idx] << 1;
+    lua_pushnumber(L, lua_Number::frombits(-bits));
     return 1;
 }
 
 static int l_cos(lua_State *L)
 {
-    float a = (float)lua_tonumber(L, 1);
-    lua_pushnumber(L, cosf(a * TAU));
+    initTrigLut();
+    lua_Number a = lua_tonumber(L, 1);
+    int idx = (trig_lut_index(a) + kTrigLutQuarter) & kTrigLutMask;
+    int32_t bits = (int32_t)g_sinLut[idx] << 1;
+    lua_pushnumber(L, lua_Number::frombits(bits));
     return 1;
+}
+
+static inline lua_Number pico8_atan2_fixed(lua_Number x, lua_Number y)
+{
+    int32_t bits = 0x4000;
+    if (x) {
+        int64_t xb = x.bits();
+        int64_t yb = y.bits();
+        int64_t q = (std::abs(yb) << 16) / std::abs(xb);
+        if (q > 0x10000) {
+            bits -= atantable[(int64_t(1) << 32) / q >> 5];
+        } else {
+            bits = atantable[q >> 5];
+        }
+    }
+    if (x.bits() < 0) bits = 0x8000 - bits;
+    if (y.bits() > 0) bits = -bits & 0xffff;
+    if (x && y.bits() == int32_t(0x80000000)) bits = -bits & 0xffff;
+    return lua_Number::frombits(bits);
 }
 
 static int l_atan2(lua_State *L)
 {
-    float dx = (float)lua_tonumber(L, 1);
-    float dy = (float)lua_tonumber(L, 2);
-    float val = atan2f(dy, dx) / TAU;
-    if (val < 0.0f)
-        val += 1.0f;
-    lua_pushnumber(L, val);
+    lua_Number x = lua_tonumber(L, 1);
+    lua_Number y = lua_tonumber(L, 2);
+    lua_pushnumber(L, pico8_atan2_fixed(x, y));
     return 1;
 }
 
@@ -674,10 +727,8 @@ static inline int32_t to_pico_fixed(lua_State *L, int idx)
     if (lua_isboolean(L, idx))
         return lua_toboolean(L, idx) ? 65536 : 0;
 
-    // If z8lua is compiled as fix32, lua_tonumber returns a double approximation.
-    // We multiply by 65536 to get the raw bit representation.
-    double v = lua_tonumber(L, idx);
-    return (int32_t)(v * 65536.0);
+    lua_Number v = lua_tonumber(L, idx);
+    return v.bits();
 }
 
 // Added boolean check. PICO-8 allows bitwise ops on booleans (True=1, False=0)
@@ -687,14 +738,14 @@ static inline uint32_t l_mask(lua_State *L, int idx)
     {
         return lua_toboolean(L, idx) ? 1 : 0;
     }
-    double v = luaL_optnumber(L, idx, 0.0);
-    return (uint32_t)((int64_t)v);
+    lua_Number v = luaL_optnumber(L, idx, (lua_Number)0);
+    return (uint32_t)v.bits();
 }
 
 // Helper to push raw 16.16 bits back as Lua number
 static inline void push_pico_fixed(lua_State *L, int32_t v)
 {
-    lua_pushnumber(L, (double)v / 65536.0);
+    lua_pushnumber(L, lua_Number::frombits(v));
 }
 
 static int l_band(lua_State *L)
@@ -888,14 +939,8 @@ static int l_flip(lua_State *L)
 
     // FPS Control
     int target_ms = 33;
-
-    // Check if _update60 exists (optimization: check this once or maintain a flag)
-    lua_getglobal(L, "_update60");
-    if (!lua_isnil(L, -1))
-    {
+    if (vm && vm->targetFPS > 30)
         target_ms = 16;
-    }
-    lua_pop(L, 1);
 
     static unsigned long last_flip_time = 0;
     long elapsed = (long)(now - last_flip_time);
@@ -921,13 +966,17 @@ static int l_bnot(lua_State *L)
 
 static int l_sqrt(lua_State *L)
 {
-    float x = (float)lua_tonumber(L, 1);
-    if (x < 0)
-    {
-        lua_pushnumber(L, 0);
-        return 1;
+    int64_t root = 0;
+    int64_t x = int64_t(lua_tonumber(L, 1).bits()) << 16;
+    if (x > 0) {
+        for (int64_t a = int64_t(1) << 46; a; a >>= 2, root >>= 1) {
+            if (x >= a + root) {
+                x -= a + root;
+                root += a << 1;
+            }
+        }
     }
-    lua_pushnumber(L, sqrtf(x));
+    lua_pushnumber(L, lua_Number::frombits((int32_t)root));
     return 1;
 }
 
@@ -987,14 +1036,11 @@ static int l_time(lua_State *L)
 
 static int l_atan(lua_State *L)
 {
-    const float x = (float)lua_tonumber(L, 1);
-    float t = atanf(x) / TAU;
-    t += 0.25f; // PICO-8 phase shift
-    if (t < 0.0f)
-        t += 1.0f;
-    if (t >= 1.0f)
-        t -= 1.0f;
-    lua_pushnumber(L, t);
+    lua_Number x = lua_tonumber(L, 1);
+    lua_Number t = pico8_atan2_fixed(lua_Number::frombits(0x10000), x);
+    uint32_t bits = (uint32_t)t.bits() + 0x4000;
+    bits &= 0xffff;
+    lua_pushnumber(L, lua_Number::frombits((int32_t)bits));
     return 1;
 }
 
@@ -1031,27 +1077,15 @@ static int l_pget(lua_State *L)
     int y = to_int_floor(L, 2);
 
     // 1. Get Camera Position
-    // We check vm->ram for the PICO-8 memory mapped camera registers (0x5F28-5F2B).
-    // This handles the case where Lua set camera() but internal registers haven't synced yet,
-    // or vice versa.
-    int cx = 0, cy = 0;
-    if (vm->ram)
-    {
-        cx = (int16_t)(vm->ram[0x5F28] | (vm->ram[0x5F29] << 8));
-        cy = (int16_t)(vm->ram[0x5F2A] | (vm->ram[0x5F2B] << 8));
-    }
-    else
-    {
-        cx = vm->gpu.cam_x;
-        cy = vm->gpu.cam_y;
-    }
+    int cx = vm->gpu.cam_x;
+    int cy = vm->gpu.cam_y;
 
     // 2. Apply Camera & Check Bounds
     // PICO-8 pget is relative to the camera.
     int rx = x + cx;
     int ry = y + cy;
 
-    if (rx < 0 || rx > 127 || ry < 0 || ry > 127)
+    if ((uint32_t)rx > 127u || (uint32_t)ry > 127u)
     {
         lua_pushinteger(L, 0);
         return 1;
@@ -1077,7 +1111,7 @@ static int l_pget(lua_State *L)
     // PICO-8 Format: Even X = Low Nibble, Odd X = High Nibble
     int pixel = (rx & 1) ? (val >> 4) : (val & 0x0F);
 
-    lua_pushinteger(L, vm->gpu.pget(x, y));
+    lua_pushinteger(L, pixel);
     return 1;
 }
 static int l_line(lua_State *L)
@@ -1929,6 +1963,17 @@ static uint8_t read_mapped_byte(Real8VM *vm, uint32_t addr)
 {
     if (!vm || !vm->ram)
         return 0;
+    if (addr >= 0x8000)
+        return 0;
+
+    const bool mapping_active = (vm->hwState.spriteSheetMemMapping == 0x60 || vm->hwState.screenDataMemMapping == 0);
+    if (!mapping_active)
+    {
+        if (addr >= 0x6000 && addr < 0x8000)
+            return read_screen_byte(vm, addr);
+        return vm->ram[addr];
+    }
+
     MappedAddr mapped = map_ram_address(vm, addr);
     if (mapped.addr >= 0x8000)
         return 0;
@@ -2011,7 +2056,8 @@ static int l_memcpy(lua_State *L)
     if (src + len > 0x8000)
         len = 0x8000 - src;
 
-    bool mapping_active = (vm->hwState.spriteSheetMemMapping == 0x60 || vm->hwState.screenDataMemMapping == 0);
+    const bool mapping_active = (vm->hwState.spriteSheetMemMapping == 0x60 || vm->hwState.screenDataMemMapping == 0);
+    const bool src_hits_screen = (src < 0x8000 && (src + len) > 0x6000);
     if (mapping_active)
     {
         std::vector<uint8_t> temp(len);
@@ -2024,7 +2070,7 @@ static int l_memcpy(lua_State *L)
 
     // If reading FROM Screen (0x6000+), we must reconstruct the RAM data from the
     // visual Framebuffer because vm->spr() likely bypasses screen_ram for speed.
-    if (src < 0x8000 && (src + len) > 0x6000 && vm->fb)
+    if (src_hits_screen && vm->fb)
     {
         int s_start = std::max((int)src, 0x6000);
         int s_end = std::min((int)(src + len), 0x8000);
@@ -2920,10 +2966,7 @@ void Real8VM::saveCartToDisk()
 // cartdata("id_string")
 static int l_cartdata(lua_State *L)
 {
-    // 1. Retrieve VM Instance
-    lua_getglobal(L, "__pico8_vm_ptr");
-    Real8VM *vm = (Real8VM *)lua_touserdata(L, -1);
-    lua_pop(L, 1);
+    auto *vm = get_vm(L);
 
     if (vm)
     {
@@ -2937,9 +2980,7 @@ static int l_cartdata(lua_State *L)
 // val = dget(index)
 static int l_dget(lua_State *L)
 {
-    lua_getglobal(L, "__pico8_vm_ptr");
-    Real8VM *vm = (Real8VM *)lua_touserdata(L, -1);
-    lua_pop(L, 1);
+    auto *vm = get_vm(L);
 
     if (vm)
     {
@@ -2960,10 +3001,7 @@ static int l_dget(lua_State *L)
 // dset(index, val)
 static int l_dset(lua_State *L)
 {
-    // Optimization: avoid get_vm overhead if possible, but safe here
-    lua_getglobal(L, "__pico8_vm_ptr");
-    auto *vm = (Real8VM *)lua_touserdata(L, -1);
-    lua_pop(L, 1);
+    auto *vm = get_vm(L);
 
     if (vm)
     {
@@ -3003,9 +3041,7 @@ static int l_peek2(lua_State *L)
 
 static int l_poke2(lua_State *L)
 {
-    lua_getglobal(L, "__pico8_vm_ptr");
-    Real8VM *vm = (Real8VM *)lua_touserdata(L, -1);
-    lua_pop(L, 1);
+    auto *vm = get_vm(L);
     if (vm && vm->ram)
     {
         int addr = to_int_floor(L, 1);
@@ -3021,9 +3057,7 @@ static int l_poke2(lua_State *L)
 
 static int l_peek4(lua_State *L)
 {
-    lua_getglobal(L, "__pico8_vm_ptr");
-    Real8VM *vm = (Real8VM *)lua_touserdata(L, -1);
-    lua_pop(L, 1);
+    auto *vm = get_vm(L);
     // PICO-8 uses 16.16 fixed point numbers. peek4 returns a standard Lua number.
     if (vm && vm->ram)
     {
@@ -3045,9 +3079,7 @@ static int l_peek4(lua_State *L)
 
 static int l_poke4(lua_State *L)
 {
-    lua_getglobal(L, "__pico8_vm_ptr");
-    Real8VM *vm = (Real8VM *)lua_touserdata(L, -1);
-    lua_pop(L, 1);
+    auto *vm = get_vm(L);
     if (vm && vm->ram)
     {
         int addr = to_int_floor(L, 1);
@@ -3119,9 +3151,7 @@ static int l_printh(lua_State *L)
 static int l_run(lua_State *L)
 {
     // 1. Get VM Instance
-    lua_getglobal(L, "__pico8_vm_ptr");
-    auto *vm = (Real8VM *)lua_touserdata(L, -1);
-    lua_pop(L, 1);
+    auto *vm = get_vm(L);
 
     if (!vm)
         return 0;
@@ -4269,6 +4299,17 @@ static void register_boolean_ops(lua_State *L)
 
 void register_pico8_api(lua_State *L)
 {
+    lua_getglobal(L, "__pico8_vm_ptr");
+    g_vm = (Real8VM *)lua_touserdata(L, -1);
+    lua_pop(L, 1);
+
+    auto *vm = g_vm;
+    const bool isGba = (vm && vm->host && strcmp(vm->host->getPlatform(), "GBA") == 0);
+    auto gbaLog = [&](const char* msg) {
+        if (isGba && vm->host) vm->host->log("%s", msg);
+    };
+
+    gbaLog("[BOOT] REG BEGIN");
 
     lua_pushnil(L);
     lua_setglobal(L, "io");
@@ -4278,6 +4319,7 @@ void register_pico8_api(lua_State *L)
     lua_setglobal(L, "package");
     lua_pushnil(L);
     lua_setglobal(L, "dofile");
+    gbaLog("[BOOT] REG LIBS OK");
 
     // --- Graphics ---
     reg(L, "cls", l_cls);
@@ -4306,6 +4348,7 @@ void register_pico8_api(lua_State *L)
     reg(L, "clip", l_clip);
     reg(L, "color", l_color);
     reg(L, "cursor", l_cursor);
+    gbaLog("[BOOT] REG GFX OK");
 
     // --- Map ---
     reg(L, "map", l_map);
@@ -4315,6 +4358,7 @@ void register_pico8_api(lua_State *L)
     // Optimization: Point both to the same implementation
     reg(L, "check_flag", l_map_check);
     reg(L, "_map_check_cpu", l_map_check);
+    gbaLog("[BOOT] REG MAP OK");
 
     // --- Math ---
     reg(L, "sin", l_sin);
@@ -4333,6 +4377,7 @@ void register_pico8_api(lua_State *L)
     reg(L, "rnd", l_rnd);
     reg(L, "rotl", l_rotl);
     reg(L, "rotr", l_rotr);
+    gbaLog("[BOOT] REG MATH OK");
 
     // --- Bitwise (Direct calls) ---
     reg(L, "band", l_band);
@@ -4341,6 +4386,7 @@ void register_pico8_api(lua_State *L)
     reg(L, "bnot", l_bnot);
     reg(L, "shl", l_shl);
     reg(L, "shr", l_shr);
+    gbaLog("[BOOT] REG BIT OK");
 
     reg(L, "p8_loadstring", l_load_p8_code);
 
@@ -4352,6 +4398,7 @@ void register_pico8_api(lua_State *L)
     reg(L, "sub", l_sub);
     reg(L, "split", l_split);
     reg(L, "type", l_type);
+    gbaLog("[BOOT] REG STR OK");
 
     // --- Tables ---
     reg(L, "add", l_add);
@@ -4361,6 +4408,7 @@ void register_pico8_api(lua_State *L)
     reg(L, "all", l_all);
     reg(L, "all_iter", l_all_iter);
     reg(L, "foreach", l_foreach);
+    gbaLog("[BOOT] REG TABLE OK");
 
     // --- Memory ---
     reg(L, "peek", l_peek);
@@ -4378,6 +4426,7 @@ void register_pico8_api(lua_State *L)
 
     reg(L, "_p8_sys_get", l_sys_get_state);
     reg(L, "_p8_sys_set", l_sys_set_state);
+    gbaLog("[BOOT] REG MEM OK");
 
     // --- System/IO ---
     reg(L, "run", l_run);
@@ -4399,6 +4448,7 @@ void register_pico8_api(lua_State *L)
     reg(L, "lshr", l_lshr);
     reg(L, "trace", l_printh);
     reg(L, "print", l_print);
+    gbaLog("[BOOT] REG SYS OK");
 
     // --- Audio ---
     reg(L, "sfx", l_sfx);
@@ -4407,10 +4457,12 @@ void register_pico8_api(lua_State *L)
     // --- Input ---
     reg(L, "btn", l_btn);
     reg(L, "btnp", l_btnp);
+    gbaLog("[BOOT] REG AIN OK");
 
     // --- Internal/Helpers ---
     register_boolean_ops(L); // Operator overloading
     reg(L, "p8_load", l_load_p8_file);
+    gbaLog("[BOOT] REG HELPERS OK");
 
     // Coroutines
     lua_getglobal(L, "coroutine");
@@ -4421,6 +4473,7 @@ void register_pico8_api(lua_State *L)
     lua_getfield(L, -1, "status");
     lua_setglobal(L, "costatus");
     lua_pop(L, 1);
+    gbaLog("[BOOT] REG CORO OK");
 
     // Table Pack/Unpack (Lua 5.3 Compat)
     lua_getglobal(L, "table");
@@ -4429,6 +4482,7 @@ void register_pico8_api(lua_State *L)
     lua_getfield(L, -1, "unpack");
     lua_setglobal(L, "unpack");
     lua_pop(L, 1);
+    gbaLog("[BOOT] REG PACK OK");
 
     start_ms = l_millis(L);
 
@@ -4627,12 +4681,46 @@ void register_pico8_api(lua_State *L)
     end
     if p8_load then _G.loadstring = p8_load end
     )LUASHIM";
-  
+ 
+    const char *shim_src = shim;
+    std::string shim_ascii;
+    if (isGba) {
+        shim_ascii.reserve(strlen(shim));
+        const unsigned char *p = (const unsigned char *)shim;
+        while (*p) {
+            if (*p < 0x80) shim_ascii.push_back((char)*p);
+            ++p;
+        }
+        shim_src = shim_ascii.c_str();
+    }
 
-    if (luaL_dostring(L, shim) != LUA_OK)
-    {
-        printf("Shim Error: %s\n", lua_tostring(L, -1));
-        lua_pop(L, 1);
+    if (isGba) {
+        gbaLog("[BOOT] REG SHIM SKIP");
+    } else {
+        gbaLog("[BOOT] REG SHIM LOAD");
+        if (luaL_loadstring(L, shim_src) != LUA_OK)
+        {
+            const char* err = lua_tostring(L, -1);
+            printf("Shim Error: %s\n", err ? err : "(unknown)");
+            if (isGba && vm && vm->host) vm->host->log("[BOOT] REG SHIM LOAD ERR: %s", err ? err : "(unknown)");
+            lua_pop(L, 1);
+        }
+        else
+        {
+            gbaLog("[BOOT] REG SHIM LOAD OK");
+            gbaLog("[BOOT] REG SHIM EXEC");
+            if (lua_pcall(L, 0, 0, 0) != LUA_OK)
+            {
+                const char* err = lua_tostring(L, -1);
+                printf("Shim Error: %s\n", err ? err : "(unknown)");
+                if (isGba && vm && vm->host) vm->host->log("[BOOT] REG SHIM EXEC ERR: %s", err ? err : "(unknown)");
+                lua_pop(L, 1);
+            }
+            else
+            {
+                gbaLog("[BOOT] REG SHIM EXEC OK");
+            }
+        }
     }
 
     const char *overlay = R"LUAFPS(
@@ -4647,8 +4735,13 @@ void register_pico8_api(lua_State *L)
     end
   )LUAFPS";
 
+    gbaLog("[BOOT] REG OVERLAY");
     if (luaL_dostring(L, overlay) != LUA_OK)
     {
         lua_pop(L, 1);
+        gbaLog("[BOOT] REG OVERLAY ERR");
+    } else {
+        gbaLog("[BOOT] REG OVERLAY OK");
     }
+    gbaLog("[BOOT] REG DONE");
 }

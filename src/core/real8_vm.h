@@ -19,6 +19,14 @@
 #include "../../lib/z8lua/lauxlib.h"
 #include "../../lib/z8lua/lualib.h"
 
+#if !defined(REAL8_HAS_LIBRETRO_BUFFERS)
+#if defined(__GBA__)
+#define REAL8_HAS_LIBRETRO_BUFFERS 0
+#else
+#define REAL8_HAS_LIBRETRO_BUFFERS 1
+#endif
+#endif
+
 // Logging Macros
 #define LOG_ONCE(key, fmt, ...) \
     do { \
@@ -87,6 +95,7 @@ public:
   // --------------------------------------------------------------------------
   lua_State* getLuaState() { return L; }
   IReal8Host* getHost() { return host; }
+  bool skipDirtyRect = false;
 
   bool reset_requested = false;
   bool exit_requested = false;
@@ -120,12 +129,14 @@ public:
   bool serialize(void* data, size_t size);
   bool unserialize(const void* data, size_t size);
   int16_t audio_buffer[4096]; // Fixed size, plenty of headroom
+#if REAL8_HAS_LIBRETRO_BUFFERS
   uint32_t screen_buffer[128 * 128]; // Raw 32-bit output for Libretro
   uint32_t palette_lut[32]; // Cache RGBA values for the 32 pico-8 colors
   void updatePaletteLUT();
   // 44100Hz / 60fps = 735 samples * 2 channels = 1470 int16s. Round up for safety.
   int16_t static_audio_buffer[2048];
   bool frame_is_dirty = true;
+#endif
 
   // --------------------------------------------------------------------------
   // MEMORY
@@ -189,7 +200,14 @@ public:
   // --------------------------------------------------------------------------
   // HELPERS (Low Level)
   // --------------------------------------------------------------------------
-  void screenByteToFB(size_t idx, uint8_t v);
+  inline void screenByteToFB(size_t idx, uint8_t v) {
+    if (idx >= 0x2000) return;
+    int y = (int)(idx >> 6);
+    int x = (int)((idx & 0x3F) << 1);
+    fb[y][x] = v & 0x0F;
+    fb[y][x + 1] = (v >> 4) & 0x0F;
+    mark_dirty_rect(x, y, x + 1, y);
+  }
   void mark_dirty_rect(int x0, int y0, int x1, int y1);
   int watch_addr = -1; 
   int dirty_x0, dirty_y0, dirty_x1, dirty_y1; // Needs to be public for GFX to access
@@ -247,6 +265,13 @@ public:
 
 private:
   lua_State *L = nullptr;
+
+  void cacheLuaRefs();
+  void clearLuaRefs();
+  int lua_ref_update = LUA_NOREF;
+  int lua_ref_update60 = LUA_NOREF;
+  int lua_ref_draw = LUA_NOREF;
+  int lua_ref_init = LUA_NOREF;
   
   void initDefaultPalette(); // Still used for VM reboot reset
 };

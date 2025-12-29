@@ -77,10 +77,10 @@ struct AudioEngine
     };
     
     // PICO-8 update rate is 120Hz (approx 183.75 samples per tick)
-    double samples_per_tick_accumulator = 0.0; 
+    float samples_per_tick_accumulator = 0.0f; 
 
     // Buffer output
-    double samples_accumulator = 0.0;
+    float samples_accumulator = 0.0f;
     float last_mixed_sample = 0.0f;
     
     // DECLARE CHANNELS HERE
@@ -154,10 +154,16 @@ struct AudioEngine
     AudioStateSnapshot getState();
     void setState(const AudioStateSnapshot& s);
 
-    // 3DS
+    // 3DS / GBA
+#if defined(__GBA__)
+    static constexpr int OUT_BLOCK_SAMPLES = 368;
+    static constexpr int OUT_BLOCK_RING    = 4;
+    static constexpr int FIFO_SAMPLES      = OUT_BLOCK_SAMPLES * 8;
+#else
     static constexpr int OUT_BLOCK_SAMPLES = 1024;
     static constexpr int OUT_BLOCK_RING    = 4;
     static constexpr int FIFO_SAMPLES      = OUT_BLOCK_SAMPLES * 8;
+#endif
 
     int16_t fifo[FIFO_SAMPLES];
     int fifo_r = 0, fifo_w = 0, fifo_count = 0;

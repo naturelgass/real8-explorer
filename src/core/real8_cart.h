@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <string>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 
@@ -15,6 +16,8 @@ struct GameData {
     uint8_t music[0x100];
     uint8_t sprite_flags[0x100];
     std::string lua_code;
+    const char* lua_code_ptr = nullptr;
+    size_t lua_code_size = 0;
     std::string cart_id;
 };
 

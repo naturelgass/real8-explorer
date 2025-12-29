@@ -1,7 +1,6 @@
 #include "real8_gfx.h"
 #include "real8_vm.h" // Needed to access vm->ram and vm->fb
 #include "real8_fonts.h"
-#include <cmath>
 #include <algorithm>
 #include <cstring>
 
@@ -49,7 +48,31 @@ void Real8Gfx::reset() {
     palt_reset();
 }
 
+void Real8Gfx::beginFrame() {
+    objBatchAllowed = true;
+    objBatchActive = false;
+    objSpriteCount = 0;
+    if (vm && vm->host) vm->host->beginFrame();
+}
+
 // --- Helpers ---
+
+static inline int isqrt_int(int v) {
+    if (v <= 0) return 0;
+    int res = 0;
+    int bit = 1 << 30;
+    while (bit > v) bit >>= 2;
+    while (bit != 0) {
+        if (v >= res + bit) {
+            v -= res + bit;
+            res = (res >> 1) + bit;
+        } else {
+            res >>= 1;
+        }
+        bit >>= 2;
+    }
+    return res;
+}
 
 uint32_t Real8Gfx::sprite_base_addr() const {
     return (vm && vm->hwState.spriteSheetMemMapping == 0x60) ? 0x6000 : 0x0000;
@@ -77,6 +100,70 @@ void Real8Gfx::get_screen_palette(uint8_t* out_palette) {
     } else {
         for (int i = 0; i < 16; i++) out_palette[i] = screen_palette[i];
     }
+}
+
+void Real8Gfx::updatePaletteFlags() {
+    if (paletteStateDirty) {
+        paletteIdentity = true;
+        for (int i = 0; i < 16; ++i) {
+            if (palette_map[i] != i) {
+                paletteIdentity = false;
+                break;
+            }
+        }
+        paletteStateDirty = false;
+    }
+    if (paltStateDirty) {
+        paltDefault = palt_map[0];
+        if (paltDefault) {
+            for (int i = 1; i < 16; ++i) {
+                if (palt_map[i]) {
+                    paltDefault = false;
+                    break;
+                }
+            }
+        }
+        paltStateDirty = false;
+    }
+}
+
+void Real8Gfx::invalidateObjBatch() {
+    if (!objBatchAllowed) return;
+    if (objBatchActive) {
+        if (vm && vm->host) vm->host->cancelSpriteBatch();
+        objBatchAllowed = false;
+        for (int i = 0; i < objSpriteCount; ++i) {
+            const ObjSprite& s = objSprites[i];
+            spr_fast(s.n, s.x, s.y, s.w, s.h, s.fx, s.fy);
+        }
+    }
+    objBatchAllowed = false;
+    objBatchActive = false;
+    objSpriteCount = 0;
+}
+
+bool Real8Gfx::tryQueueObjSprite(int n, int x, int y, int w, int h, bool fx, bool fy) {
+    if (!objBatchAllowed || !vm || !vm->host || !vm->ram) return false;
+    if (w != 1 || h != 1) return false;
+    if (draw_mask != 0 || fillp_pattern != 0xFFFFFFFFu) return false;
+    if (clip_x != 0 || clip_y != 0 || clip_w != Real8VM::WIDTH || clip_h != Real8VM::HEIGHT) return false;
+    updatePaletteFlags();
+    if (!paletteIdentity || !paltDefault) return false;
+    if (n < 0 || n >= 256) return false;
+    if (objSpriteCount >= kMaxObjSprites) return false;
+
+    const uint8_t* spriteSheet = vm->ram + sprite_base_addr();
+    const int sx = x - cam_x;
+    const int sy = y - cam_y;
+    if (!vm->host->queueSprite(spriteSheet, n, sx, sy, w, h, fx, fy)) return false;
+
+    if (objSpriteCount == 0) {
+        vm->mark_dirty_rect(0, 0, 0, 0);
+    }
+
+    objSprites[objSpriteCount++] = {n, x, y, w, h, fx, fy};
+    objBatchActive = true;
+    return true;
 }
 
 // --- Primitives Implementation ---
@@ -108,12 +195,13 @@ void Real8Gfx::put_pixel_checked(int x, int y, uint8_t col) {
     put_pixel_raw(sx, sy, palette_map[col & 0x0F]);
 
     // Skip dirty rect calculation for Libretro
-    if (vm->host && strcmp(vm->host->getPlatform(), "Libretro") != 0) {
+    if (vm && !vm->skipDirtyRect) {
         vm->mark_dirty_rect(sx, sy, sx, sy);
     }
 }
 
 void Real8Gfx::pset(int x, int y, uint8_t col) { 
+    invalidateObjBatch();
     put_pixel_checked(x, y, col); 
 }
 
@@ -128,6 +216,7 @@ uint8_t Real8Gfx::pget(int x, int y) {
 }
 
 void Real8Gfx::cls(int c) {
+    invalidateObjBatch();
     if (!vm->fb) return;
     uint8_t stored = c & 0x0F;
     for (int y = 0; y < Real8VM::HEIGHT; ++y) memset(vm->fb[y], stored, Real8VM::RAW_WIDTH);
@@ -154,6 +243,7 @@ static int computeOutCode(int x, int y, int xmin, int ymin, int xmax, int ymax) 
 }
 
 void Real8Gfx::line(int x0, int y0, int x1, int y1, uint8_t c) {
+    invalidateObjBatch();
     int sx0 = x0 - cam_x; int sy0 = y0 - cam_y;
     int sx1 = x1 - cam_x; int sy1 = y1 - cam_y;
     int xmin = clip_x; int ymin = clip_y;
@@ -224,11 +314,13 @@ void Real8Gfx::line(int x0, int y0, int x1, int y1, uint8_t c) {
 }
 
 void Real8Gfx::rect(int x0, int y0, int x1, int y1, uint8_t c) {
+    invalidateObjBatch();
     line(x0, y0, x1, y0, c); line(x1, y0, x1, y1, c);
     line(x1, y1, x0, y1, c); line(x0, y1, x0, y0, c);
 }
 
 void Real8Gfx::rectfill(int x0, int y0, int x1, int y1, uint8_t c) {
+    invalidateObjBatch();
     if (x1 < x0) std::swap(x0, x1);
     if (y1 < y0) std::swap(y0, y1);
     int sx0 = std::max(clip_x, x0 - cam_x);
@@ -288,7 +380,7 @@ static void fill_rrect_corners(Real8Gfx* gfx, int x0, int y0, int x1, int y1, in
     int r2 = r * r;
 
     for (int dy = 0; dy <= r; ++dy) {
-        int dx = (int)std::floor(std::sqrt((double)(r2 - dy * dy)));
+        int dx = isqrt_int(r2 - dy * dy);
         int y_top = tly - dy;
         int y_bot = bly + dy;
 
@@ -300,6 +392,7 @@ static void fill_rrect_corners(Real8Gfx* gfx, int x0, int y0, int x1, int y1, in
 }
 
 void Real8Gfx::rrect(int x, int y, int w, int h, int r, uint8_t c) {
+    invalidateObjBatch();
     if (w <= 0 || h <= 0) return;
     int x0 = x, y0 = y;
     int x1 = x + w - 1;
@@ -320,6 +413,7 @@ void Real8Gfx::rrect(int x, int y, int w, int h, int r, uint8_t c) {
 }
 
 void Real8Gfx::rrectfill(int x, int y, int w, int h, int r, uint8_t c) {
+    invalidateObjBatch();
     if (w <= 0 || h <= 0) return;
     int x0 = x, y0 = y;
     int x1 = x + w - 1;
@@ -347,6 +441,7 @@ void Real8Gfx::rrectfill(int x, int y, int w, int h, int r, uint8_t c) {
 }
 
 void Real8Gfx::circ(int cx, int cy, int r, uint8_t c) {
+    invalidateObjBatch();
     int x = r, y = 0, err = 0;
     while (x >= y) {
         pset(cx + x, cy + y, c); pset(cx + y, cy + x, c);
@@ -359,6 +454,7 @@ void Real8Gfx::circ(int cx, int cy, int r, uint8_t c) {
 }
 
 void Real8Gfx::circfill(int cx, int cy, int r, uint8_t c) {
+    invalidateObjBatch();
     int x = r, y = 0, err = 0;
     while (x >= y) {
         for (int xi = cx - x; xi <= cx + x; ++xi) put_pixel_checked(xi, cy + y, c);
@@ -406,6 +502,8 @@ void Real8Gfx::spr_fast(int n, int x, int y, int w, int h, bool fx, bool fy) {
 }
 
 void Real8Gfx::spr(int n, int x, int y, int w, int h, bool fx, bool fy) {
+    if (tryQueueObjSprite(n, x, y, w, h, fx, fy)) return;
+    invalidateObjBatch();
     if (draw_mask == 0) { spr_fast(n, x, y, w, h, fx, fy); return; }
 
     int dx0 = std::max(clip_x, x - cam_x);
@@ -439,6 +537,7 @@ void Real8Gfx::spr(int n, int x, int y, int w, int h, bool fx, bool fy) {
 }
 
 void Real8Gfx::sspr(int sx, int sy, int sw, int sh, int dx, int dy, int dw, int dh, bool flip_x, bool flip_y) {
+    invalidateObjBatch();
     if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0 || !vm->fb) return;
     int screen_dx = dx - cam_x; int screen_dy = dy - cam_y;
     uint32_t step_u = ((uint32_t)sw << 16) / dw;
@@ -484,6 +583,7 @@ uint8_t Real8Gfx::sget(int x, int y) {
 }
 
 void Real8Gfx::sset(int x, int y, uint8_t v) {
+    invalidateObjBatch();
     uint32_t base = sprite_base_addr();
     set_pixel_ram(base, x, y, v);
     if (base == 0x6000 && vm->ram) {
@@ -564,12 +664,23 @@ void Real8Gfx::map(int mx, int my, int sx, int sy, int w, int h, int layer) {
 
 // --- State ---
 
-void Real8Gfx::camera(int x, int y) { cam_x = x; cam_y = y; }
-void Real8Gfx::clip(int x, int y, int w, int h) { clip_x = x; clip_y = y; clip_w = w; clip_h = h; }
+void Real8Gfx::camera(int x, int y) {
+    invalidateObjBatch();
+    cam_x = x;
+    cam_y = y;
+}
+void Real8Gfx::clip(int x, int y, int w, int h) {
+    invalidateObjBatch();
+    clip_x = x;
+    clip_y = y;
+    clip_w = w;
+    clip_h = h;
+}
 void Real8Gfx::color(uint8_t col) { pen_col = col & 0x0F; }
 void Real8Gfx::fillp(uint32_t pattern) { fillp_pattern = pattern ? (pattern & 0xFFFFu) : 0xFFFFFFFFu; }
 
 void Real8Gfx::pal(int a, int b, int p) {
+    invalidateObjBatch();
     if (p == 1) {
         screen_palette[a & 0xFF] = b & 0xFF;
     } else {
@@ -579,12 +690,16 @@ void Real8Gfx::pal(int a, int b, int p) {
         // until the draw call decides how to handle it (or for 'pget' consistency).
         palette_map[a & 0x0F] = b; // Removed & 0x0F
     }
+    paletteStateDirty = true;
 }
 
 void Real8Gfx::pal_reset() {
+    invalidateObjBatch();
     for (int i = 0; i < 16; i++) palette_map[i] = i;
     for (int i = 0; i < 256; i++) screen_palette[i] = i & 0x0F;
     palt_reset();
+    paletteIdentity = true;
+    paletteStateDirty = false;
     if (vm->ram) {
         for (int i = 0; i < 16; i++) {
             vm->ram[0x5F00 + i] = i; vm->ram[0x5F10 + i] = i;
@@ -592,10 +707,17 @@ void Real8Gfx::pal_reset() {
     }
 }
 
-void Real8Gfx::palt(int c, bool t) { palt_map[c & 0x0F] = t; }
+void Real8Gfx::palt(int c, bool t) {
+    invalidateObjBatch();
+    palt_map[c & 0x0F] = t;
+    paltStateDirty = true;
+}
 void Real8Gfx::palt_reset() {
+    invalidateObjBatch();
     for (int i = 0; i < 16; i++) palt_map[i] = false;
     palt_map[0] = true;
+    paltDefault = true;
+    paltStateDirty = false;
 }
 
 // --- Text ---
@@ -651,6 +773,7 @@ int Real8Gfx::draw_char_custom(uint8_t p8, int x, int y, uint8_t col) {
 }
 
 int Real8Gfx::pprint(const char *s, int len, int x, int y, uint8_t col) {
+    invalidateObjBatch();
     int cx = x, cy = y;
     for (int i = 0; i < len; i++) {
         uint8_t ch = (uint8_t)s[i];
@@ -705,6 +828,8 @@ void Real8Gfx::restoreState(const GfxState& in) {
     std::memcpy(palette_map, in.palette_map, 16);
     std::memcpy(screen_palette, in.screen_palette, 256);
     std::memcpy(palt_map, in.palt_map, 16);
+    paletteStateDirty = true;
+    paltStateDirty = true;
 
     // Sync back to RAM if VM is attached (Crucial for game logic that reads RAM)
     if (vm && vm->ram) {

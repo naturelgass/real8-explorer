@@ -12,55 +12,95 @@
 
 static const float PI = 3.1415926535f;
 static const float TWO_PI = 6.2831853071f;
+static constexpr float kInvSampleRate = 1.0f / (float)AudioEngine::SAMPLE_RATE;
+static constexpr float kSamplesPerTick = (float)AudioEngine::SAMPLE_RATE / 120.0f;
+static constexpr float kC2Freq = 65.406f;
+static constexpr float kVibFreq = 15.0f;
+static constexpr float kVibAmp = 0.25f;
+static constexpr int kVibLutSize = 256;
+static constexpr int kVibLutMask = kVibLutSize - 1;
+static constexpr float kVibLutScale = 1.0f / 32767.0f;
+
+static float g_noteFreqLut[65];
+static int16_t g_vibSinLut[kVibLutSize];
+static float g_vibPhaseStep = 0.0f;
+static bool g_audioLutReady = false;
+
+static void initAudioLuts() {
+    if (g_audioLutReady) return;
+    for (int i = 0; i <= 64; ++i) {
+        g_noteFreqLut[i] = kC2Freq * powf(2.0f, (float)i / 12.0f);
+    }
+    for (int i = 0; i < kVibLutSize; ++i) {
+        float angle = (TWO_PI * (float)i) / (float)kVibLutSize;
+        g_vibSinLut[i] = (int16_t)(sinf(angle) * 32767.0f);
+    }
+    g_vibPhaseStep = kVibFreq * kInvSampleRate;
+    g_audioLutReady = true;
+}
 
 // --------------------------------------------------------------------------
 // WAVEFORM GENERATION
 // --------------------------------------------------------------------------
 
-static inline float p8_abs(float x) { return (x < 0.0f) ? -x : x; }
+static inline float wrap01_fast(float t) {
+    if (t >= 1.0f) t -= 1.0f;
+    if (t < 0.0f) t += 1.0f;
+    return t;
+}
 
 // 0. Triangle
-static float osc_tri(float t) {
-    float ft = t - floorf(t);
-    return 4.0f * p8_abs(ft - 0.5f) - 1.0f;
+static float osc_tri_unit(float t) {
+    return (t < 0.5f) ? (4.0f * t - 1.0f) : (3.0f - 4.0f * t);
 }
 
 // 1. Tilted Saw
-static float osc_tilted_saw(float t) {
-    float ft = t - floorf(t);
+static float osc_tilted_saw_unit(float t) {
     const float k = 0.875f; 
-    if (ft < k) return (2.0f * ft / k) - 1.0f;
-    return (1.0f - 2.0f * (ft - k) / (1.0f - k)) * -1.0f;
+    if (t < k) return (2.0f * t / k) - 1.0f;
+    return (1.0f - 2.0f * (t - k) / (1.0f - k)) * -1.0f;
 }
 
 // 2. Sawtooth
-static float osc_saw(float t) {
-    float ft = t - floorf(t);
-    return 2.0f * ft - 1.0f;
+static float osc_saw_unit(float t) {
+    return 2.0f * t - 1.0f;
 }
 
 // 3. Square
-static float osc_square(float t) {
-    float ft = t - floorf(t);
-    return (ft < 0.5f) ? 1.0f : -1.0f;
+static float osc_square_unit(float t) {
+    return (t < 0.5f) ? 1.0f : -1.0f;
 }
 
 // 4. Pulse (25% Duty)
-static float osc_pulse(float t) {
-    float ft = t - floorf(t);
-    return (ft < 0.25f) ? 1.0f : -1.0f;
+static float osc_pulse_unit(float t) {
+    return (t < 0.25f) ? 1.0f : -1.0f;
 }
 
 // 5. Organ: Triangle + Octave (2nd Harmonic)
 static float osc_organ(float t) {
-    return (osc_tri(t) + osc_tri(t * 2.0f)) * 0.5f;
+    float t2 = t + t;
+    if (t2 >= 1.0f) t2 -= 1.0f;
+    return (osc_tri_unit(t) + osc_tri_unit(t2)) * 0.5f;
 }
 
 // 7. Phaser
 static float osc_phaser(float t) {
-    float modulator = osc_tri(t / 64.0f); 
+    float modulator = osc_tri_unit(t * (1.0f / 64.0f)); 
     float phase_dist = t + (modulator * (2.0f / 3.0f)); 
-    return osc_tri(phase_dist);
+    phase_dist = wrap01_fast(phase_dist);
+    return osc_tri_unit(phase_dist);
+}
+
+static inline float note_to_freq_fast(float note) {
+    if (!g_audioLutReady) initAudioLuts();
+    if (note <= 0.0f) return g_noteFreqLut[0];
+    if (note >= 63.0f) return g_noteFreqLut[63];
+    int idx = (int)note;
+    if (idx >= 63) return g_noteFreqLut[63];
+    float frac = note - (float)idx;
+    float f0 = g_noteFreqLut[idx];
+    float f1 = g_noteFreqLut[idx + 1];
+    return f0 + (f1 - f0) * frac;
 }
 
 // --------------------------------------------------------------------------
@@ -69,7 +109,7 @@ static float osc_phaser(float t) {
 
 static float get_sample_for_state(ChannelState &state, int waveform, float freq) {
     // 1. Update Phase Accumulator
-    float dt = freq / float(AudioEngine::SAMPLE_RATE);
+    float dt = freq * kInvSampleRate;
     float old_phi = state.phi;
     state.phi += dt;
     
@@ -89,11 +129,11 @@ static float get_sample_for_state(ChannelState &state, int waveform, float freq)
 
     // 3. Generate Standard Waveforms
     switch (waveform) {
-        case 0: return osc_tri(state.phi);
-        case 1: return osc_tilted_saw(state.phi);
-        case 2: return osc_saw(state.phi);
-        case 3: return osc_square(state.phi);
-        case 4: return osc_pulse(state.phi);
+        case 0: return osc_tri_unit(state.phi);
+        case 1: return osc_tilted_saw_unit(state.phi);
+        case 2: return osc_saw_unit(state.phi);
+        case 3: return osc_square_unit(state.phi);
+        case 4: return osc_pulse_unit(state.phi);
         case 5: return osc_organ(state.phi);
         case 7: return osc_phaser(state.phi);
         default: return 0.0f;
@@ -106,6 +146,7 @@ static float get_sample_for_state(ChannelState &state, int waveform, float freq)
 
 void AudioEngine::init(Real8VM *parent) { 
     vm = parent; 
+    initAudioLuts();
 
     for (int i = 0; i < SNAP_COUNT; i++) {
         for (int c = 0; c < CHANNELS; c++) {
@@ -120,7 +161,7 @@ void AudioEngine::init(Real8VM *parent) {
 }
 
 float AudioEngine::note_to_freq(float note) {
-    return 65.406f * powf(2.0f, note / 12.0f);
+    return note_to_freq_fast(note);
 }
 
 // Stub for the interface method (now handled by internal helper)
@@ -129,11 +170,11 @@ float AudioEngine::get_waveform_sample(int waveform, float phi, ChannelState &st
     // Use the provided phase and avoid mutating state or interpreting freq_mult as Hz.
     (void)freq_mult;
     switch (waveform) {
-        case 0: return osc_tri(phi);
-        case 1: return osc_tilted_saw(phi);
-        case 2: return osc_saw(phi);
-        case 3: return osc_square(phi);
-        case 4: return osc_pulse(phi);
+        case 0: return osc_tri_unit(phi);
+        case 1: return osc_tilted_saw_unit(phi);
+        case 2: return osc_saw_unit(phi);
+        case 3: return osc_square_unit(phi);
+        case 4: return osc_pulse_unit(phi);
         case 5: return osc_organ(phi);
         case 6: return state.noise_sample;
         case 7: return osc_phaser(phi);
@@ -397,15 +438,12 @@ void AudioEngine::generateSamples(int16_t* out_buffer, int count) {
         return;
     }
 
-    double samples_per_tick = (double)SAMPLE_RATE / 120.0; 
-    const float C2_FREQ = 65.406f;
-
     for (int i = 0; i < count; i++) {
         
         // --- 1. SEQUENCER UPDATE ---
-        samples_per_tick_accumulator += 1.0;
-        while (samples_per_tick_accumulator >= samples_per_tick) {
-            samples_per_tick_accumulator -= samples_per_tick;
+        samples_per_tick_accumulator += 1.0f;
+        while (samples_per_tick_accumulator >= kSamplesPerTick) {
+            samples_per_tick_accumulator -= kSamplesPerTick;
             run_tick();
         }
 
@@ -436,9 +474,13 @@ void AudioEngine::generateSamples(int16_t* out_buffer, int count) {
                     pitch = ch.slide_start_pitch + (float(pitch_key) - ch.slide_start_pitch) * progress;
                     break;
                 case 2: // Vibrato
-                    ch.vib_phase += (15.0f / SAMPLE_RATE) * TWO_PI; 
-                    if(ch.vib_phase > TWO_PI) ch.vib_phase -= TWO_PI;
-                    pitch += sinf(ch.vib_phase) * 0.25f;
+                    ch.vib_phase += g_vibPhaseStep;
+                    if (ch.vib_phase >= 1.0f) ch.vib_phase -= 1.0f;
+                    {
+                        int vib_idx = (int)(ch.vib_phase * kVibLutSize) & kVibLutMask;
+                        float vib = (float)g_vibSinLut[vib_idx] * kVibLutScale;
+                        pitch += vib * kVibAmp;
+                    }
                     break;
                 case 3: // Drop
                     pitch = ch.slide_start_pitch * (1.0f - progress); 
@@ -466,7 +508,7 @@ void AudioEngine::generateSamples(int16_t* out_buffer, int count) {
                     ch.child.lfsr = 0x5205; 
                 }
 
-                float playback_rate = freq / C2_FREQ;
+                float playback_rate = freq / kC2Freq;
 
                 float row_per_sample = (1.0f / 183.0f) * playback_rate; 
                 ch.child.offset += row_per_sample;
@@ -519,9 +561,9 @@ void AudioEngine::generateSamples(int16_t* out_buffer, int count) {
 void AudioEngine::update(IReal8Host *host) {
     if (!host) return;
 
-    samples_accumulator += (double)SAMPLE_RATE / 60.0;
+    samples_accumulator += (float)SAMPLE_RATE / 60.0f;
     int gen = (int)samples_accumulator;
-    samples_accumulator -= gen;
+    samples_accumulator -= (float)gen;
 
     if (gen <= 0) return;
     if (gen > 2048) gen = 2048;

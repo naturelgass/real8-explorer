@@ -44,6 +44,8 @@ bool Real8CartLoader::LoadFromBuffer(IReal8Host* host, const std::vector<uint8_t
     memset(outData.music, 0, sizeof(outData.music));
     memset(outData.sprite_flags, 0, sizeof(outData.sprite_flags));
     outData.lua_code = "";
+    outData.lua_code_ptr = nullptr;
+    outData.lua_code_size = 0;
     outData.cart_id = ""; // Ensure you added this field to GameData in .h
 
     if (buffer.empty()) return false;

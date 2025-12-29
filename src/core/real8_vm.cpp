@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
 #include <algorithm>
 #include <vector>
 
@@ -47,6 +48,55 @@ static uint8_t find_closest_p8_color(uint8_t r, uint8_t g, uint8_t b)
         if (dist < min_dist) { min_dist = dist; best_idx = 128 + (i - 16); }
     }
     return best_idx;
+}
+
+namespace {
+#if defined(REAL8_GBA_ENABLE_AUDIO) && REAL8_GBA_ENABLE_AUDIO
+    constexpr bool kGbaAudioDisabledDefault = false;
+#else
+    constexpr bool kGbaAudioDisabledDefault = true;
+#endif
+
+    const int kGbaInitHookCount = 1000;
+    const int kGbaInitHookLimit = 4000;
+
+    int g_gbaInitHookTicks = 0;
+    int g_gbaInitHookLimit = 0;
+    bool g_gbaInitHookActive = false;
+    lua_Hook g_gbaInitPrevHook = nullptr;
+    int g_gbaInitPrevMask = 0;
+    int g_gbaInitPrevCount = 0;
+
+    void gbaInitTimeoutHook(lua_State* L, lua_Debug* ar) {
+        (void)ar;
+        if (!g_gbaInitHookActive) return;
+        if (++g_gbaInitHookTicks >= g_gbaInitHookLimit) {
+            g_gbaInitHookActive = false;
+            luaL_error(L, "GBA _init timeout");
+        }
+    }
+
+    class GbaInitHookGuard {
+    public:
+        GbaInitHookGuard(lua_State* L, int count, int limit) : L_(L) {
+            g_gbaInitHookTicks = 0;
+            g_gbaInitHookLimit = limit;
+            g_gbaInitHookActive = true;
+            g_gbaInitPrevHook = lua_gethook(L_);
+            g_gbaInitPrevMask = lua_gethookmask(L_);
+            g_gbaInitPrevCount = lua_gethookcount(L_);
+            lua_sethook(L_, gbaInitTimeoutHook, LUA_MASKCOUNT, count);
+        }
+
+        ~GbaInitHookGuard() {
+            g_gbaInitHookActive = false;
+            lua_sethook(L_, g_gbaInitPrevHook, g_gbaInitPrevMask, g_gbaInitPrevCount);
+        }
+
+    private:
+        lua_State* L_;
+    };
+
 }
 
 // --------------------------------------------------------------------------
@@ -121,11 +171,17 @@ Real8VM::Real8VM(IReal8Host *h) : host(h), debug(this), gpu(this)
     rom = nullptr;
     fb = nullptr;
 
+    skipDirtyRect = (host && strcmp(host->getPlatform(), "Libretro") == 0);
+
     dirty_x0 = WIDTH; dirty_y0 = HEIGHT;
     dirty_x1 = 0; dirty_y1 = 0;
     
-    memset(screen_buffer, 0, sizeof(screen_buffer));
-    updatePaletteLUT();
+#if REAL8_HAS_LIBRETRO_BUFFERS
+    if (!host || strcmp(host->getPlatform(), "GBA") != 0) {
+        memset(screen_buffer, 0, sizeof(screen_buffer));
+        updatePaletteLUT();
+    }
+#endif
 
     gpu.init();
     initDefaultPalette();
@@ -151,8 +207,13 @@ Real8VM::Real8VM(IReal8Host *h) : host(h), debug(this), gpu(this)
 
 Real8VM::~Real8VM()
 {
+    clearLuaRefs();
     if (L) { lua_close(L); L = nullptr; }
+#if defined(__GBA__)
+    fb = nullptr;
+#else
     if (fb) { P8_FREE(fb); fb = nullptr; }
+#endif
     if (ram) { P8_FREE(ram); ram = nullptr; }
     if (rom) { P8_FREE(rom); rom = nullptr; }
 }
@@ -192,7 +253,13 @@ bool Real8VM::initMemory()
 
 void Real8VM::rebootVM()
 {
+    const bool isGba = (host && strcmp(host->getPlatform(), "GBA") == 0);
+    auto gbaLog = [&](const char* msg) {
+        if (isGba && host) host->log("%s", msg);
+    };
+
     host->log("[VM] Rebooting...");
+    gbaLog("[BOOT] REBOOT BEGIN");
 
     if (!next_cart_path.empty()) {
         if (currentCartPath.empty()) currentCartPath = next_cart_path;
@@ -205,14 +272,23 @@ void Real8VM::rebootVM()
     patchModActive = false;
     
     // Reset Lua
+    clearLuaRefs();
     if (L) { lua_close(L); L = nullptr; }
+    gbaLog("[BOOT] REBOOT LUA CLOSED");
+    gbaLog("[BOOT] REBOOT LUA NEWSTATE");
     L = luaL_newstate();
+    if (L) {
+        gbaLog("[BOOT] REBOOT LUA NEWSTATE OK");
+    } else {
+        gbaLog("[BOOT] REBOOT LUA NEWSTATE FAIL");
+    }
     
     reset_requested = false;
     next_cart_path = "";
 
     // Run lib loading + API registration in protected calls.
     if (L) {
+        gbaLog("[BOOT] REBOOT LUA OPENLIBS");
         lua_pushcfunction(L, [](lua_State* L_) -> int {
             luaL_openlibs(L_);
             return 0;
@@ -223,13 +299,19 @@ void Real8VM::rebootVM()
             lua_pop(L, 1);
             lua_close(L);
             L = nullptr;
+            gbaLog("[BOOT] REBOOT LUA OPENLIBS FAIL");
+        } else {
+            gbaLog("[BOOT] REBOOT LUA OPENLIBS OK");
         }
     }
 
     if (L) {
+        gbaLog("[BOOT] REBOOT LUA REG");
         lua_pushlightuserdata(L, (void*)this);
         lua_setglobal(L, "__pico8_vm_ptr");
-        lua_sethook(L, Real8Debugger::luaHook, LUA_MASKLINE, 0);
+        if (host && strcmp(host->getPlatform(), "GBA") != 0) {
+            lua_sethook(L, Real8Debugger::luaHook, LUA_MASKLINE, 0);
+        }
 
         lua_pushcfunction(L, [](lua_State* L_) -> int {
             register_pico8_api(L_);
@@ -241,6 +323,9 @@ void Real8VM::rebootVM()
             lua_pop(L, 1);
             lua_close(L);
             L = nullptr;
+            gbaLog("[BOOT] REBOOT LUA REG FAIL");
+        } else {
+            gbaLog("[BOOT] REBOOT LUA REG OK");
         }
     }
 
@@ -258,6 +343,7 @@ void Real8VM::rebootVM()
     if (rom) memset(rom, 0, 0x8000);
     memset(custom_font, 0, 0x800);
     clear_menu_items();
+    gbaLog("[BOOT] REBOOT CORE OK");
 
     // Reset Hardware
     gpu.reset();
@@ -273,8 +359,10 @@ void Real8VM::rebootVM()
         ram[0x5F56] = hwState.mapMemMapping;
         ram[0x5F57] = hwState.widthOfTheMap;
     }
+    gbaLog("[BOOT] REBOOT HW OK");
     
     resetInputState();
+    gbaLog("[BOOT] REBOOT INPUT OK");
 
     // Reset Audio
     audio.music_pattern = -1;
@@ -286,6 +374,7 @@ void Real8VM::rebootVM()
         audio.channels[i].noise_sample = 0;
         audio.channels[i].tick_counter = 0;
     }
+    gbaLog("[BOOT] REBOOT AUDIO OK");
 }
 
 void Real8VM::forceExit()
@@ -336,12 +425,16 @@ void Real8VM::resetInputState()
 
 void Real8VM::runFrame()
 {
-    bool isLibretro = (host && strcmp(host->getPlatform(), "Libretro") == 0);
+    const bool isLibretro = (host && strcmp(host->getPlatform(), "Libretro") == 0);
+    const bool isGba = (host && strcmp(host->getPlatform(), "GBA") == 0);
+    const bool gbaAudioDisabled = isGba && kGbaAudioDisabledDefault;
 
     // Debugger Paused?
     if (debug.paused && !debug.step_mode) {
         show_frame(); 
-        audio.update(host);
+        if (!gbaAudioDisabled) {
+            audio.update(host);
+        }
         return; 
     }
 
@@ -362,20 +455,36 @@ void Real8VM::runFrame()
     // If we are skipping this frame (30fps simulation), we must still maintain audio
     // but we do NOT process input counters to prevent desync with Lua logic.
     if (!shouldRunLua) {
+#if REAL8_HAS_LIBRETRO_BUFFERS
         if (isLibretro) {
             // FIX: Calculate samples based on actual rate (22050 / 60 = 367.5)
             int samples_needed = (AudioEngine::SAMPLE_RATE / 60) + 1; 
             if (samples_needed > 2048) samples_needed = 2048;
             audio.generateSamples(static_audio_buffer, samples_needed);
             if (host) host->pushAudio(static_audio_buffer, samples_needed);
-        } else {
+        } else if (!gbaAudioDisabled) {
             audio.update(host);
         }
-        frame_is_dirty = false; // MARK FRAME AS CLEAN
+#else
+        if (!gbaAudioDisabled) {
+            audio.update(host);
+        }
+#endif
+#if REAL8_HAS_LIBRETRO_BUFFERS
+        if (!isGba) {
+            frame_is_dirty = false; // MARK FRAME AS CLEAN
+        }
+#endif
         return;
     }
 
-    frame_is_dirty = true; // MARK FRAME AS DIRTY
+#if REAL8_HAS_LIBRETRO_BUFFERS
+    if (!isGba) {
+        frame_is_dirty = true; // MARK FRAME AS DIRTY
+    }
+#endif
+
+    gpu.beginFrame();
 
     // --------------------------------------------------------------------------
     // INPUT PROCESSING (Synchronized with Logic Frame)
@@ -494,33 +603,29 @@ void Real8VM::runFrame()
     }
 
     // _update / _update60
-    lua_getglobal(L, "_update60");
-    if (lua_isfunction(L, -1)) {
+    if (lua_ref_update60 != LUA_NOREF) {
+        lua_rawgeti(L, LUA_REGISTRYINDEX, lua_ref_update60);
         if (!run_protected(0)) return;
-    } else {
-        lua_pop(L, 1);
-        lua_getglobal(L, "_update");
-        if (lua_isfunction(L, -1)) {
-            if (!run_protected(0)) return; 
-        } else {
-            lua_pop(L, 1);
-        }
+    } else if (lua_ref_update != LUA_NOREF) {
+        lua_rawgeti(L, LUA_REGISTRYINDEX, lua_ref_update);
+        if (!run_protected(0)) return;
     }
 
     // Debug Logs
     static int debug_log_timer = 0;
     if (showStats && ++debug_log_timer > 60) { 
         debug_log_timer = 0;
-        host->log("[GFX] CAM:%d,%d CLIP:%d,%d PEN:%d MASK:%02X FPS:%d",
-                  gpu.cam_x, gpu.cam_y, gpu.clip_x, gpu.clip_y, gpu.getPen(), gpu.draw_mask, debugFPS);
+        const bool isGba = (host && strcmp(host->getPlatform(), "GBA") == 0);
+        if (!isGba) {
+            host->log("[GFX] CAM:%d,%d CLIP:%d,%d PEN:%d MASK:%02X FPS:%d",
+                      gpu.cam_x, gpu.cam_y, gpu.clip_x, gpu.clip_y, gpu.getPen(), gpu.draw_mask, debugFPS);
+        }
     }
 
     // _draw
-    lua_getglobal(L, "_draw");
-    if (lua_isfunction(L, -1)) {
+    if (lua_ref_draw != LUA_NOREF) {
+        lua_rawgeti(L, LUA_REGISTRYINDEX, lua_ref_draw);
         run_protected(0);
-    } else {
-        lua_pop(L, 1);
     }
 
     lua_pop(L, 1); // Pop traceback
@@ -545,21 +650,27 @@ void Real8VM::runFrame()
             gpu.camera(0, 0); gpu.clip(0, 0, WIDTH, HEIGHT);
             int y0 = 128 - 7;
             gpu.rectfill(0, y0, 32, 127, 0); 
-            std::string s = "FPS:" + std::to_string(debugFPS);
-            gpu.pprint(s.c_str(), s.length(), 1, y0 + 1, 11);
+            char fpsText[16];
+            snprintf(fpsText, sizeof(fpsText), "FPS:%d", debugFPS);
+            gpu.pprint(fpsText, (int)strlen(fpsText), 1, y0 + 1, 11);
             gpu.camera(bk_cx, bk_cy); gpu.setPen(bk_pen);
         }
     }
 
     // Update Audio (Normal Path)
-    if (isLibretro) {
-        int samples_needed = (AudioEngine::SAMPLE_RATE / 60) + 1; 
-        if (samples_needed > 2048) samples_needed = 2048;
-        audio.generateSamples(static_audio_buffer, samples_needed);
-        if (host) host->pushAudio(static_audio_buffer, samples_needed);
-    } 
-    else {
+    if (!gbaAudioDisabled) {
+#if REAL8_HAS_LIBRETRO_BUFFERS
+        if (isLibretro) {
+            int samples_needed = (AudioEngine::SAMPLE_RATE / 60) + 1; 
+            if (samples_needed > 2048) samples_needed = 2048;
+            audio.generateSamples(static_audio_buffer, samples_needed);
+            if (host) host->pushAudio(static_audio_buffer, samples_needed);
+        } else {
+            audio.update(host);
+        }
+#else
         audio.update(host);
+#endif
     }
 
     mouse_wheel_event = 0;
@@ -599,10 +710,14 @@ bool Real8VM::loadGame(const GameData& game)
         Real8Tools::ApplyMods(this, host, modCartPath);
     };
 
-    if (!game.lua_code.empty()) {
-        debug.setSource(game.lua_code);
+    if (lua_len > 0) {
+        if (!useGbaInitWatchdog) {
+            if (!useGbaInitWatchdog) {
+            debug.setSource(game.lua_code);
+        }
+        }
         
-        if (luaL_loadbuffer(L, game.lua_code.c_str(), game.lua_code.length(), "cart") != LUA_OK) {
+        if (luaL_loadbuffer(L, lua_src, lua_len, "cart") != LUA_OK) {
             const char *err = lua_tostring(L, -1);
             host->log("[VM] Lua Parse Error: %s", err);
             lua_pop(L, 1);
@@ -643,13 +758,21 @@ bool Real8VM::loadGame(const GameData& game)
 
 bool Real8VM::loadGame(const GameData& game)
 {
+    const bool isGba = (host && strcmp(host->getPlatform(), "GBA") == 0);
+    auto gbaLog = [&](const char* msg) {
+        if (isGba && host) host->log("%s", msg);
+    };
+
+    gbaLog("[BOOT] loadGame");
     clearLastError();
     rebootVM();
+    gbaLog("[BOOT] reboot ok");
 
     if (!L) {
         setLastError("VM INIT", "Failed to create Lua state (OOM or init failure)");
         return false;
     }
+    gbaLog("[BOOT] lua ok");
 
     if (ram) {
         memcpy(ram + 0x0000, game.gfx, 0x2000);
@@ -660,8 +783,10 @@ bool Real8VM::loadGame(const GameData& game)
         if (rom) memcpy(rom, ram, 0x8000);
         gpu.pal_reset(); 
     }
+    gbaLog("[BOOT] cart ok");
 
     if (host) host->pushAudio(nullptr, 0);
+    gbaLog("[BOOT] audio ok");
 
     auto applyMods = [&]() {
         if (!host) return;
@@ -676,47 +801,83 @@ bool Real8VM::loadGame(const GameData& game)
     lua_pushcfunction(L, traceback);
     int errHandler = lua_gettop(L);
 
-    if (!game.lua_code.empty()) {
-        debug.setSource(game.lua_code);
+    const bool useGbaInitWatchdog = isGba;
+    auto pcallWithInitWatchdog = [&](int nargs) -> int {
+        if (!useGbaInitWatchdog) {
+            return lua_pcall(L, nargs, 0, errHandler);
+        }
+        GbaInitHookGuard guard(L, kGbaInitHookCount, kGbaInitHookLimit);
+        return lua_pcall(L, nargs, 0, errHandler);
+    };
 
-        if (luaL_loadbuffer(L, game.lua_code.c_str(), game.lua_code.length(), "cart") != LUA_OK) {
+    const char* lua_src = nullptr;
+    size_t lua_len = 0;
+    if (game.lua_code_ptr && game.lua_code_size > 0) {
+        lua_src = game.lua_code_ptr;
+        lua_len = game.lua_code_size;
+    } else {
+        lua_src = game.lua_code.c_str();
+        lua_len = game.lua_code.size();
+    }
+
+    if (useGbaInitWatchdog && host) {
+        host->log("[BOOT] Lua bytes: %lu", (unsigned long)lua_len);
+    }
+
+    if (lua_len > 0) {
+        if (!useGbaInitWatchdog) {
+            debug.setSource(game.lua_code);
+        }
+
+        if (useGbaInitWatchdog && host) host->log("[BOOT] Lua load");
+        if (luaL_loadbuffer(L, lua_src, lua_len, "cart") != LUA_OK) {
             const char* err = lua_tostring(L, -1);
             setLastError("LUA PARSE", "%s", err ? err : "(unknown parse error)");
             lua_pop(L, 2); // error + traceback
             return false;
         }
+        if (useGbaInitWatchdog && host) host->log("[BOOT] Lua load ok");
 
         // pcall with traceback
-        if (lua_pcall(L, 0, 0, errHandler) != LUA_OK) {
+        if (useGbaInitWatchdog && host) host->log("[BOOT] Lua run");
+        if (pcallWithInitWatchdog(0) != LUA_OK) {
             const char* err = lua_tostring(L, -1);
             if (err && strstr(err, "HALT")) { lua_pop(L, 2); return true; }
             setLastError("LUA RUNTIME", "%s", err ? err : "(unknown runtime error)");
             lua_pop(L, 2); // error + traceback
             return false;
         }
+        if (useGbaInitWatchdog && host) host->log("[BOOT] Lua run ok");
 
+        if (useGbaInitWatchdog && host) host->log("[BOOT] Mods");
         applyMods();
+        if (useGbaInitWatchdog && host) host->log("[BOOT] Mods ok");
 
         // _init (make it fatal so you see it immediately)
-        lua_getglobal(L, "_init");
-        if (lua_isfunction(L, -1)) {
-            if (lua_pcall(L, 0, 0, errHandler) != LUA_OK) {
+        cacheLuaRefs();
+        if (lua_ref_init != LUA_NOREF) {
+            lua_rawgeti(L, LUA_REGISTRYINDEX, lua_ref_init);
+            if (useGbaInitWatchdog && host) host->log("[BOOT] _init");
+            if (pcallWithInitWatchdog(0) != LUA_OK) {
                 const char* err = lua_tostring(L, -1);
                 setLastError("_INIT ERROR", "%s", err ? err : "(unknown _init error)");
                 lua_pop(L, 2); // error + traceback
                 return false;
             }
-        } else {
-            lua_pop(L, 1);
+            if (useGbaInitWatchdog && host) host->log("[BOOT] _init ok");
         }
+        cacheLuaRefs();
     } else {
         applyMods();
+        cacheLuaRefs();
     }
 
     lua_pop(L, 1); // pop traceback handler
 
     detectCartFPS();
+    if (useGbaInitWatchdog && host) host->log("[BOOT] fps ok");
     mark_dirty_rect(0, 0, 128, 128);
+    if (useGbaInitWatchdog && host) host->log("[BOOT] loadGame ok");
     return true;
 }
 
@@ -727,31 +888,69 @@ static inline int p8_hex(char c) {
     return 0;
 }
 
+void Real8VM::clearLuaRefs()
+{
+    if (!L) {
+        lua_ref_update = LUA_NOREF;
+        lua_ref_update60 = LUA_NOREF;
+        lua_ref_draw = LUA_NOREF;
+        lua_ref_init = LUA_NOREF;
+        return;
+    }
+
+    luaL_unref(L, LUA_REGISTRYINDEX, lua_ref_update);
+    luaL_unref(L, LUA_REGISTRYINDEX, lua_ref_update60);
+    luaL_unref(L, LUA_REGISTRYINDEX, lua_ref_draw);
+    luaL_unref(L, LUA_REGISTRYINDEX, lua_ref_init);
+    lua_ref_update = LUA_NOREF;
+    lua_ref_update60 = LUA_NOREF;
+    lua_ref_draw = LUA_NOREF;
+    lua_ref_init = LUA_NOREF;
+}
+
+void Real8VM::cacheLuaRefs()
+{
+    if (!L) return;
+    clearLuaRefs();
+
+    lua_getglobal(L, "_update60");
+    if (lua_isfunction(L, -1)) {
+        lua_ref_update60 = luaL_ref(L, LUA_REGISTRYINDEX);
+    } else {
+        lua_pop(L, 1);
+    }
+
+    lua_getglobal(L, "_update");
+    if (lua_isfunction(L, -1)) {
+        lua_ref_update = luaL_ref(L, LUA_REGISTRYINDEX);
+    } else {
+        lua_pop(L, 1);
+    }
+
+    lua_getglobal(L, "_draw");
+    if (lua_isfunction(L, -1)) {
+        lua_ref_draw = luaL_ref(L, LUA_REGISTRYINDEX);
+    } else {
+        lua_pop(L, 1);
+    }
+
+    lua_getglobal(L, "_init");
+    if (lua_isfunction(L, -1)) {
+        lua_ref_init = luaL_ref(L, LUA_REGISTRYINDEX);
+    } else {
+        lua_pop(L, 1);
+    }
+}
+
 void Real8VM::detectCartFPS()
 {
     if (!L) return;
-    lua_getglobal(L, "_update60");
-    if (lua_isfunction(L, -1)) targetFPS = 60;
-    else targetFPS = 30;
-    lua_pop(L, 1);
+    targetFPS = (lua_ref_update60 != LUA_NOREF) ? 60 : 30;
 }
 
 // --------------------------------------------------------------------------
 // MEMORY & PIXEL ACCESS
 // --------------------------------------------------------------------------
-
-void Real8VM::screenByteToFB(size_t idx, uint8_t v)
-{
-    if (idx >= 0x2000) return;
-    int y = idx >> 6;
-    int x = (idx & 0x3F) << 1;
-    
-    if (fb) {
-        fb[y][x] = v & 0x0F;
-        fb[y][x + 1] = (v >> 4) & 0x0F;
-    }
-    mark_dirty_rect(x, y, x + 1, y);
-}
 
 void Real8VM::mark_dirty_rect(int x0, int y0, int x1, int y1)
 {
@@ -800,6 +999,7 @@ bool Real8VM::map_check_flag(int x, int y, int w, int h, int flag)
 // --------------------------------------------------------------------------
 
 // New Helper: Pre-calculate RGBA colors once (or when palette changes)
+#if REAL8_HAS_LIBRETRO_BUFFERS
 void Real8VM::updatePaletteLUT() {
     for(int i=0; i<32; i++) {
         const uint8_t* c = Real8Gfx::PALETTE_RGB[i];
@@ -808,12 +1008,14 @@ void Real8VM::updatePaletteLUT() {
         palette_lut[i] = (c[0] << 16) | (c[1] << 8) | c[2];
     }
 }
+#endif
 
 void Real8VM::show_frame()
 {
     // --------------------------------------------------------
     // LIBRETRO OPTIMIZED PATH
     // --------------------------------------------------------
+#if REAL8_HAS_LIBRETRO_BUFFERS
     if (host && strcmp(host->getPlatform(), "Libretro") == 0) {
         
         // If the frame didn't update (30fps skip), 
@@ -851,6 +1053,7 @@ void Real8VM::show_frame()
         }
         return; // Libretro frontend handles the actual flip
     }
+#endif
 
     // --------------------------------------------------------
     // STANDALONE / OTHER PATH (Existing Logic)
@@ -864,11 +1067,19 @@ void Real8VM::show_frame()
     }
 
     uint8_t final_palette[16];
-    if (ram) for (int i=0;i<16;i++) final_palette[i] = ram[0x5F10+i];
-    else gpu.get_screen_palette(final_palette);
+    uint8_t *palette_map = nullptr;
+    if (ram) {
+        palette_map = ram + 0x5F10;
+    } else {
+        gpu.get_screen_palette(final_palette);
+        palette_map = final_palette;
+    }
 
-    if (alt_fb) host->flipScreens(alt_fb, fb, final_palette);
-    else        host->flipScreen(fb, final_palette);
+    if (alt_fb) {
+        host->flipScreens(alt_fb, fb, palette_map);
+    } else {
+        host->flipScreenDirty(fb, palette_map, dirty_x0, dirty_y0, dirty_x1, dirty_y1);
+    }
 
     dirty_x0 = WIDTH; dirty_y0 = HEIGHT; dirty_x1 = -1; dirty_y1 = -1;
 

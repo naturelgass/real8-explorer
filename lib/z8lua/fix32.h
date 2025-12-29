@@ -195,7 +195,29 @@ struct fix32
     static inline fix32 ceil(fix32 x) { return -floor(-x); }
     static inline fix32 floor(fix32 x) { return frombits(x.m_bits & 0xffff'0000); }
 
-    static fix32 pow(fix32 x, fix32 y) { return fix32(std::pow(double(x), double(y))); }
+    static fix32 pow(fix32 x, fix32 y) {
+        int32_t ybits = y.m_bits;
+        if ((ybits & 0xffff) == 0) {
+            int32_t exp = ybits >> 16;
+            if (exp == 0) {
+                return frombits(0x1'0000);
+            }
+            bool neg = exp < 0;
+            uint32_t e = neg ? (uint32_t)(-exp) : (uint32_t)exp;
+            fix32 base = x;
+            fix32 result = frombits(0x1'0000);
+            while (e) {
+                if (e & 1u) result = result * base;
+                base = base * base;
+                e >>= 1;
+            }
+            if (neg) {
+                return frombits(0x1'0000) / result;
+            }
+            return result;
+        }
+        return fix32(std::pow(double(x), double(y)));
+    }
 
     static inline fix32 lshr(fix32 x, int y)
     {
@@ -220,4 +242,3 @@ private:
 };
 
 }
-

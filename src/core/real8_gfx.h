@@ -16,6 +16,7 @@ public:
 
     void init();
     void reset(); // Replaces pal_reset, clip reset, etc.
+    void beginFrame();
 
     // --- State Management ---
     void camera(int x, int y);
@@ -123,9 +124,32 @@ private:
     bool use_alt_font = false;
     bool use_menu_font = false;
 
+    struct ObjSprite {
+        int n;
+        int x;
+        int y;
+        int w;
+        int h;
+        bool fx;
+        bool fy;
+    };
+
+    static constexpr int kMaxObjSprites = 128;
+    ObjSprite objSprites[kMaxObjSprites];
+    int objSpriteCount = 0;
+    bool objBatchAllowed = false;
+    bool objBatchActive = false;
+    bool paletteStateDirty = true;
+    bool paltStateDirty = true;
+    bool paletteIdentity = true;
+    bool paltDefault = true;
+
     // Helpers
     void put_pixel_raw(int x, int y, uint8_t col);
     void spr_fast(int n, int x, int y, int w, int h, bool fx, bool fy);
+    void updatePaletteFlags();
+    void invalidateObjBatch();
+    bool tryQueueObjSprite(int n, int x, int y, int w, int h, bool fx, bool fy);
     
     int draw_char_default(uint8_t p8, int x, int y, uint8_t col);
     int draw_char_custom(uint8_t p8, int x, int y, uint8_t col);

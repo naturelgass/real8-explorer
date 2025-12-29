@@ -51,6 +51,27 @@ public:
     virtual void flipScreens(uint8_t (*top)[128], uint8_t (*bottom)[128], uint8_t *palette_map) {
         flipScreen(bottom, palette_map);
     }
+    virtual void flipScreenDirty(uint8_t (*framebuffer)[128], uint8_t *palette_map,
+                                 int x0, int y0, int x1, int y1) {
+        (void)x0;
+        (void)y0;
+        (void)x1;
+        (void)y1;
+        flipScreen(framebuffer, palette_map);
+    }
+    virtual void beginFrame() {}
+    virtual bool queueSprite(const uint8_t* spriteSheet, int n, int x, int y, int w, int h, bool fx, bool fy) {
+        (void)spriteSheet;
+        (void)n;
+        (void)x;
+        (void)y;
+        (void)w;
+        (void)h;
+        (void)fx;
+        (void)fy;
+        return false;
+    }
+    virtual void cancelSpriteBatch() {}
 
     // --- System ---
     virtual unsigned long getMillis() = 0;
