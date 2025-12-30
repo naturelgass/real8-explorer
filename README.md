@@ -130,6 +130,9 @@ A PICO-8 explorer + emulator front-end for multiple platforms.
 ### Nintendo 3DS
 ![REAL-8 on 3DS](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8-3DS.png)
 
+### Nintendo GBA
+![REAL-8 on 3DS](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8-GBA.png)
+
 ### Windows – Debug Console
 ![Windows Debug Console](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/WindowsDebugConsole.png)
 
@@ -150,6 +153,10 @@ A PICO-8 explorer + emulator front-end for multiple platforms.
 - devkitPro + 3ds-dev + 3dstools
 - 3dstool (for packing assets)
 - Curl (for online feching)
+
+### Nintendo GBA (devkitARM / GBA Sdk)
+- devkitPro / devkitARM + GBA Sdk
+- Pico2GBA GUI Packer/Converter
 
 ### Libretro
 - Libretro toolchain / RetroArch environment
