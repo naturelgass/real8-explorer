@@ -1595,7 +1595,7 @@ void Real8Shell::renderCredits()
     // Line 2
     textY += 12;
     // \211 is the P8SCII code for the Copyright symbol
-    const char *line2 = "2026 by @natureglass"; 
+    const char *line2 = "by @natureglass"; 
     vm->gpu.pprint(line2, strlen(line2), getCenteredX(line2), textY, 7);
 
     // Line 3

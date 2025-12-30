@@ -519,6 +519,9 @@ void Real8VM::runFrame()
             }
         }
     }
+    if (host) {
+        host->consumeLatchedInput();
+    }
 
     // Update Legacy/Primary Player State for memory mapping
     btn_state = btn_states[0];

@@ -211,26 +211,21 @@ namespace {
         int selection = 0;
         std::vector<std::string> options;
         Real8Gfx::GfxState gfx_backup{};
+        bool showingCredits = false;
+        uint32_t inputMask = 0;
+        uint32_t prevInputMask = 0;
 
         void build(Real8VM& vm) {
             options.clear();
             options.push_back("CONTINUE");
             options.push_back("RESET GAME");
-
-            for (int i = 1; i <= 5; ++i) {
-                if (vm.custom_menu_items[i].active) {
-                    options.push_back(vm.custom_menu_items[i].label);
-                }
-            }
-
-            if (vm.hasState()) options.push_back("LOAD STATE");
-            options.push_back("SAVE STATE");
-            options.push_back("MUSIC");
-            options.push_back("SFX");
             options.push_back("SHOW FPS");
-            options.push_back("EXIT");
+            options.push_back("CREDITS");
 
             selection = 0;
+            showingCredits = false;
+            inputMask = 0;
+            prevInputMask = 0;
         }
 
         void open(Real8VM& vm) {
@@ -246,11 +241,13 @@ namespace {
             inputLatch = true;
         }
 
-        void syncInput(Real8VM& vm, IReal8Host& host) {
+        void syncInput(Real8VM& vm, GbaHost& host) {
+            prevInputMask = inputMask;
             for (int i = 0; i < 8; ++i) {
                 vm.btn_states[i] = host.getPlayerInput(i);
             }
-            vm.btn_mask = vm.btn_states[0];
+            inputMask = vm.btn_states[0];
+            vm.btn_mask = inputMask;
 
             for (int p = 0; p < 8; ++p) {
                 for (int b = 0; b < 6; ++b) {
@@ -261,6 +258,7 @@ namespace {
                     }
                 }
             }
+            host.consumeLatchedInput();
         }
 
         void renderMessage(Real8VM& vm, const char* header, const char* msg, int color) {
@@ -272,7 +270,48 @@ namespace {
             vm.gpu.setMenuFont(false);
         }
 
+        void renderCredits(Real8VM& vm) {
+            vm.gpu.setMenuFont(true);
+            vm.gpu.cls(0);
+            vm.gpu.fillp(0);
+
+            int w = 110;
+            int h = 70;
+            int x = (128 - w) / 2;
+            int y = (128 - h) / 2;
+
+            vm.gpu.rectfill(x, y, x + w, y + h, 1);
+            vm.gpu.rect(x, y, x + w, y + h, 12);
+            vm.gpu.rectfill(x, y, x + w, y + 9, 12);
+
+            const char* title = "CREDITS";
+            vm.gpu.pprint(title, (int)strlen(title), getCenteredX(title), y + 2, 7);
+
+            int textY = y + 18;
+            const char* line1 = "REAL-8 VM";
+            vm.gpu.pprint(line1, (int)strlen(line1), getCenteredX(line1), textY, 6);
+
+            textY += 12;
+            const char* line2 = "by @natureglass";
+            vm.gpu.pprint(line2, (int)strlen(line2), getCenteredX(line2), textY, 7);
+
+            textY += 8;
+            const char* line3 = "Alex Daskalakis";
+            vm.gpu.pprint(line3, (int)strlen(line3), getCenteredX(line3), textY, 7);
+
+            textY += 14;
+            std::string line4 = std::string("Ver ") + IReal8Host::REAL8_VERSION + " for " + vm.host->getPlatform();
+            vm.gpu.pprint(line4.c_str(), (int)line4.length(), getCenteredX(line4.c_str()), textY, 11);
+
+            vm.gpu.setMenuFont(false);
+        }
+
         void render(Real8VM& vm) {
+            if (showingCredits) {
+                renderCredits(vm);
+                return;
+            }
+
             vm.gpu.setMenuFont(true);
             vm.gpu.fillp(0xA5A5);
             vm.gpu.rectfill(0, 0, 128, 128, 0);
@@ -318,8 +357,16 @@ namespace {
             vm.gpu.setMenuFont(false);
         }
 
-        void update(Real8VM& vm, IReal8Host& host, GameData& game) {
+        void update(Real8VM& vm, GbaHost& host, GameData& game) {
             if (options.empty()) return;
+
+            if (showingCredits) {
+                if ((inputMask & ~prevInputMask) != 0) {
+                    showingCredits = false;
+                    close(vm);
+                }
+                return;
+            }
 
             if (vm.btnp(2)) {
                 selection--;
@@ -330,67 +377,32 @@ namespace {
                 if (selection >= (int)options.size()) selection = 0;
             }
 
-            if (vm.btnp(0) || vm.btnp(1)) {
-                const std::string& action = options[selection];
-                int change = vm.btnp(1) ? 1 : -1;
-                if (action == "MUSIC") {
-                    vm.volume_music = std::max(0, std::min(10, vm.volume_music + change));
-                } else if (action == "SFX") {
-                    vm.volume_sfx = std::max(0, std::min(10, vm.volume_sfx + change));
-                }
-            }
-
             if (vm.btnp(5)) {
                 const std::string& action = options[selection];
 
                 if (action == "CONTINUE") {
                     close(vm);
                 } else if (action == "RESET GAME") {
+                    showSplash();
+                    host.waitForVBlank();
                     vm.rebootVM();
                     if (vm.loadGame(game)) {
 #if REAL8_GBA_FORCE_30FPS
                         vm.targetFPS = 30;
 #endif
                         vm.resetInputState();
+                        host.resetVideo();
+                        host.clearBorders();
                         close(vm);
                     } else {
                         renderMessage(vm, "ERROR", "RESET FAILED", 8);
                         vm.show_frame();
                         build(vm);
                     }
-                } else if (action == "SAVE STATE") {
-                    vm.gpu.restoreState(gfx_backup);
-                    vm.saveState();
-                    vm.gpu.reset();
-                    renderMessage(vm, "SYSTEM", "STATE SAVED", 11);
-                    vm.show_frame();
-                    build(vm);
-                } else if (action == "LOAD STATE") {
-                    if (vm.loadState()) {
-                        renderMessage(vm, "SYSTEM", "STATE LOADED", 12);
-                        vm.show_frame();
-                        close(vm);
-                    } else {
-                        renderMessage(vm, "ERROR", "LOAD FAILED", 8);
-                        vm.show_frame();
-                    }
-                } else if (action == "MUSIC") {
-                    vm.volume_music = (vm.volume_music > 0) ? 0 : 10;
-                } else if (action == "SFX") {
-                    vm.volume_sfx = (vm.volume_sfx > 0) ? 0 : 10;
                 } else if (action == "SHOW FPS") {
                     vm.showStats = !vm.showStats;
-                } else if (action == "EXIT") {
-                    requestExit = true;
-                    close(vm);
-                } else {
-                    for (int i = 1; i <= 5; ++i) {
-                        if (vm.custom_menu_items[i].active && vm.custom_menu_items[i].label == action) {
-                            vm.run_menu_item(i);
-                            break;
-                        }
-                    }
-                    close(vm);
+                } else if (action == "CREDITS") {
+                    showingCredits = true;
                 }
             }
 
@@ -494,10 +506,10 @@ int main(void) {
     GbaInGameMenu menu;
 
     while (true) {
+        host.pollInput();
         static int frameCounter = 0;
         const bool runFrame = ((frameCounter++ % REAL8_GBA_FRAME_DIV) == 0);
         if (runFrame) {
-            host.pollInput();
             if (menu.active) {
                 menu.syncInput(vm, host);
                 menu.update(vm, host, game);

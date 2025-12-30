@@ -40,6 +40,7 @@ public:
 
     uint32_t getPlayerInput(int playerIdx) override;
     void pollInput() override;
+    void consumeLatchedInput() override;
 
     void openGamepadConfigUI() override;
     std::vector<uint8_t> getInputConfigData() override;
@@ -56,6 +57,7 @@ public:
     void updateOverlay() override;
 
     void renderDebugOverlay();
+    void showJitFailureMessage(const char* text, int ms);
 
 private:
     void initVideo();
@@ -64,6 +66,7 @@ private:
     void submitAudioFrame();
 #endif
     void blitFrameTiles(const uint8_t (*framebuffer)[128], int x0, int y0, int x1, int y1);
+    void blitFrameDirty(const uint8_t (*framebuffer)[128], int x0, int y0, int x1, int y1);
     void flushSpriteBatch();
     void pushDebugLine(const char* line);
     void drawDebugOverlay();
@@ -74,6 +77,7 @@ private:
     uint16_t keysHeldState = 0;
     uint16_t keysDownState = 0;
     uint32_t inputMask = 0;
+    uint32_t latchedInputMask = 0;
 
     static constexpr int kDebugLineLen = 40;
     static constexpr int kDebugLines = 6;
@@ -84,6 +88,7 @@ private:
     uint8_t lastPalette[16] = {};
     bool paletteValid = false;
     bool tileModeActive = false;
+    bool splashBackdropActive = false;
     bool tilesPending = false;
     int tilesX0 = 0;
     int tilesY0 = 0;

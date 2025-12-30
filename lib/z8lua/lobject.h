@@ -464,6 +464,10 @@ typedef struct LocVar {
 /*
 ** Function Prototypes
 */
+#if defined(LUA_GBA_BASELINE_JIT)
+struct LuaJitProto;
+#endif
+
 typedef struct Proto {
   CommonHeader;
   TValue *k;  /* constants used by the function */
@@ -483,6 +487,10 @@ typedef struct Proto {
   int linedefined;
   int lastlinedefined;
   GCObject *gclist;
+#if defined(LUA_GBA_BASELINE_JIT)
+  struct LuaJitProto *jit;
+  lu_byte jit_flags;
+#endif
   lu_byte numparams;  /* number of fixed parameters */
   lu_byte is_vararg;
   lu_byte maxstacksize;  /* maximum stack used by this function */
@@ -604,4 +612,3 @@ LUAI_FUNC void luaO_chunkid (char *out, const char *source, size_t len);
 
 
 #endif
-

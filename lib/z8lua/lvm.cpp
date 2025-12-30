@@ -25,6 +25,12 @@
 #include "ltable.h"
 #include "ltm.h"
 #include "lvm.h"
+#include "ljit_gba.h"
+
+#if defined(LUA_GBA_BASELINE_JIT)
+static int luaV_execute_jit(lua_State *L);
+static int g_lua_jit_fallback_depth = 0;
+#endif
 
 
 
@@ -576,6 +582,9 @@ void luaV_finishOp (lua_State *L) {
 #define vmcasenb(l,b)	case l: {b}		/* nb = no break */
 
 void luaV_execute (lua_State *L) {
+#if defined(LUA_GBA_BASELINE_JIT)
+  if (g_lua_jit_fallback_depth == 0 && luaV_execute_jit(L)) return;
+#endif
   CallInfo *ci = L->ci;
   LClosure *cl;
   TValue *k;
@@ -944,3 +953,618 @@ void luaV_execute (lua_State *L) {
   }
 }
 
+#if defined(LUA_GBA_BASELINE_JIT) && defined(__GNUC__)
+#if defined(__GBA__) && defined(LUA_GBA_JIT_IWRAM)
+#define LUA_GBA_IWRAM_CODE __attribute__((section(".iwram"), long_call))
+#else
+#define LUA_GBA_IWRAM_CODE
+#endif
+
+static LUA_GBA_IWRAM_CODE int luaV_execute_jit(lua_State *L) {
+  if (L->hookmask & (LUA_MASKLINE | LUA_MASKCOUNT)) return 0;
+
+  CallInfo *ci = L->ci;
+  LClosure *cl;
+  TValue *k;
+  StkId base;
+
+newframe:  /* reentry point when frame changes (call/return) */
+  lua_assert(ci == L->ci);
+  cl = clLvalue(ci->func);
+  if (!cl || !cl->p) return 0;
+
+  if (cl->p->jit_flags & LUA_JIT_FLAG_DISABLED) {
+    if (!(cl->p->jit_flags & LUA_JIT_FLAG_FAIL_SHOWN)) {
+      luaJitOnFailure(L);
+      cl->p->jit_flags |= LUA_JIT_FLAG_FAIL_SHOWN;
+    }
+    g_lua_jit_fallback_depth++;
+    luaV_execute(L);
+    g_lua_jit_fallback_depth--;
+    return 1;
+  }
+
+  if (!cl->p->jit) {
+    if (!luaJitCompileProto(L, cl->p)) {
+      if (!(cl->p->jit_flags & LUA_JIT_FLAG_FAIL_SHOWN)) {
+        luaJitOnFailure(L);
+        cl->p->jit_flags |= LUA_JIT_FLAG_FAIL_SHOWN;
+      }
+      g_lua_jit_fallback_depth++;
+      luaV_execute(L);
+      g_lua_jit_fallback_depth--;
+      return 1;
+    }
+  }
+
+  LuaJitProto *jit = cl->p->jit;
+  LuaJitOp *ops = jit->ops;
+  int pc_index = cast_int(ci->u.l.savedpc - cl->p->code);
+  if (pc_index < 0 || pc_index >= jit->sizecode) pc_index = 0;
+  LuaJitOp *pc = ops + pc_index;
+
+  k = cl->p->k;
+  base = ci->u.l.base;
+
+  static const void *const dispatch_table[NUM_OPCODES] = {
+    &&L_OP_MOVE,
+    &&L_OP_LOADK,
+    &&L_OP_LOADKX,
+    &&L_OP_LOADBOOL,
+    &&L_OP_LOADNIL,
+    &&L_OP_GETUPVAL,
+    &&L_OP_GETTABUP,
+    &&L_OP_GETTABLE,
+    &&L_OP_SETTABUP,
+    &&L_OP_SETUPVAL,
+    &&L_OP_SETTABLE,
+    &&L_OP_NEWTABLE,
+    &&L_OP_SELF,
+    &&L_OP_ADD,
+    &&L_OP_SUB,
+    &&L_OP_MUL,
+    &&L_OP_DIV,
+    &&L_OP_MOD,
+    &&L_OP_POW,
+    &&L_OP_IDIV,
+    &&L_OP_BAND,
+    &&L_OP_BOR,
+    &&L_OP_BXOR,
+    &&L_OP_SHL,
+    &&L_OP_SHR,
+    &&L_OP_LSHR,
+    &&L_OP_ROTL,
+    &&L_OP_ROTR,
+    &&L_OP_UNM,
+    &&L_OP_BNOT,
+    &&L_OP_NOT,
+    &&L_OP_PEEK,
+    &&L_OP_PEEK2,
+    &&L_OP_PEEK4,
+    &&L_OP_LEN,
+    &&L_OP_CONCAT,
+    &&L_OP_JMP,
+    &&L_OP_EQ,
+    &&L_OP_LT,
+    &&L_OP_LE,
+    &&L_OP_TEST,
+    &&L_OP_TESTSET,
+    &&L_OP_CALL,
+    &&L_OP_TAILCALL,
+    &&L_OP_RETURN,
+    &&L_OP_FORLOOP,
+    &&L_OP_FORPREP,
+    &&L_OP_TFORCALL,
+    &&L_OP_TFORLOOP,
+    &&L_OP_SETLIST,
+    &&L_OP_CLOSURE,
+    &&L_OP_VARARG,
+    &&L_OP_EXTRAARG
+  };
+
+  LuaJitOp *op;
+  StkId ra;
+
+#define JIT_BX(op) (cast_int((op)->b << SIZE_C) | cast_int((op)->c))
+#define JIT_SBX(op) (JIT_BX(op) - MAXARG_sBx)
+#define JIT_RB() check_exp(getBMode(op->op) == OpArgR, base + op->b)
+#define JIT_RC() check_exp(getCMode(op->op) == OpArgR, base + op->c)
+#define JIT_RKB() check_exp(getBMode(op->op) == OpArgK, \
+  ISK(op->b) ? k + INDEXK(op->b) : base + op->b)
+#define JIT_RKC() check_exp(getCMode(op->op) == OpArgK, \
+  ISK(op->c) ? k + INDEXK(op->c) : base + op->c)
+#define JIT_PROTECT(x) { {x;}; base = ci->u.l.base; }
+#define JIT_CHECKGC(L,c)  \
+  JIT_PROTECT( luaC_condGC(L,{L->top = (c);  /* limit of live values */ \
+                              luaC_step(L); \
+                              L->top = ci->top;})  /* restore top */ \
+               luai_threadyield(L); )
+#define JIT_ARITH_OP(opfn,tm) { \
+  TValue *rb = JIT_RKB(); \
+  TValue *rc = JIT_RKC(); \
+  if (ttisnumber(rb) && ttisnumber(rc)) { \
+    lua_Number nb = nvalue(rb), nc = nvalue(rc); \
+    setnvalue(ra, opfn(L, nb, nc)); \
+  } \
+  else { JIT_PROTECT(luaV_arith(L, ra, rb, rc, tm)); } }
+#define JIT_UNARY_OP(opfn,tm) {\
+  TValue *rb = JIT_RB(); \
+  if (ttisnumber(rb)) { \
+    lua_Number nb = nvalue(rb); \
+    setnvalue(ra, opfn(L, nb)); \
+  } \
+  else { JIT_PROTECT(luaV_arith(L, ra, rb, rb, tm)); } }
+#define JIT_NEXT() do { pc = op + 1; goto jit_dispatch; } while (0)
+#define JIT_JUMP(jop) do { \
+  int a = (jop)->a; \
+  if (a > 0) luaF_close(L, ci->u.l.base + a - 1); \
+  pc = (jop) + 1 + JIT_SBX(jop); \
+  goto jit_dispatch; \
+} while (0)
+#define JIT_NEXTJUMP() do { LuaJitOp *j = op + 1; JIT_JUMP(j); } while (0)
+
+jit_dispatch:
+  op = pc;
+  if (op < ops || op >= ops + jit->sizecode) return 1;
+  ci->u.l.savedpc = cl->p->code + (int)(op - ops) + 1;
+  ra = base + op->a;
+  lua_assert(base == ci->u.l.base);
+  lua_assert(base <= L->top && L->top < L->stack + L->stacksize);
+  goto *dispatch_table[op->op];
+
+L_OP_MOVE:
+  setobjs2s(L, ra, base + op->b);
+  JIT_NEXT();
+
+L_OP_LOADK: {
+  TValue *rb = k + JIT_BX(op);
+  setobj2s(L, ra, rb);
+  JIT_NEXT();
+}
+
+L_OP_LOADKX: {
+  TValue *rb = k + op->aux;
+  setobj2s(L, ra, rb);
+  pc = op + 1 + op->extra;
+  goto jit_dispatch;
+}
+
+L_OP_LOADBOOL:
+  setbvalue(ra, op->b);
+  if (op->c) pc = op + 2;
+  else pc = op + 1;
+  goto jit_dispatch;
+
+L_OP_LOADNIL: {
+  int b = op->b;
+  do {
+    setnilvalue(ra++);
+  } while (b--);
+  JIT_NEXT();
+}
+
+L_OP_GETUPVAL: {
+  int b = op->b;
+  setobj2s(L, ra, cl->upvals[b]->v);
+  JIT_NEXT();
+}
+
+L_OP_GETTABUP: {
+  int b = op->b;
+  TValue *uv = cl->upvals[b]->v;
+  if (ttistable(uv) && ISK(op->c)) {
+    TValue *kc = k + INDEXK(op->c);
+    if (ttisstring(kc)) {
+      Table *t = hvalue(uv);
+      if (!t->metatable || !fasttm(L, t->metatable, TM_INDEX)) {
+        const TValue *res = luaH_getstr(t, rawtsvalue(kc));
+        setobj2s(L, ra, res);
+        JIT_NEXT();
+      }
+    }
+  }
+  JIT_PROTECT(luaV_gettable(L, uv, JIT_RKC(), ra));
+  JIT_NEXT();
+}
+
+L_OP_GETTABLE:
+  if (ISK(op->c)) {
+    TValue *rb = base + op->b;
+    TValue *kc = k + INDEXK(op->c);
+    if (ttistable(rb) && ttisstring(kc)) {
+      Table *t = hvalue(rb);
+      if (!t->metatable || !fasttm(L, t->metatable, TM_INDEX)) {
+        const TValue *res = luaH_getstr(t, rawtsvalue(kc));
+        setobj2s(L, ra, res);
+        JIT_NEXT();
+      }
+    }
+  }
+  JIT_PROTECT(luaV_gettable(L, base + op->b, JIT_RKC(), ra));
+  JIT_NEXT();
+
+L_OP_SETTABUP: {
+  int a = op->a;
+  TValue *uv = cl->upvals[a]->v;
+  if (ttistable(uv) && ISK(op->b)) {
+    TValue *kb = k + INDEXK(op->b);
+    if (ttisstring(kb)) {
+      Table *t = hvalue(uv);
+      if (!t->metatable || !fasttm(L, t->metatable, TM_NEWINDEX)) {
+        TValue *slot = luaH_set(L, t, kb);
+        setobj2t(L, slot, JIT_RKC());
+        luaC_barrierback(L, obj2gco(t), slot);
+        JIT_NEXT();
+      }
+    }
+  }
+  JIT_PROTECT(luaV_settable(L, uv, JIT_RKB(), JIT_RKC()));
+  JIT_NEXT();
+}
+
+L_OP_SETUPVAL: {
+  int b = op->b;
+  UpVal *uv = cl->upvals[b];
+  setobj(L, uv->v, ra);
+  luaC_barrier(L, uv, ra);
+  JIT_NEXT();
+}
+
+L_OP_SETTABLE:
+  if (ISK(op->b) && ttistable(ra)) {
+    TValue *kb = k + INDEXK(op->b);
+    if (ttisstring(kb)) {
+      Table *t = hvalue(ra);
+      if (!t->metatable || !fasttm(L, t->metatable, TM_NEWINDEX)) {
+        TValue *slot = luaH_set(L, t, kb);
+        setobj2t(L, slot, JIT_RKC());
+        luaC_barrierback(L, obj2gco(t), slot);
+        JIT_NEXT();
+      }
+    }
+  }
+  JIT_PROTECT(luaV_settable(L, ra, JIT_RKB(), JIT_RKC()));
+  JIT_NEXT();
+
+L_OP_NEWTABLE: {
+  int b = op->b;
+  int c = op->c;
+  Table *t = luaH_new(L);
+  sethvalue(L, ra, t);
+  if (b != 0 || c != 0)
+    luaH_resize(L, t, luaO_fb2int(b), luaO_fb2int(c));
+  JIT_CHECKGC(L, ra + 1);
+  JIT_NEXT();
+}
+
+L_OP_SELF: {
+  TValue *rb = base + op->b;
+  setobjs2s(L, ra + 1, rb);
+  JIT_PROTECT(luaV_gettable(L, rb, JIT_RKC(), ra));
+  JIT_NEXT();
+}
+
+L_OP_ADD:  JIT_ARITH_OP(luai_numadd, TM_ADD); JIT_NEXT();
+L_OP_SUB:  JIT_ARITH_OP(luai_numsub, TM_SUB); JIT_NEXT();
+L_OP_MUL:  JIT_ARITH_OP(luai_nummul, TM_MUL); JIT_NEXT();
+L_OP_DIV:  JIT_ARITH_OP(luai_numdiv, TM_DIV); JIT_NEXT();
+L_OP_MOD:  JIT_ARITH_OP(luai_nummod, TM_MOD); JIT_NEXT();
+L_OP_POW:  JIT_ARITH_OP(luai_numpow, TM_POW); JIT_NEXT();
+L_OP_IDIV: JIT_ARITH_OP(luai_numidiv, TM_IDIV); JIT_NEXT();
+L_OP_BAND: JIT_ARITH_OP(luai_numband, TM_BAND); JIT_NEXT();
+L_OP_BOR:  JIT_ARITH_OP(luai_numbor, TM_BOR); JIT_NEXT();
+L_OP_BXOR: JIT_ARITH_OP(luai_numbxor, TM_BXOR); JIT_NEXT();
+L_OP_SHL:  JIT_ARITH_OP(luai_numshl, TM_SHL); JIT_NEXT();
+L_OP_SHR:  JIT_ARITH_OP(luai_numshr, TM_SHR); JIT_NEXT();
+L_OP_LSHR: JIT_ARITH_OP(luai_numlshr, TM_LSHR); JIT_NEXT();
+L_OP_ROTL: JIT_ARITH_OP(luai_numrotl, TM_ROTL); JIT_NEXT();
+L_OP_ROTR: JIT_ARITH_OP(luai_numrotr, TM_ROTR); JIT_NEXT();
+
+L_OP_UNM:   JIT_UNARY_OP(luai_numunm, TM_UNM); JIT_NEXT();
+L_OP_BNOT:  JIT_UNARY_OP(luai_numbnot, TM_BNOT); JIT_NEXT();
+L_OP_NOT:
+  setbvalue(ra, l_isfalse(base + op->b));
+  JIT_NEXT();
+L_OP_PEEK:  JIT_UNARY_OP(luai_numpeek, TM_PEEK); JIT_NEXT();
+L_OP_PEEK2: JIT_UNARY_OP(luai_numpeek2, TM_PEEK2); JIT_NEXT();
+L_OP_PEEK4: JIT_UNARY_OP(luai_numpeek4, TM_PEEK4); JIT_NEXT();
+L_OP_LEN:
+  JIT_PROTECT(luaV_objlen(L, ra, base + op->b));
+  JIT_NEXT();
+
+L_OP_CONCAT: {
+  int b = op->b;
+  int c = op->c;
+  StkId rb;
+  L->top = base + c + 1;
+  JIT_PROTECT(luaV_concat(L, c - b + 1));
+  ra = base + op->a;
+  rb = b + base;
+  setobjs2s(L, ra, rb);
+  JIT_CHECKGC(L, (ra >= rb ? ra + 1 : rb));
+  L->top = ci->top;
+  JIT_NEXT();
+}
+
+L_OP_JMP:
+  JIT_JUMP(op);
+
+L_OP_EQ: {
+  TValue *rb = JIT_RKB();
+  TValue *rc = JIT_RKC();
+  int cond = cast_int(equalobj(L, rb, rc)) != op->a;
+  base = ci->u.l.base;
+  if (cond) {
+    pc = op + 2;
+    goto jit_dispatch;
+  }
+  JIT_NEXTJUMP();
+}
+
+L_OP_LT: {
+  int cond = luaV_lessthan(L, JIT_RKB(), JIT_RKC()) != op->a;
+  base = ci->u.l.base;
+  if (cond) {
+    pc = op + 2;
+    goto jit_dispatch;
+  }
+  JIT_NEXTJUMP();
+}
+
+L_OP_LE: {
+  int cond = luaV_lessequal(L, JIT_RKB(), JIT_RKC()) != op->a;
+  base = ci->u.l.base;
+  if (cond) {
+    pc = op + 2;
+    goto jit_dispatch;
+  }
+  JIT_NEXTJUMP();
+}
+
+L_OP_TEST:
+  if (op->c ? l_isfalse(ra) : !l_isfalse(ra)) {
+    pc = op + 2;
+    goto jit_dispatch;
+  }
+  JIT_NEXTJUMP();
+
+L_OP_TESTSET: {
+  TValue *rb = base + op->b;
+  if (op->c ? l_isfalse(rb) : !l_isfalse(rb)) {
+    pc = op + 2;
+    goto jit_dispatch;
+  }
+  setobjs2s(L, ra, rb);
+  JIT_NEXTJUMP();
+}
+
+L_OP_CALL: {
+  int b = op->b;
+  int nresults = op->c - 1;
+  if (b != 0) L->top = ra + b;
+  if (L->hookmask == 0 && (ttislcf(ra) || ttisCclosure(ra))) {
+    ptrdiff_t funcr = savestack(L, ra);
+    lua_CFunction f = ttislcf(ra) ? fvalue(ra) : clCvalue(ra)->f;
+    luaD_checkstack(L, LUA_MINSTACK);
+    ra = restorestack(L, funcr);
+    CallInfo *nci = (L->ci = (L->ci->next ? L->ci->next : luaE_extendCI(L)));
+    nci->nresults = nresults;
+    nci->func = ra;
+    nci->top = L->top + LUA_MINSTACK;
+    lua_assert(nci->top <= L->stack_last);
+    nci->callstatus = 0;
+    luaC_checkGC(L);
+    lua_unlock(L);
+    int n = (*f)(L);
+    lua_lock(L);
+    luaD_poscall(L, L->top - n);
+    ci = L->ci;
+    base = ci->u.l.base;
+    JIT_NEXT();
+  }
+  if (luaD_precall(L, ra, nresults)) {
+    if (nresults >= 0) L->top = ci->top;
+    base = ci->u.l.base;
+    JIT_NEXT();
+  }
+  ci = L->ci;
+  ci->callstatus |= CIST_REENTRY;
+  goto newframe;
+}
+
+L_OP_TAILCALL: {
+  int b = op->b;
+  if (b != 0) L->top = ra + b;
+  lua_assert(op->c - 1 == LUA_MULTRET);
+  if (L->hookmask == 0 && (ttislcf(ra) || ttisCclosure(ra))) {
+    ptrdiff_t funcr = savestack(L, ra);
+    lua_CFunction f = ttislcf(ra) ? fvalue(ra) : clCvalue(ra)->f;
+    luaD_checkstack(L, LUA_MINSTACK);
+    ra = restorestack(L, funcr);
+    CallInfo *nci = (L->ci = (L->ci->next ? L->ci->next : luaE_extendCI(L)));
+    nci->nresults = LUA_MULTRET;
+    nci->func = ra;
+    nci->top = L->top + LUA_MINSTACK;
+    lua_assert(nci->top <= L->stack_last);
+    nci->callstatus = 0;
+    luaC_checkGC(L);
+    lua_unlock(L);
+    int n = (*f)(L);
+    lua_lock(L);
+    luaD_poscall(L, L->top - n);
+    ci = L->ci;
+    base = ci->u.l.base;
+    JIT_NEXT();
+  }
+  if (luaD_precall(L, ra, LUA_MULTRET)) {
+    base = ci->u.l.base;
+    JIT_NEXT();
+  }
+  else {
+    CallInfo *nci = L->ci;
+    CallInfo *oci = nci->previous;
+    StkId nfunc = nci->func;
+    StkId ofunc = oci->func;
+    StkId lim = nci->u.l.base + getproto(nfunc)->numparams;
+    int aux;
+    if (cl->p->sizep > 0) luaF_close(L, oci->u.l.base);
+    for (aux = 0; nfunc + aux < lim; aux++)
+      setobjs2s(L, ofunc + aux, nfunc + aux);
+    oci->u.l.base = ofunc + (nci->u.l.base - nfunc);
+    oci->top = L->top = ofunc + (L->top - nfunc);
+    oci->u.l.savedpc = nci->u.l.savedpc;
+    oci->callstatus |= CIST_TAIL;
+    ci = L->ci = oci;
+    lua_assert(L->top == oci->u.l.base + getproto(ofunc)->maxstacksize);
+    goto newframe;
+  }
+}
+
+L_OP_RETURN: {
+  int b = op->b;
+  if (b != 0) L->top = ra + b - 1;
+  if (cl->p->sizep > 0) luaF_close(L, base);
+  b = luaD_poscall(L, ra);
+  if (!(ci->callstatus & CIST_REENTRY))
+    return 1;
+  ci = L->ci;
+  if (b) L->top = ci->top;
+  lua_assert(isLua(ci));
+  lua_assert(GET_OPCODE(*((ci)->u.l.savedpc - 1)) == OP_CALL);
+  goto newframe;
+}
+
+L_OP_FORLOOP: {
+  lua_Number step = nvalue(ra + 2);
+  lua_Number idx = luai_numadd(L, (lua_Number)nvalue(ra), step);
+  lua_Number limit = nvalue(ra + 1);
+  if (luai_numlt(L, 0, step) ? luai_numle(L, nvalue(ra), idx)
+                             : luai_numle(L, idx, nvalue(ra)))
+  if (luai_numlt(L, 0, step) ? luai_numle(L, idx, limit)
+                             : luai_numle(L, limit, idx)) {
+    pc = op + 1 + JIT_SBX(op);
+    setnvalue(ra, idx);
+    setnvalue(ra + 3, idx);
+    goto jit_dispatch;
+  }
+  JIT_NEXT();
+}
+
+L_OP_FORPREP: {
+  const TValue *init = ra;
+  const TValue *plimit = ra + 1;
+  const TValue *pstep = ra + 2;
+  if (!tonumber(init, ra))
+    luaG_runerror(L, LUA_QL("for") " initial value must be a number");
+  else if (!tonumber(plimit, ra + 1))
+    luaG_runerror(L, LUA_QL("for") " limit must be a number");
+  else if (!tonumber(pstep, ra + 2))
+    luaG_runerror(L, LUA_QL("for") " step must be a number");
+  setnvalue(ra, luai_numsub(L, nvalue(ra), nvalue(pstep)));
+  pc = op + 1 + JIT_SBX(op);
+  goto jit_dispatch;
+}
+
+L_OP_TFORCALL: {
+  StkId cb = ra + 3;
+  setobjs2s(L, cb + 2, ra + 2);
+  setobjs2s(L, cb + 1, ra + 1);
+  setobjs2s(L, cb, ra);
+  L->top = cb + 3;
+  JIT_PROTECT(luaD_call(L, cb, op->c, 1));
+  L->top = ci->top;
+  pc = op + 1;
+  op = pc;
+  ci->u.l.savedpc = cl->p->code + (int)(op - ops) + 1;
+  ra = base + op->a;
+  lua_assert(op->op == OP_TFORLOOP);
+  goto L_OP_TFORLOOP;
+}
+
+L_OP_TFORLOOP:
+  if (!ttisnil(ra + 1)) {
+    setobjs2s(L, ra, ra + 1);
+    pc = op + 1 + JIT_SBX(op);
+    goto jit_dispatch;
+  }
+  JIT_NEXT();
+
+L_OP_SETLIST: {
+  int n = op->b;
+  int c = op->c;
+  int last;
+  Table *h;
+  if (n == 0) n = cast_int(L->top - ra) - 1;
+  if (c == 0) c = op->aux;
+  luai_runtimecheck(L, ttistable(ra));
+  h = hvalue(ra);
+  last = ((c - 1) * LFIELDS_PER_FLUSH) + n;
+  if (last > h->sizearray)
+    luaH_resizearray(L, h, last);
+  for (; n > 0; n--) {
+    TValue *val = ra + n;
+    luaH_setint(L, h, last--, val);
+    luaC_barrierback(L, obj2gco(h), val);
+  }
+  L->top = ci->top;
+  pc = op + 1 + op->extra;
+  goto jit_dispatch;
+}
+
+L_OP_CLOSURE: {
+  Proto *p = cl->p->p[JIT_BX(op)];
+  Closure *ncl = getcached(p, cl->upvals, base);
+  if (ncl == NULL)
+    pushclosure(L, p, cl->upvals, base, ra);
+  else
+    setclLvalue(L, ra, ncl);
+  JIT_CHECKGC(L, ra + 1);
+  JIT_NEXT();
+}
+
+L_OP_VARARG: {
+  int b = op->b - 1;
+  int j;
+  int n = cast_int(base - ci->func) - cl->p->numparams - 1;
+  if (b < 0) {
+    b = n;
+    JIT_PROTECT(luaD_checkstack(L, n));
+    ra = base + op->a;
+    L->top = ra + n;
+  }
+  for (j = 0; j < b; j++) {
+    if (j < n) {
+      setobjs2s(L, ra + j, base - n + j);
+    }
+    else {
+      setnilvalue(ra + j);
+    }
+  }
+  JIT_NEXT();
+}
+
+L_OP_EXTRAARG:
+  lua_assert(0);
+  JIT_NEXT();
+
+#undef JIT_BX
+#undef JIT_SBX
+#undef JIT_RB
+#undef JIT_RC
+#undef JIT_RKB
+#undef JIT_RKC
+#undef JIT_PROTECT
+#undef JIT_CHECKGC
+#undef JIT_ARITH_OP
+#undef JIT_UNARY_OP
+#undef JIT_NEXT
+#undef JIT_JUMP
+#undef JIT_NEXTJUMP
+}
+#undef LUA_GBA_IWRAM_CODE
+#elif defined(LUA_GBA_BASELINE_JIT)
+static int luaV_execute_jit(lua_State *L) {
+  (void)L;
+  return 0;
+}
+#endif

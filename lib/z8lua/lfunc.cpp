@@ -17,6 +17,7 @@
 #include "lmem.h"
 #include "lobject.h"
 #include "lstate.h"
+#include "ljit_gba.h"
 
 
 
@@ -128,11 +129,18 @@ Proto *luaF_newproto (lua_State *L) {
   f->linedefined = 0;
   f->lastlinedefined = 0;
   f->source = NULL;
+#if defined(LUA_GBA_BASELINE_JIT)
+  f->jit = NULL;
+  f->jit_flags = 0;
+#endif
   return f;
 }
 
 
 void luaF_freeproto (lua_State *L, Proto *f) {
+#if defined(LUA_GBA_BASELINE_JIT)
+  luaJitFreeProto(L, f);
+#endif
   luaM_freearray(L, f->code, f->sizecode);
   luaM_freearray(L, f->p, f->sizep);
   luaM_freearray(L, f->k, f->sizek);
@@ -158,4 +166,3 @@ const char *luaF_getlocalname (const Proto *f, int local_number, int pc) {
   }
   return NULL;  /* not found */
 }
-

@@ -8,8 +8,17 @@
 #include "../../core/real8_gfx.h"
 #include "../../core/real8_fonts.h"
 
+#include "build/splash_img_bin.h"
+#include "build/splash_pal_bin.h"
+
+struct lua_State;
+
 namespace {
     volatile uint32_t g_vblankTicks = 0;
+    GbaHost* g_gbaHost = nullptr;
+#if defined(__GBA__)
+    bool g_timerInit = false;
+#endif
 
 #ifndef REAL8_GBA_TILEMODE
 #define REAL8_GBA_TILEMODE 1
@@ -29,16 +38,32 @@ namespace {
     constexpr int kTileXOff = 7;
     constexpr int kTileYOff = 2;
     constexpr int kFirstScreenTile = 1;
-    constexpr int kCharBlock = 0;
+    constexpr int kCharBlock = 3;
     constexpr int kScreenBlock = 31;
     static EWRAM_DATA OBJATTR g_oamShadow[128];
 #endif
+    constexpr int kSplashPaletteOffset = 16;
 
 #if defined(__GBA__)
 #ifndef REG_DMA3SAD
 #define REG_DMA3SAD *(volatile u32*)(0x040000D4)
 #define REG_DMA3DAD *(volatile u32*)(0x040000D8)
 #define REG_DMA3CNT *(volatile u32*)(0x040000DC)
+#endif
+#ifndef REG_TM2CNT_L
+#define REG_TM2CNT_L *(volatile u16*)(0x04000108)
+#define REG_TM2CNT_H *(volatile u16*)(0x0400010A)
+#define REG_TM3CNT_L *(volatile u16*)(0x0400010C)
+#define REG_TM3CNT_H *(volatile u16*)(0x0400010E)
+#endif
+#ifndef TIMER_ENABLE
+#define TIMER_ENABLE (1u << 7)
+#endif
+#ifndef TIMER_CASCADE
+#define TIMER_CASCADE (1u << 2)
+#endif
+#ifndef TIMER_DIV_64
+#define TIMER_DIV_64 0x0001
 #endif
 #ifndef DMA_ENABLE
 #define DMA_ENABLE (1u << 31)
@@ -133,6 +158,69 @@ namespace {
 #ifndef BG_SIZE_0
 #define BG_SIZE_0 0x0000
 #endif
+#ifndef BG1_ON
+#define BG1_ON (1u << 9)
+#endif
+#ifndef REG_BG1CNT
+#define REG_BG1CNT *(volatile u16*)(0x0400000A)
+#endif
+#ifndef REG_BG1HOFS
+#define REG_BG1HOFS *(volatile u16*)(0x04000014)
+#endif
+#ifndef REG_BG1VOFS
+#define REG_BG1VOFS *(volatile u16*)(0x04000016)
+#endif
+#ifndef BG2_ON
+#define BG2_ON (1u << 10)
+#endif
+#ifndef REG_BG2CNT
+#define REG_BG2CNT *(volatile u16*)(0x0400000C)
+#endif
+#ifndef REG_WIN0H
+#define REG_WIN0H *(volatile u16*)(0x04000040)
+#endif
+#ifndef REG_WIN0V
+#define REG_WIN0V *(volatile u16*)(0x04000044)
+#endif
+#ifndef REG_WININ
+#define REG_WININ *(volatile u16*)(0x04000048)
+#endif
+#ifndef REG_WINOUT
+#define REG_WINOUT *(volatile u16*)(0x0400004A)
+#endif
+#ifndef WIN0_ON
+#define WIN0_ON (1u << 13)
+#endif
+#ifndef WININ_BG0
+#define WININ_BG0 (1u << 0)
+#endif
+#ifndef WININ_BG1
+#define WININ_BG1 (1u << 1)
+#endif
+#ifndef WININ_BG2
+#define WININ_BG2 (1u << 2)
+#endif
+#ifndef WININ_BG3
+#define WININ_BG3 (1u << 3)
+#endif
+#ifndef WININ_OBJ
+#define WININ_OBJ (1u << 4)
+#endif
+#ifndef WINOUT_BG0
+#define WINOUT_BG0 (1u << 8)
+#endif
+#ifndef WINOUT_BG1
+#define WINOUT_BG1 (1u << 9)
+#endif
+#ifndef WINOUT_BG2
+#define WINOUT_BG2 (1u << 10)
+#endif
+#ifndef WINOUT_BG3
+#define WINOUT_BG3 (1u << 11)
+#endif
+#ifndef WINOUT_OBJ
+#define WINOUT_OBJ (1u << 12)
+#endif
 
     static inline void dma3Copy32(const void* src, void* dst, u32 count) {
         REG_DMA3SAD = (u32)src;
@@ -150,6 +238,19 @@ namespace {
         REG_DMA3SAD = (u32)src;
         REG_DMA3DAD = (u32)dst;
         REG_DMA3CNT = count | DMA_16 | DMA_SRC_INC | DMA_DST_INC | DMA_START_NOW | DMA_ENABLE;
+    }
+
+    static inline void initSystemTimer() {
+#if defined(__GBA__)
+        if (g_timerInit) return;
+        REG_TM2CNT_H = 0;
+        REG_TM3CNT_H = 0;
+        REG_TM2CNT_L = 0;
+        REG_TM3CNT_L = 0;
+        REG_TM2CNT_H = TIMER_ENABLE | TIMER_DIV_64;
+        REG_TM3CNT_H = TIMER_ENABLE | TIMER_CASCADE;
+        g_timerInit = true;
+#endif
     }
 #endif
 
@@ -203,6 +304,14 @@ namespace {
 #endif
     }
 
+    static inline void blitPixel(u16* vram, int stride, int x, int y, uint8_t color) {
+        u16* dst = vram + (y * stride + (x >> 1));
+        u16 val = *dst;
+        if (x & 1) val = (u16)((val & 0x00FF) | (color << 8));
+        else val = (u16)((val & 0xFF00) | color);
+        *dst = val;
+    }
+
     void mgbaLog(const char* msg) {
         if (!msg) return;
         *kMgbaDebugEnable = 0xC0DE;
@@ -228,6 +337,40 @@ namespace {
     }
 #endif
 
+    static bool initSplashBackdrop() {
+        const size_t splashPixels = 240u * 160u;
+        if (splash_img_bin_size < splashPixels) return false;
+        const size_t palEntries = splash_pal_bin_size / 2;
+        if (palEntries == 0) return false;
+
+        const size_t maxColors = 256u - kSplashPaletteOffset;
+        const size_t palCount = (palEntries < maxColors) ? palEntries : maxColors;
+        const u16* pal = reinterpret_cast<const u16*>(splash_pal_bin);
+        for (size_t i = 0; i < palCount; ++i) {
+            BG_PALETTE[kSplashPaletteOffset + i] = pal[i];
+        }
+        for (size_t i = palCount; i < maxColors; ++i) {
+            BG_PALETTE[kSplashPaletteOffset + i] = 0;
+        }
+
+        u16* vram = (u16*)VRAM;
+        const uint8_t* src = splash_img_bin;
+        for (int y = 0; y < 160; ++y) {
+            u16* dst = vram + (y * 120);
+            for (int x = 0; x < 240; x += 2) {
+                uint8_t p0 = src[x];
+                uint8_t p1 = src[x + 1];
+                if (p0 >= palCount) p0 = 0;
+                if (p1 >= palCount) p1 = 0;
+                p0 = (uint8_t)(p0 + kSplashPaletteOffset);
+                p1 = (uint8_t)(p1 + kSplashPaletteOffset);
+                dst[x / 2] = (u16)(p0 | (p1 << 8));
+            }
+            src += 240;
+        }
+        return true;
+    }
+
     static uint32_t mapPicoButtons(uint16_t keys) {
         uint32_t mask = 0;
         if (keys & KEY_LEFT) mask |= (1u << 0);
@@ -242,6 +385,7 @@ namespace {
 }
 
 GbaHost::GbaHost() {
+    g_gbaHost = this;
     initVideo();
 #if defined(__GBA__) && REAL8_GBA_ENABLE_AUDIO
     initAudio();
@@ -255,47 +399,36 @@ void GbaHost::resetVideo() {
 void GbaHost::initVideo() {
 #if REAL8_GBA_TILEMODE
     initPackLut();
-    tileModeActive = true;
+    tileModeActive = false;
+    splashBackdropActive = false;
     paletteValid = false;
     tilesPending = false;
     tilesFb = nullptr;
     objCount = 0;
     objSpriteSheet = nullptr;
     objPending = false;
-    REG_DISPCNT = MODE_0 | BG0_ON | OBJ_ON | OBJ_1D_MAP;
-    REG_BG0CNT = BG_COLOR_16 | BG_SIZE_0 | BG_CHAR_BASE(kCharBlock) | BG_SCREEN_BASE(kScreenBlock) | BG_PRIORITY(1);
-    REG_BG0HOFS = 0;
-    REG_BG0VOFS = 0;
+    REG_DISPCNT = MODE_4 | BG2_ON;
     BG_PALETTE[0] = RGB5(0, 0, 0);
-    BG_PALETTE[16] = RGB5(0, 0, 0);
-
-    u16* map = reinterpret_cast<u16*>(SCREEN_BASE_BLOCK(kScreenBlock));
-    for (int i = 0; i < kMapTiles * kMapTiles; ++i) {
-        map[i] = (1u << 12);
-    }
-
-    u16* tiles = reinterpret_cast<u16*>(CHAR_BASE_BLOCK(kCharBlock));
-    const int tileCount = kFirstScreenTile + (kScreenTiles * kScreenTiles);
-    for (int i = 0; i < tileCount * 16; ++i) {
-        tiles[i] = 0;
-    }
-
-    for (int ty = 0; ty < kScreenTiles; ++ty) {
-        for (int tx = 0; tx < kScreenTiles; ++tx) {
-            const int mapIndex = (kTileYOff + ty) * kMapTiles + (kTileXOff + tx);
-            const int tileIndex = kFirstScreenTile + (ty * kScreenTiles) + tx;
-            map[mapIndex] = (u16)tileIndex;
+    splashBackdropActive = initSplashBackdrop();
+    if (!splashBackdropActive) {
+        u16* vram = (u16*)VRAM;
+        for (int i = 0; i < (240 * 160) / 2; ++i) {
+            vram[i] = 0;
         }
+        clearBorders();
     }
 #else
     tileModeActive = false;
     REG_DISPCNT = MODE_4 | BG2_ON;
-    u16* vram = (u16*)VRAM;
-    for (int i = 0; i < (240 * 160) / 2; ++i) {
-        vram[i] = 0;
+    BG_PALETTE[0] = RGB5(0, 0, 0);
+    splashBackdropActive = initSplashBackdrop();
+    if (!splashBackdropActive) {
+        u16* vram = (u16*)VRAM;
+        for (int i = 0; i < (240 * 160) / 2; ++i) {
+            vram[i] = 0;
+        }
+        clearBorders();
     }
-
-    clearBorders();
 #endif
 }
 
@@ -380,6 +513,7 @@ void GbaHost::clearBorders() {
 #if REAL8_GBA_TILEMODE
     if (tileModeActive) return;
 #endif
+    if (splashBackdropActive) return;
     // Keep borders black using palette index 16.
     BG_PALETTE[16] = RGB5(0, 0, 0);
     const int xOff = 56;
@@ -549,8 +683,8 @@ void GbaHost::flipScreen(uint8_t (*framebuffer)[128], uint8_t *palette_map) {
     blitFrame(vram, framebuffer, xOff, yOff);
 
 #ifdef REAL8_GBA_DEBUG_DOT
-    BG_PALETTE[1] = RGB5(31, 0, 31);
-    vram[0] = 0x0101;
+    BG_PALETTE[30] = RGB5(31, 0, 31);
+    vram[0] = 0x1E1E;
 #endif
 
     if (debugDirty) drawDebugOverlay();
@@ -597,11 +731,53 @@ void GbaHost::flipScreenDirty(uint8_t (*framebuffer)[128], uint8_t *palette_map,
         return;
     }
 #endif
-    flipScreen(framebuffer, palette_map);
+    if (!framebuffer) {
+        if (debugDirty) drawDebugOverlay();
+        return;
+    }
+
+    for (int i = 0; i < 16; ++i) {
+        uint8_t idx = palette_map ? palette_map[i] : (uint8_t)i;
+        if (idx >= 128 && idx <= 143) idx = (uint8_t)(16 + (idx - 128));
+        idx &= 0x1F;
+        if (!paletteValid || lastPalette[i] != idx) {
+            const uint8_t* rgb = Real8Gfx::PALETTE_RGB[idx];
+            BG_PALETTE[i] = RGB5(rgb[0] >> 3, rgb[1] >> 3, rgb[2] >> 3);
+            lastPalette[i] = idx;
+        }
+    }
+    paletteValid = true;
+
+    if (x0 <= 0 && y0 <= 0 && x1 >= 127 && y1 >= 127) {
+        u16* vram = (u16*)VRAM;
+        blitFrame(vram, framebuffer, 56, 16);
+    } else {
+        blitFrameDirty(framebuffer, x0, y0, x1, y1);
+    }
+
+#ifdef REAL8_GBA_DEBUG_DOT
+    BG_PALETTE[30] = RGB5(31, 0, 31);
+    ((u16*)VRAM)[0] = 0x1E1E;
+#endif
+
+    if (debugDirty) drawDebugOverlay();
 }
 
 unsigned long GbaHost::getMillis() {
+#if defined(__GBA__)
+    initSystemTimer();
+    u32 high1 = REG_TM3CNT_L;
+    u32 low = REG_TM2CNT_L;
+    u32 high2 = REG_TM3CNT_L;
+    if (high1 != high2) {
+        low = REG_TM2CNT_L;
+        high1 = high2;
+    }
+    u32 ticks = (high1 << 16) | low;
+    return (unsigned long)(((uint64_t)ticks * 1000u) >> 18);
+#else
     return (unsigned long)((g_vblankTicks * 1000u) / 60u);
+#endif
 }
 
 void GbaHost::log(const char* fmt, ...) {
@@ -669,7 +845,7 @@ uint32_t GbaHost::getPlayerInput(int playerIdx) {
     if (!inputPolled) {
         pollInput();
     }
-    return inputMask;
+    return inputMask | latchedInputMask;
 }
 
 void GbaHost::pollInput() {
@@ -678,7 +854,12 @@ void GbaHost::pollInput() {
     keysHeldState = (uint16_t)keysHeld();
     keysDownState = (uint16_t)keysDown();
     inputMask = mapPicoButtons(keysHeldState);
+    latchedInputMask |= mapPicoButtons(keysDownState);
     inputPolled = true;
+}
+
+void GbaHost::consumeLatchedInput() {
+    latchedInputMask = 0;
 }
 
 void GbaHost::openGamepadConfigUI() {
@@ -723,6 +904,62 @@ void GbaHost::pushAudio(const int16_t* samples, int count) {
     (void)samples;
     (void)count;
 #endif
+}
+
+void IWRAM_CODE GbaHost::blitFrameDirty(const uint8_t (*framebuffer)[128], int x0, int y0, int x1, int y1) {
+    if (!framebuffer) return;
+    if (x1 < 0 || y1 < 0 || x0 > 127 || y0 > 127) return;
+
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > 127) x1 = 127;
+    if (y1 > 127) y1 = 127;
+
+    const int stride = 240 / 2;
+    const int xOff = 56;
+    const int yOff = 16;
+    u16* vram = (u16*)VRAM;
+
+    for (int y = y0; y <= y1; ++y) {
+        int sx = x0;
+        int dx = xOff + x0;
+        const uint8_t* src = &framebuffer[y][x0];
+        u16* dst = vram + ((yOff + y) * stride + (dx >> 1));
+
+        if (dx & 1) {
+            blitPixel(vram, stride, dx, yOff + y, src[0]);
+            src++;
+            dst++;
+            dx++;
+            sx++;
+        }
+
+        int width = x1 - sx + 1;
+        if (width <= 0) continue;
+
+        int evenCount = width & ~1;
+        if (evenCount > 0) {
+#if defined(__GBA__)
+            const u32 srcAddr = (u32)src;
+            const u32 dstAddr = (u32)dst;
+            if (((srcAddr | dstAddr) & 3u) == 0 && ((evenCount & 3) == 0)) {
+                dma3Copy32(src, dst, (u32)(evenCount / 4));
+            } else {
+                dma3Copy16(src, dst, (u32)(evenCount / 2));
+            }
+#else
+            std::memcpy(dst, src, (size_t)evenCount);
+#endif
+            src += evenCount;
+            dst += evenCount / 2;
+            dx += evenCount;
+            sx += evenCount;
+        }
+
+        if (sx <= x1) {
+            blitPixel(vram, stride, dx, yOff + y, src[0]);
+        }
+    }
 }
 
 NetworkInfo GbaHost::getNetworkInfo() {
@@ -795,6 +1032,27 @@ void GbaHost::drawDebugOverlay() {
     drawText4x6(2, y0 + 1, debugLines[idx], 31);
 }
 
+void GbaHost::showJitFailureMessage(const char* text, int ms) {
+    if (!text || !text[0]) {
+        delayMs(ms);
+        return;
+    }
+
+    const int len = (int)std::strlen(text);
+    int msgW = (len * 5) - 1;
+    if (msgW < 0) msgW = 0;
+    int x = (240 - msgW) / 2;
+    int y = (160 - 6) / 2;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+
+    BG_PALETTE[31] = RGB5(31, 31, 31);
+    BG_PALETTE[0] = RGB5(0, 0, 0);
+    fillRect(x - 2, y - 2, msgW + 4, 10, 0);
+    drawText4x6(x, y, text, 31);
+    delayMs(ms);
+}
+
 void GbaHost::drawChar4x6(int x, int y, char c, uint8_t color) {
     const uint8_t* rows = p8_4x6_bits(static_cast<uint8_t>(c));
     for (int row = 0; row < 6; ++row) {
@@ -840,4 +1098,10 @@ void GbaHost::putPixel(int x, int y, uint8_t color) {
     if (x & 1) val = (u16)((val & 0x00FF) | (color << 8));
     else val = (u16)((val & 0xFF00) | color);
     vram[idx] = val;
+}
+
+void luaJitOnFailure(lua_State* L) {
+    (void)L;
+    if (!g_gbaHost) return;
+    g_gbaHost->showJitFailureMessage("JIT LOAD FAILED", 2000);
 }

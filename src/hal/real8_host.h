@@ -97,6 +97,8 @@ public:
     virtual void pollInput() = 0; 
     // Clears host-level input state (e.g., sticky keys on exit)
     virtual void clearInputState() {}
+    // Allows hosts to clear any latched presses after a logic frame consumes them.
+    virtual void consumeLatchedInput() {}
     
     virtual MouseState getMouseState() { return {0, 0, 0}; }
     virtual bool isKeyDownScancode(int scancode) { return false; }
