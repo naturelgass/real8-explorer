@@ -18,6 +18,19 @@
 #include <algorithm>
 #include <vector>
 
+#if defined(__GBA__) && !defined(REAL8_GBA_ENABLE_DEBUGGER)
+#define REAL8_GBA_ENABLE_DEBUGGER 0
+#endif
+#if defined(__GBA__) && !defined(REAL8_GBA_ENABLE_STATS)
+#define REAL8_GBA_ENABLE_STATS 0
+#endif
+#if defined(__GBA__) && !defined(REAL8_GBA_FAST_LUA)
+#define REAL8_GBA_FAST_LUA 1
+#endif
+#ifndef REAL8_GBA_MAX_PLAYERS
+#define REAL8_GBA_MAX_PLAYERS 2
+#endif
+
 // --------------------------------------------------------------------------
 // STATIC HELPERS & PALETTE
 // --------------------------------------------------------------------------
@@ -99,6 +112,55 @@ namespace {
 
 }
 
+#if REAL8_PROFILE_ENABLED && defined(__GBA__)
+#ifndef REG_TM2CNT_L
+#define REG_TM2CNT_L *(volatile uint16_t*)(0x04000108)
+#define REG_TM2CNT_H *(volatile uint16_t*)(0x0400010A)
+#define REG_TM3CNT_L *(volatile uint16_t*)(0x0400010C)
+#define REG_TM3CNT_H *(volatile uint16_t*)(0x0400010E)
+#endif
+#ifndef TIMER_ENABLE
+#define TIMER_ENABLE (1u << 7)
+#endif
+#ifndef TIMER_CASCADE
+#define TIMER_CASCADE (1u << 2)
+#endif
+#ifndef TIMER_DIV_1
+#define TIMER_DIV_1 0x0000
+#endif
+
+namespace {
+    bool g_profileTimerInit = false;
+
+    static inline void profileInitTimer() {
+        if (g_profileTimerInit) return;
+        if (REG_TM2CNT_H & TIMER_ENABLE) {
+            g_profileTimerInit = true;
+            return;
+        }
+        REG_TM2CNT_H = 0;
+        REG_TM3CNT_H = 0;
+        REG_TM2CNT_L = 0;
+        REG_TM3CNT_L = 0;
+        REG_TM2CNT_H = TIMER_ENABLE | TIMER_DIV_1;
+        REG_TM3CNT_H = TIMER_ENABLE | TIMER_CASCADE;
+        g_profileTimerInit = true;
+    }
+
+    static inline uint32_t profileReadCycles() {
+        profileInitTimer();
+        uint32_t high1 = REG_TM3CNT_L;
+        uint32_t low = REG_TM2CNT_L;
+        uint32_t high2 = REG_TM3CNT_L;
+        if (high1 != high2) {
+            low = REG_TM2CNT_L;
+            high1 = high2;
+        }
+        return (high1 << 16) | low;
+    }
+}
+#endif
+
 // --------------------------------------------------------------------------
 // ERROR HANDLING (Using Debugger)
 // --------------------------------------------------------------------------
@@ -133,6 +195,7 @@ static int traceback(lua_State *L) {
     // Standard stack trace
     luaL_traceback(L, L, msg, 1);
     
+#if !defined(__GBA__) || REAL8_GBA_ENABLE_DEBUGGER
     if (vm && vm->host && vm->host->isConsoleOpen()) {
         vm->host->log("[LUA ERROR] %s", msg);
 
@@ -156,6 +219,7 @@ static int traceback(lua_State *L) {
             vm->host->waitForDebugEvent();
         }
     }
+#endif
     
     return 1;
 }
@@ -171,13 +235,15 @@ Real8VM::Real8VM(IReal8Host *h) : host(h), debug(this), gpu(this)
     rom = nullptr;
     fb = nullptr;
 
-    skipDirtyRect = (host && strcmp(host->getPlatform(), "Libretro") == 0);
+    isLibretroPlatform = (host && strcmp(host->getPlatform(), "Libretro") == 0);
+    isGbaPlatform = (host && strcmp(host->getPlatform(), "GBA") == 0);
+    skipDirtyRect = isLibretroPlatform;
 
     dirty_x0 = WIDTH; dirty_y0 = HEIGHT;
     dirty_x1 = 0; dirty_y1 = 0;
     
 #if REAL8_HAS_LIBRETRO_BUFFERS
-    if (!host || strcmp(host->getPlatform(), "GBA") != 0) {
+    if (!isGbaPlatform) {
         memset(screen_buffer, 0, sizeof(screen_buffer));
         updatePaletteLUT();
     }
@@ -253,7 +319,7 @@ bool Real8VM::initMemory()
 
 void Real8VM::rebootVM()
 {
-    const bool isGba = (host && strcmp(host->getPlatform(), "GBA") == 0);
+    const bool isGba = isGbaPlatform;
     auto gbaLog = [&](const char* msg) {
         if (isGba && host) host->log("%s", msg);
     };
@@ -309,9 +375,11 @@ void Real8VM::rebootVM()
         gbaLog("[BOOT] REBOOT LUA REG");
         lua_pushlightuserdata(L, (void*)this);
         lua_setglobal(L, "__pico8_vm_ptr");
-        if (host && strcmp(host->getPlatform(), "GBA") != 0) {
+#if !defined(__GBA__) || REAL8_GBA_ENABLE_DEBUGGER
+        if (!isGba) {
             lua_sethook(L, Real8Debugger::luaHook, LUA_MASKLINE, 0);
         }
+#endif
 
         lua_pushcfunction(L, [](lua_State* L_) -> int {
             register_pico8_api(L_);
@@ -379,7 +447,9 @@ void Real8VM::rebootVM()
 
 void Real8VM::forceExit()
 {
+#if !defined(__GBA__) || REAL8_GBA_ENABLE_DEBUGGER
     if (debug.paused) debug.forceExit();
+#endif
     saveCartData();
     for (int i = 0; i < 4; i++) {
         audio.channels[i].sfx_id = -1;
@@ -425,18 +495,28 @@ void Real8VM::resetInputState()
 
 void Real8VM::runFrame()
 {
-    const bool isLibretro = (host && strcmp(host->getPlatform(), "Libretro") == 0);
-    const bool isGba = (host && strcmp(host->getPlatform(), "GBA") == 0);
+    const bool isLibretro = isLibretroPlatform;
+    const bool isGba = isGbaPlatform;
+#if !defined(__GBA__)
     const bool gbaAudioDisabled = isGba && kGbaAudioDisabledDefault;
+#endif
 
+#if !defined(__GBA__) || REAL8_GBA_ENABLE_DEBUGGER
     // Debugger Paused?
     if (debug.paused && !debug.step_mode) {
         show_frame(); 
+#if defined(__GBA__)
+    #if REAL8_GBA_ENABLE_AUDIO
+        audio.update(host);
+    #endif
+#else
         if (!gbaAudioDisabled) {
             audio.update(host);
         }
+#endif
         return; 
     }
+#endif
 
     // --------------------------------------------------------------------------
     // FRAME TIMING & SKIPPING
@@ -452,10 +532,16 @@ void Real8VM::runFrame()
         shouldRunLua = false;
     }
 
-    // If we are skipping this frame (30fps simulation), we must still maintain audio
-    // but we do NOT process input counters to prevent desync with Lua logic.
+    // If we are skipping this frame (30fps simulation), we only maintain audio
+    // on platforms that require it. We do NOT process input counters to prevent
+    // desync with Lua logic.
     if (!shouldRunLua) {
-#if REAL8_HAS_LIBRETRO_BUFFERS
+#if defined(__GBA__)
+    #if REAL8_GBA_ENABLE_AUDIO
+        audio.update(host);
+    #endif
+#else
+    #if REAL8_HAS_LIBRETRO_BUFFERS
         if (isLibretro) {
             // FIX: Calculate samples based on actual rate (22050 / 60 = 367.5)
             int samples_needed = (AudioEngine::SAMPLE_RATE / 60) + 1; 
@@ -465,10 +551,11 @@ void Real8VM::runFrame()
         } else if (!gbaAudioDisabled) {
             audio.update(host);
         }
-#else
+    #else
         if (!gbaAudioDisabled) {
             audio.update(host);
         }
+    #endif
 #endif
 #if REAL8_HAS_LIBRETRO_BUFFERS
         if (!isGba) {
@@ -489,7 +576,8 @@ void Real8VM::runFrame()
     // --------------------------------------------------------------------------
     // INPUT PROCESSING (Synchronized with Logic Frame)
     // --------------------------------------------------------------------------
-    
+
+    const int maxPlayers = isGba ? REAL8_GBA_MAX_PLAYERS : 8;
     if (host) {
         // 1. Poll Events: 
         // Windows needs explicit polling. Libretro handles it externally.
@@ -498,7 +586,7 @@ void Real8VM::runFrame()
         }
 
         // 2. Fetch State:
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < maxPlayers; i++) {
             last_btn_states[i] = btn_states[i]; // Track history
             btn_states[i] = host->getPlayerInput(i);
         }
@@ -506,7 +594,7 @@ void Real8VM::runFrame()
 
     // Update Internal Counters (btnp support)
     // This MUST happen here so counters increment only once per logic frame.
-    for (int p = 0; p < 8; p++) {
+    for (int p = 0; p < maxPlayers; p++) {
         uint32_t state = btn_states[p];
         
         for (int b = 0; b < 6; b++) {
@@ -547,6 +635,7 @@ void Real8VM::runFrame()
     // --------------------------------------------------------------------------
     // FPS MONITORING
     // --------------------------------------------------------------------------
+#if !defined(__GBA__) || REAL8_GBA_ENABLE_STATS
     static unsigned long last_fps_time = 0;
     static int fps_counter = 0;
     
@@ -562,12 +651,17 @@ void Real8VM::runFrame()
             last_fps_time = now;
         }
     }
+#endif
 
     // --------------------------------------------------------------------------
     // LUA EXECUTION
     // --------------------------------------------------------------------------
+#if defined(__GBA__) && REAL8_GBA_FAST_LUA
+    const int errHandler = 0;
+#else
     lua_pushcfunction(L, traceback);
-    int errHandler = lua_gettop(L);
+    const int errHandler = lua_gettop(L);
+#endif
 
     auto run_protected = [&](int nargs = 0) -> bool {
         int result = lua_pcall(L, nargs, 0, errHandler);
@@ -615,28 +709,34 @@ void Real8VM::runFrame()
     }
 
     // Debug Logs
+#if !defined(__GBA__) || REAL8_GBA_ENABLE_STATS
     static int debug_log_timer = 0;
     if (showStats && ++debug_log_timer > 60) { 
         debug_log_timer = 0;
-        const bool isGba = (host && strcmp(host->getPlatform(), "GBA") == 0);
         if (!isGba) {
             host->log("[GFX] CAM:%d,%d CLIP:%d,%d PEN:%d MASK:%02X FPS:%d",
                       gpu.cam_x, gpu.cam_y, gpu.clip_x, gpu.clip_y, gpu.getPen(), gpu.draw_mask, debugFPS);
         }
     }
+#endif
 
     // _draw
     if (lua_ref_draw != LUA_NOREF) {
+        REAL8_PROFILE_BEGIN(this, kProfileDraw);
         lua_rawgeti(L, LUA_REGISTRYINDEX, lua_ref_draw);
         run_protected(0);
+        REAL8_PROFILE_END(this, kProfileDraw);
     }
 
+#if !(defined(__GBA__) && REAL8_GBA_FAST_LUA)
     lua_pop(L, 1); // Pop traceback
+#endif
 
     // --------------------------------------------------------------------------
     // 5. OVERLAYS & AUDIO UPDATE
     // --------------------------------------------------------------------------
     
+#if !defined(__GBA__) || REAL8_GBA_ENABLE_STATS
     // FPS Overlay
     if (showStats && L) {
         lua_getglobal(L, "__p8_sys_overlay");
@@ -659,10 +759,107 @@ void Real8VM::runFrame()
             gpu.camera(bk_cx, bk_cy); gpu.setPen(bk_pen);
         }
     }
+#if REAL8_PROFILE_ENABLED
+    if (showStats && isGba && profile_last_frame_cycles > 0) {
+        int bk_cx = gpu.cam_x, bk_cy = gpu.cam_y;
+        int bk_clip_x = gpu.clip_x, bk_clip_y = gpu.clip_y;
+        int bk_clip_w = gpu.clip_w, bk_clip_h = gpu.clip_h;
+        uint8_t bk_pen = gpu.getPen();
+        gpu.camera(0, 0); gpu.clip(0, 0, WIDTH, HEIGHT);
+
+        const int line_h = 6;
+        const int box_h = (line_h * 8) + 2;
+        gpu.rectfill(0, 0, 127, box_h - 1, 0);
+
+        auto to_us = [](uint32_t cycles) -> uint32_t {
+            return (uint32_t)(((uint64_t)cycles * 1000000u) / 16777216u);
+        };
+        auto pct10 = [&](uint32_t cycles) -> uint32_t {
+            return profile_last_frame_cycles ? (uint32_t)((cycles * 1000u) / profile_last_frame_cycles) : 0u;
+        };
+
+        char line[32];
+        int y = 1;
+        uint32_t vm_us = to_us(profile_last_bucket_cycles[kProfileVm]);
+        uint32_t dr_us = to_us(profile_last_bucket_cycles[kProfileDraw]);
+        uint32_t bl_us = to_us(profile_last_bucket_cycles[kProfileBlit]);
+        uint32_t in_us = to_us(profile_last_bucket_cycles[kProfileInput]);
+        uint32_t mn_us = to_us(profile_last_bucket_cycles[kProfileMenu]);
+        uint32_t id_us = to_us(profile_last_bucket_cycles[kProfileIdle]);
+        const uint32_t top_cycles = profile_last_bucket_cycles[kProfileVm]
+            + profile_last_bucket_cycles[kProfileBlit]
+            + profile_last_bucket_cycles[kProfileInput]
+            + profile_last_bucket_cycles[kProfileMenu];
+        const uint32_t rest_cycles = (profile_last_frame_cycles > top_cycles)
+            ? (profile_last_frame_cycles - top_cycles)
+            : 0u;
+        uint32_t rs_us = to_us(rest_cycles);
+        uint32_t vm_pct10 = pct10(profile_last_bucket_cycles[kProfileVm]);
+        uint32_t dr_pct10 = pct10(profile_last_bucket_cycles[kProfileDraw]);
+        uint32_t bl_pct10 = pct10(profile_last_bucket_cycles[kProfileBlit]);
+        uint32_t in_pct10 = pct10(profile_last_bucket_cycles[kProfileInput]);
+        uint32_t mn_pct10 = pct10(profile_last_bucket_cycles[kProfileMenu]);
+        uint32_t id_pct10 = pct10(profile_last_bucket_cycles[kProfileIdle]);
+        uint32_t rs_pct10 = pct10(rest_cycles);
+
+        snprintf(line, sizeof(line), "VM %luus %lu.%lu%%",
+                 (unsigned long)vm_us,
+                 (unsigned long)(vm_pct10 / 10),
+                 (unsigned long)(vm_pct10 % 10));
+        gpu.pprint(line, (int)strlen(line), 1, y, 11); y += line_h;
+        snprintf(line, sizeof(line), "DR %luus %lu.%lu%%",
+                 (unsigned long)dr_us,
+                 (unsigned long)(dr_pct10 / 10),
+                 (unsigned long)(dr_pct10 % 10));
+        gpu.pprint(line, (int)strlen(line), 1, y, 11); y += line_h;
+        snprintf(line, sizeof(line), "BL %luus %lu.%lu%%",
+                 (unsigned long)bl_us,
+                 (unsigned long)(bl_pct10 / 10),
+                 (unsigned long)(bl_pct10 % 10));
+        gpu.pprint(line, (int)strlen(line), 1, y, 11); y += line_h;
+        snprintf(line, sizeof(line), "IN %luus %lu.%lu%%",
+                 (unsigned long)in_us,
+                 (unsigned long)(in_pct10 / 10),
+                 (unsigned long)(in_pct10 % 10));
+        gpu.pprint(line, (int)strlen(line), 1, y, 11); y += line_h;
+        snprintf(line, sizeof(line), "MN %luus %lu.%lu%%",
+                 (unsigned long)mn_us,
+                 (unsigned long)(mn_pct10 / 10),
+                 (unsigned long)(mn_pct10 % 10));
+        gpu.pprint(line, (int)strlen(line), 1, y, 11); y += line_h;
+        snprintf(line, sizeof(line), "ID %luus %lu.%lu%%",
+                 (unsigned long)id_us,
+                 (unsigned long)(id_pct10 / 10),
+                 (unsigned long)(id_pct10 % 10));
+        gpu.pprint(line, (int)strlen(line), 1, y, 11); y += line_h;
+        snprintf(line, sizeof(line), "RS %luus %lu.%lu%%",
+                 (unsigned long)rs_us,
+                 (unsigned long)(rs_pct10 / 10),
+                 (unsigned long)(rs_pct10 % 10));
+        gpu.pprint(line, (int)strlen(line), 1, y, 11); y += line_h;
+        snprintf(line, sizeof(line), "HS S%lu SS%lu L%lu R%lu B%lu",
+                 (unsigned long)profile_last_hotspots[kHotspotSprMasked],
+                 (unsigned long)profile_last_hotspots[kHotspotSspr],
+                 (unsigned long)profile_last_hotspots[kHotspotLineSlow],
+                 (unsigned long)profile_last_hotspots[kHotspotRectfillSlow],
+                 (unsigned long)profile_last_hotspots[kHotspotBlitDirty]);
+        gpu.pprint(line, (int)strlen(line), 1, y, 11);
+
+        gpu.camera(bk_cx, bk_cy);
+        gpu.clip(bk_clip_x, bk_clip_y, bk_clip_w, bk_clip_h);
+        gpu.setPen(bk_pen);
+    }
+#endif
+#endif
 
     // Update Audio (Normal Path)
+#if defined(__GBA__)
+    #if REAL8_GBA_ENABLE_AUDIO
+    audio.update(host);
+    #endif
+#else
     if (!gbaAudioDisabled) {
-#if REAL8_HAS_LIBRETRO_BUFFERS
+    #if REAL8_HAS_LIBRETRO_BUFFERS
         if (isLibretro) {
             int samples_needed = (AudioEngine::SAMPLE_RATE / 60) + 1; 
             if (samples_needed > 2048) samples_needed = 2048;
@@ -671,10 +868,11 @@ void Real8VM::runFrame()
         } else {
             audio.update(host);
         }
-#else
+    #else
         audio.update(host);
-#endif
+    #endif
     }
+#endif
 
     mouse_wheel_event = 0;
 }
@@ -761,7 +959,7 @@ bool Real8VM::loadGame(const GameData& game)
 
 bool Real8VM::loadGame(const GameData& game)
 {
-    const bool isGba = (host && strcmp(host->getPlatform(), "GBA") == 0);
+    const bool isGba = isGbaPlatform;
     auto gbaLog = [&](const char* msg) {
         if (isGba && host) host->log("%s", msg);
     };
@@ -829,7 +1027,9 @@ bool Real8VM::loadGame(const GameData& game)
 
     if (lua_len > 0) {
         if (!useGbaInitWatchdog) {
+#if !defined(__GBA__) || REAL8_GBA_ENABLE_DEBUGGER
             debug.setSource(game.lua_code);
+#endif
         }
 
         if (useGbaInitWatchdog && host) host->log("[BOOT] Lua load");
@@ -963,6 +1163,50 @@ void Real8VM::mark_dirty_rect(int x0, int y0, int x1, int y1)
     if (y1 > dirty_y1) dirty_y1 = y1;
 }
 
+#if REAL8_PROFILE_ENABLED
+void Real8VM::profileFrameBegin() {
+#if defined(__GBA__)
+    profile_frame_start_cycles = profileReadCycles();
+    for (int i = 0; i < kProfileCount; ++i) profile_bucket_cycles[i] = 0;
+    for (int i = 0; i < kHotspotCount; ++i) profile_hotspots[i] = 0;
+#endif
+}
+
+void Real8VM::profileFrameEnd() {
+#if defined(__GBA__)
+    uint32_t now = profileReadCycles();
+    profile_last_frame_cycles = now - profile_frame_start_cycles;
+    std::memcpy(profile_last_bucket_cycles, profile_bucket_cycles, sizeof(profile_bucket_cycles));
+    std::memcpy(profile_last_hotspots, profile_hotspots, sizeof(profile_hotspots));
+#endif
+}
+
+void Real8VM::profileBegin(int id) {
+#if defined(__GBA__)
+    if (id >= 0 && id < kProfileCount) {
+        profile_bucket_start[id] = profileReadCycles();
+    }
+#endif
+}
+
+void Real8VM::profileEnd(int id) {
+#if defined(__GBA__)
+    if (id >= 0 && id < kProfileCount) {
+        uint32_t now = profileReadCycles();
+        profile_bucket_cycles[id] += (now - profile_bucket_start[id]);
+    }
+#endif
+}
+
+void Real8VM::profileHotspot(int id) {
+#if defined(__GBA__)
+    if (id >= 0 && id < kHotspotCount) {
+        ++profile_hotspots[id];
+    }
+#endif
+}
+#endif
+
 // --------------------------------------------------------------------------
 // GRAPHICS PRIMITIVES
 // --------------------------------------------------------------------------
@@ -1019,7 +1263,7 @@ void Real8VM::show_frame()
     // LIBRETRO OPTIMIZED PATH
     // --------------------------------------------------------
 #if REAL8_HAS_LIBRETRO_BUFFERS
-    if (host && strcmp(host->getPlatform(), "Libretro") == 0) {
+    if (isLibretroPlatform) {
         
         // If the frame didn't update (30fps skip), 
         // the screen_buffer is already valid from the previous call.

@@ -19,6 +19,30 @@
 #include "../../lib/z8lua/lauxlib.h"
 #include "../../lib/z8lua/lualib.h"
 
+#ifndef REAL8_PROFILE_GBA
+#define REAL8_PROFILE_GBA 0
+#endif
+
+#if defined(__GBA__) && REAL8_PROFILE_GBA
+#define REAL8_PROFILE_ENABLED 1
+#else
+#define REAL8_PROFILE_ENABLED 0
+#endif
+
+#if REAL8_PROFILE_ENABLED
+#define REAL8_PROFILE_BEGIN(vm_ptr, id) do { if ((vm_ptr)) (vm_ptr)->profileBegin(id); } while(0)
+#define REAL8_PROFILE_END(vm_ptr, id) do { if ((vm_ptr)) (vm_ptr)->profileEnd(id); } while(0)
+#define REAL8_PROFILE_FRAME_BEGIN(vm_ptr) do { if ((vm_ptr)) (vm_ptr)->profileFrameBegin(); } while(0)
+#define REAL8_PROFILE_FRAME_END(vm_ptr) do { if ((vm_ptr)) (vm_ptr)->profileFrameEnd(); } while(0)
+#define REAL8_PROFILE_HOTSPOT(vm_ptr, id) do { if ((vm_ptr)) (vm_ptr)->profileHotspot(id); } while(0)
+#else
+#define REAL8_PROFILE_BEGIN(vm_ptr, id) do {} while(0)
+#define REAL8_PROFILE_END(vm_ptr, id) do {} while(0)
+#define REAL8_PROFILE_FRAME_BEGIN(vm_ptr) do {} while(0)
+#define REAL8_PROFILE_FRAME_END(vm_ptr) do {} while(0)
+#define REAL8_PROFILE_HOTSPOT(vm_ptr, id) do {} while(0)
+#endif
+
 #if !defined(REAL8_HAS_LIBRETRO_BUFFERS)
 #if defined(__GBA__)
 #define REAL8_HAS_LIBRETRO_BUFFERS 0
@@ -96,6 +120,8 @@ public:
   lua_State* getLuaState() { return L; }
   IReal8Host* getHost() { return host; }
   bool skipDirtyRect = false;
+  bool isLibretroPlatform = false;
+  bool isGbaPlatform = false;
 
   bool reset_requested = false;
   bool exit_requested = false;
@@ -262,6 +288,41 @@ public:
   void log(LogChannel ch, const char* fmt, ...);
   bool map_check_flag(int x, int y, int w, int h, int flag);
   bool skip_update_logic = false;
+
+#if REAL8_PROFILE_ENABLED
+  enum GbaProfileBucket {
+    kProfileVm = 0,
+    kProfileDraw,
+    kProfileBlit,
+    kProfileInput,
+    kProfileMenu,
+    kProfileIdle,
+    kProfileCount
+  };
+
+  enum GbaHotspot {
+    kHotspotSprMasked = 0,
+    kHotspotSspr,
+    kHotspotRectfillSlow,
+    kHotspotLineSlow,
+    kHotspotBlitDirty,
+    kHotspotCount
+  };
+
+  void profileFrameBegin();
+  void profileFrameEnd();
+  void profileBegin(int id);
+  void profileEnd(int id);
+  void profileHotspot(int id);
+
+  uint32_t profile_bucket_cycles[kProfileCount] = {};
+  uint32_t profile_bucket_start[kProfileCount] = {};
+  uint32_t profile_last_bucket_cycles[kProfileCount] = {};
+  uint32_t profile_hotspots[kHotspotCount] = {};
+  uint32_t profile_last_hotspots[kHotspotCount] = {};
+  uint32_t profile_frame_start_cycles = 0;
+  uint32_t profile_last_frame_cycles = 0;
+#endif
 
 private:
   lua_State *L = nullptr;

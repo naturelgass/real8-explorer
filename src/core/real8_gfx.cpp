@@ -4,6 +4,14 @@
 #include <algorithm>
 #include <cstring>
 
+#if defined(__GBA__)
+#define IWRAM_CODE __attribute__((section(".iwram"), long_call))
+#define EWRAM_DATA __attribute__((section(".ewram")))
+#else
+#define IWRAM_CODE
+#define EWRAM_DATA
+#endif
+
 // Palette Definitions
 const uint8_t Real8Gfx::PALETTE_RGB[32][3] = {
     // Standard (0-15)
@@ -56,6 +64,66 @@ void Real8Gfx::beginFrame() {
 }
 
 // --- Helpers ---
+
+namespace {
+struct SpriteChunkLut {
+    uint16_t expand[256];
+    uint8_t mask[256];
+    uint8_t palette_cache[16];
+    uint8_t palt_cache[16];
+    bool valid = false;
+};
+
+static EWRAM_DATA SpriteChunkLut g_spriteChunkLut;
+
+static inline void updateSpriteChunkLut(const uint8_t* palette_map, const bool* palt_map) {
+    bool same = g_spriteChunkLut.valid;
+    for (int i = 0; i < 16 && same; ++i) {
+        const uint8_t palt_val = palt_map[i] ? 1u : 0u;
+        if (g_spriteChunkLut.palette_cache[i] != palette_map[i] || g_spriteChunkLut.palt_cache[i] != palt_val) {
+            same = false;
+        }
+    }
+    if (same) return;
+
+    for (int i = 0; i < 16; ++i) {
+        g_spriteChunkLut.palette_cache[i] = palette_map[i];
+        g_spriteChunkLut.palt_cache[i] = palt_map[i] ? 1u : 0u;
+    }
+    for (int i = 0; i < 256; ++i) {
+        uint8_t lo = (uint8_t)(i & 0x0F);
+        uint8_t hi = (uint8_t)(i >> 4);
+        uint8_t mapped_lo = palette_map[lo];
+        uint8_t mapped_hi = palette_map[hi];
+        g_spriteChunkLut.expand[i] = (uint16_t)(mapped_lo | (mapped_hi << 8));
+        uint8_t mask = 0;
+        if (palt_map[lo]) mask |= 1u;
+        if (palt_map[hi]) mask |= 2u;
+        g_spriteChunkLut.mask[i] = mask;
+    }
+    g_spriteChunkLut.valid = true;
+}
+
+static inline void IWRAM_CODE store_opaque_chunk(uint8_t* dst, uint16_t p0, uint16_t p1, uint16_t p2, uint16_t p3) {
+    const uintptr_t addr = (uintptr_t)dst;
+    if ((addr & 3u) == 0) {
+        uint32_t* dst32 = reinterpret_cast<uint32_t*>(dst);
+        dst32[0] = (uint32_t)p0 | ((uint32_t)p1 << 16);
+        dst32[1] = (uint32_t)p2 | ((uint32_t)p3 << 16);
+    } else if ((addr & 1u) == 0) {
+        uint16_t* dst16 = reinterpret_cast<uint16_t*>(dst);
+        dst16[0] = p0;
+        dst16[1] = p1;
+        dst16[2] = p2;
+        dst16[3] = p3;
+    } else {
+        dst[0] = (uint8_t)p0; dst[1] = (uint8_t)(p0 >> 8);
+        dst[2] = (uint8_t)p1; dst[3] = (uint8_t)(p1 >> 8);
+        dst[4] = (uint8_t)p2; dst[5] = (uint8_t)(p2 >> 8);
+        dst[6] = (uint8_t)p3; dst[7] = (uint8_t)(p3 >> 8);
+    }
+}
+} // namespace
 
 static inline int isqrt_int(int v) {
     if (v <= 0) return 0;
@@ -193,16 +261,21 @@ void Real8Gfx::put_pixel_checked(int x, int y, uint8_t col) {
     }
     
     put_pixel_raw(sx, sy, palette_map[col & 0x0F]);
-
-    // Skip dirty rect calculation for Libretro
-    if (vm && !vm->skipDirtyRect) {
-        vm->mark_dirty_rect(sx, sy, sx, sy);
-    }
 }
 
 void Real8Gfx::pset(int x, int y, uint8_t col) { 
     invalidateObjBatch();
-    put_pixel_checked(x, y, col); 
+    int sx = x - cam_x;
+    int sy = y - cam_y;
+    if (sx < clip_x || sy < clip_y || sx >= (clip_x + clip_w) || sy >= (clip_y + clip_h)) return;
+
+    if (fillp_pattern != 0xFFFFFFFFu) {
+        int bit_index = ((sy & 3) << 2) | (sx & 3);
+        if (!((fillp_pattern >> (15 - bit_index)) & 1)) return;
+    }
+
+    put_pixel_raw(sx, sy, palette_map[col & 0x0F]);
+    if (vm && !vm->skipDirtyRect) vm->mark_dirty_rect(sx, sy, sx, sy);
 }
 
 uint8_t Real8Gfx::pget(int x, int y) {
@@ -294,6 +367,21 @@ void Real8Gfx::line(int x0, int y0, int x1, int y1, uint8_t c) {
 
     if (!accept) return;
 
+    int dirty_x0 = std::min(sx0, sx1);
+    int dirty_y0 = std::min(sy0, sy1);
+    int dirty_x1 = std::max(sx0, sx1);
+    int dirty_y1 = std::max(sy0, sy1);
+    if (vm) vm->mark_dirty_rect(dirty_x0, dirty_y0, dirty_x1, dirty_y1);
+
+    if (fillp_pattern == 0xFFFFFFFFu && draw_mask == 0 && vm && vm->fb && sy0 == sy1) {
+        int xStart = std::min(sx0, sx1);
+        int xEnd = std::max(sx0, sx1);
+        uint8_t mapped = palette_map[c & 0x0F];
+        std::memset(&vm->fb[sy0][xStart], mapped, (size_t)(xEnd - xStart + 1));
+        return;
+    }
+
+    REAL8_PROFILE_HOTSPOT(vm, Real8VM::kHotspotLineSlow);
     int dx = abs(sx1 - sx0), sx = sx0 < sx1 ? 1 : -1;
     int dy = -abs(sy1 - sy0), sy = sy0 < sy1 ? 1 : -1;
     int err = dx + dy;
@@ -330,7 +418,17 @@ void Real8Gfx::rectfill(int x0, int y0, int x1, int y1, uint8_t c) {
     if (sx1 < sx0 || sy1 < sy0) return;
     
     uint8_t mapped = palette_map[c & 0x0F];
+
+    if (fillp_pattern == 0xFFFFFFFFu && draw_mask == 0 && vm && vm->fb) {
+        size_t rowCount = (size_t)(sx1 - sx0 + 1);
+        for (int y = sy0; y <= sy1; ++y) {
+            std::memset(&vm->fb[y][sx0], mapped, rowCount);
+        }
+        vm->mark_dirty_rect(sx0, sy0, sx1, sy1);
+        return;
+    }
     
+    REAL8_PROFILE_HOTSPOT(vm, Real8VM::kHotspotRectfillSlow);
     for (int y = sy0; y <= sy1; ++y) {
         for (int x = sx0; x <= sx1; ++x) {
             if (fillp_pattern != 0xFFFFFFFFu) {
@@ -405,6 +503,16 @@ void Real8Gfx::rrect(int x, int y, int w, int h, int r, uint8_t c) {
         return;
     }
 
+    int sx0 = x0 - cam_x;
+    int sy0 = y0 - cam_y;
+    int sx1 = x1 - cam_x;
+    int sy1 = y1 - cam_y;
+    int dx0 = std::max(clip_x, sx0);
+    int dy0 = std::max(clip_y, sy0);
+    int dx1 = std::min(clip_x + clip_w - 1, sx1);
+    int dy1 = std::min(clip_y + clip_h - 1, sy1);
+    if (vm && dx0 <= dx1 && dy0 <= dy1) vm->mark_dirty_rect(dx0, dy0, dx1, dy1);
+
     line(x0 + radius, y0, x1 - radius, y0, c);
     line(x0 + radius, y1, x1 - radius, y1, c);
     line(x0, y0 + radius, x0, y1 - radius, c);
@@ -426,6 +534,16 @@ void Real8Gfx::rrectfill(int x, int y, int w, int h, int r, uint8_t c) {
         return;
     }
 
+    int sx0 = x0 - cam_x;
+    int sy0 = y0 - cam_y;
+    int sx1 = x1 - cam_x;
+    int sy1 = y1 - cam_y;
+    int dx0 = std::max(clip_x, sx0);
+    int dy0 = std::max(clip_y, sy0);
+    int dx1 = std::min(clip_x + clip_w - 1, sx1);
+    int dy1 = std::min(clip_y + clip_h - 1, sy1);
+    if (vm && dx0 <= dx1 && dy0 <= dy1) vm->mark_dirty_rect(dx0, dy0, dx1, dy1);
+
     int inner_x0 = x0 + radius;
     int inner_x1 = x1 - radius;
     if (inner_x0 <= inner_x1) rectfill(inner_x0, y0, inner_x1, y1, c);
@@ -442,12 +560,22 @@ void Real8Gfx::rrectfill(int x, int y, int w, int h, int r, uint8_t c) {
 
 void Real8Gfx::circ(int cx, int cy, int r, uint8_t c) {
     invalidateObjBatch();
+    int sx0 = cx - r - cam_x;
+    int sy0 = cy - r - cam_y;
+    int sx1 = cx + r - cam_x;
+    int sy1 = cy + r - cam_y;
+    int dx0 = std::max(clip_x, sx0);
+    int dy0 = std::max(clip_y, sy0);
+    int dx1 = std::min(clip_x + clip_w - 1, sx1);
+    int dy1 = std::min(clip_y + clip_h - 1, sy1);
+    if (vm && dx0 <= dx1 && dy0 <= dy1) vm->mark_dirty_rect(dx0, dy0, dx1, dy1);
+
     int x = r, y = 0, err = 0;
     while (x >= y) {
-        pset(cx + x, cy + y, c); pset(cx + y, cy + x, c);
-        pset(cx - y, cy + x, c); pset(cx - x, cy + y, c);
-        pset(cx - x, cy - y, c); pset(cx - y, cy - x, c);
-        pset(cx + y, cy - x, c); pset(cx + x, cy - y, c);
+        put_pixel_checked(cx + x, cy + y, c); put_pixel_checked(cx + y, cy + x, c);
+        put_pixel_checked(cx - y, cy + x, c); put_pixel_checked(cx - x, cy + y, c);
+        put_pixel_checked(cx - x, cy - y, c); put_pixel_checked(cx - y, cy - x, c);
+        put_pixel_checked(cx + y, cy - x, c); put_pixel_checked(cx + x, cy - y, c);
         y++; err += 1 + 2 * y;
         if (2 * (err - x) + 1 > 0) { x--; err += 1 - 2 * x; }
     }
@@ -455,6 +583,16 @@ void Real8Gfx::circ(int cx, int cy, int r, uint8_t c) {
 
 void Real8Gfx::circfill(int cx, int cy, int r, uint8_t c) {
     invalidateObjBatch();
+    int sx0 = cx - r - cam_x;
+    int sy0 = cy - r - cam_y;
+    int sx1 = cx + r - cam_x;
+    int sy1 = cy + r - cam_y;
+    int dx0 = std::max(clip_x, sx0);
+    int dy0 = std::max(clip_y, sy0);
+    int dx1 = std::min(clip_x + clip_w - 1, sx1);
+    int dy1 = std::min(clip_y + clip_h - 1, sy1);
+    if (vm && dx0 <= dx1 && dy0 <= dy1) vm->mark_dirty_rect(dx0, dy0, dx1, dy1);
+
     int x = r, y = 0, err = 0;
     while (x >= y) {
         for (int xi = cx - x; xi <= cx + x; ++xi) put_pixel_checked(xi, cy + y, c);
@@ -468,7 +606,7 @@ void Real8Gfx::circfill(int cx, int cy, int r, uint8_t c) {
 
 // --- Sprites ---
 
-void Real8Gfx::spr_fast(int n, int x, int y, int w, int h, bool fx, bool fy) {
+void IWRAM_CODE Real8Gfx::spr_fast(int n, int x, int y, int w, int h, bool fx, bool fy) {
     if (!vm->ram || !vm->fb) return;
     int sx = x - cam_x; int sy = y - cam_y;
     int x0 = std::max(clip_x, sx); int y0 = std::max(clip_y, sy);
@@ -480,23 +618,89 @@ void Real8Gfx::spr_fast(int n, int x, int y, int w, int h, bool fx, bool fy) {
     int sheet_base_x = (n % 16) * 8;
     int sheet_base_y = (n / 16) * 8;
     uint32_t sprite_base = sprite_base_addr();
+    // Chunked sprite blit reduces per-pixel branching on masked sprites.
+    const bool use_chunked = (!fx && fillp_pattern == 0xFFFFFFFFu);
+    if (use_chunked) {
+        updateSpriteChunkLut(palette_map, palt_map);
+    }
 
     for (int cy = y0; cy < y1; cy++) {
         int spy = cy - sy; if (fy) spy = (h * 8) - 1 - spy;
         int sheet_y = sheet_base_y + spy;
         uint32_t row_addr = sheet_y * 64; 
-        uint8_t* dest_ptr = &vm->fb[cy][x0];
+        if (use_chunked) {
+            int dst_x = x0;
+            int src_x = sheet_base_x + (dst_x - sx);
+            uint8_t* dest_ptr = &vm->fb[cy][dst_x];
 
-        for (int cx = x0; cx < x1; cx++) {
-            int spx = cx - sx; if (fx) spx = (w * 8) - 1 - spx;
-            int sheet_x = sheet_base_x + spx;
-            uint32_t addr = sprite_base + row_addr + (sheet_x >> 1);
-            if (addr < 0x8000) {
-                uint8_t byte = vm->ram[addr];
-                uint8_t col = (sheet_x & 1) ? (byte >> 4) : (byte & 0x0F);
-                if (!palt_map[col]) *dest_ptr = palette_map[col];
+            if (src_x & 1) {
+                uint32_t addr = sprite_base + row_addr + (src_x >> 1);
+                if (addr < 0x8000) {
+                    uint8_t byte = vm->ram[addr];
+                    uint8_t col = (src_x & 1) ? (byte >> 4) : (byte & 0x0F);
+                    if (!palt_map[col]) dest_ptr[0] = palette_map[col];
+                }
+                ++dst_x;
+                ++src_x;
+                ++dest_ptr;
             }
-            dest_ptr++;
+
+            for (; dst_x + 7 < x1; dst_x += 8, src_x += 8, dest_ptr += 8) {
+                uint32_t addr = sprite_base + row_addr + (src_x >> 1);
+                if (addr + 3 >= 0x8000) {
+                    for (int i = 0; i < 8; ++i) {
+                        uint8_t col = get_pixel_ram(sprite_base, src_x + i, sheet_y);
+                        if (!palt_map[col]) dest_ptr[i] = palette_map[col];
+                    }
+                    continue;
+                }
+
+                uint8_t b0 = vm->ram[addr];
+                uint8_t b1 = vm->ram[addr + 1];
+                uint8_t b2 = vm->ram[addr + 2];
+                uint8_t b3 = vm->ram[addr + 3];
+                uint8_t mask = (uint8_t)(g_spriteChunkLut.mask[b0]
+                    | (g_spriteChunkLut.mask[b1] << 2)
+                    | (g_spriteChunkLut.mask[b2] << 4)
+                    | (g_spriteChunkLut.mask[b3] << 6));
+
+                if (mask == 0xFF) continue;
+                if (mask == 0x00) {
+                    uint16_t p0 = g_spriteChunkLut.expand[b0];
+                    uint16_t p1 = g_spriteChunkLut.expand[b1];
+                    uint16_t p2 = g_spriteChunkLut.expand[b2];
+                    uint16_t p3 = g_spriteChunkLut.expand[b3];
+                    store_opaque_chunk(dest_ptr, p0, p1, p2, p3);
+                } else {
+                    uint8_t bytes[4] = {b0, b1, b2, b3};
+                    for (int i = 0; i < 8; ++i) {
+                        uint8_t col = (i & 1) ? (bytes[i >> 1] >> 4) : (bytes[i >> 1] & 0x0F);
+                        if (!palt_map[col]) dest_ptr[i] = palette_map[col];
+                    }
+                }
+            }
+
+            for (; dst_x < x1; ++dst_x, ++src_x, ++dest_ptr) {
+                uint32_t addr = sprite_base + row_addr + (src_x >> 1);
+                if (addr < 0x8000) {
+                    uint8_t byte = vm->ram[addr];
+                    uint8_t col = (src_x & 1) ? (byte >> 4) : (byte & 0x0F);
+                    if (!palt_map[col]) dest_ptr[0] = palette_map[col];
+                }
+            }
+        } else {
+            uint8_t* dest_ptr = &vm->fb[cy][x0];
+            for (int cx = x0; cx < x1; cx++) {
+                int spx = cx - sx; if (fx) spx = (w * 8) - 1 - spx;
+                int sheet_x = sheet_base_x + spx;
+                uint32_t addr = sprite_base + row_addr + (sheet_x >> 1);
+                if (addr < 0x8000) {
+                    uint8_t byte = vm->ram[addr];
+                    uint8_t col = (sheet_x & 1) ? (byte >> 4) : (byte & 0x0F);
+                    if (!palt_map[col]) *dest_ptr = palette_map[col];
+                }
+                dest_ptr++;
+            }
         }
     }
 }
@@ -506,6 +710,7 @@ void Real8Gfx::spr(int n, int x, int y, int w, int h, bool fx, bool fy) {
     invalidateObjBatch();
     if (draw_mask == 0) { spr_fast(n, x, y, w, h, fx, fy); return; }
 
+    REAL8_PROFILE_HOTSPOT(vm, Real8VM::kHotspotSprMasked);
     int dx0 = std::max(clip_x, x - cam_x);
     int dy0 = std::max(clip_y, y - cam_y);
     int dx1 = std::min(clip_x + clip_w - 1, (x - cam_x) + w * 8 - 1);
@@ -539,13 +744,29 @@ void Real8Gfx::spr(int n, int x, int y, int w, int h, bool fx, bool fy) {
 void Real8Gfx::sspr(int sx, int sy, int sw, int sh, int dx, int dy, int dw, int dh, bool flip_x, bool flip_y) {
     invalidateObjBatch();
     if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0 || !vm->fb) return;
+    REAL8_PROFILE_HOTSPOT(vm, Real8VM::kHotspotSspr);
+    // 1x tile-aligned sspr can reuse the spr fast path.
+    if (draw_mask == 0 && !flip_x && !flip_y && sw == dw && sh == dh
+        && ((sx | sy | sw | sh) & 7) == 0) {
+        int tile_x = sx >> 3;
+        int tile_y = sy >> 3;
+        int n = tile_y * 16 + tile_x;
+        int w_tiles = sw >> 3;
+        int h_tiles = sh >> 3;
+        spr(n, dx, dy, w_tiles, h_tiles, false, false);
+        return;
+    }
     int screen_dx = dx - cam_x; int screen_dy = dy - cam_y;
     uint32_t step_u = ((uint32_t)sw << 16) / dw;
     uint32_t step_v = ((uint32_t)sh << 16) / dh;
     int min_y = clip_y; int max_y = clip_y + clip_h;
     int min_x = clip_x; int max_x = clip_x + clip_w;
-    int dirty_x0 = 255, dirty_y0 = 255, dirty_x1 = -1, dirty_y1 = -1;
-    bool drawn_any = false;
+    int dirty_x0 = std::max(min_x, screen_dx);
+    int dirty_y0 = std::max(min_y, screen_dy);
+    int dirty_x1 = std::min(max_x - 1, screen_dx + dw - 1);
+    int dirty_y1 = std::min(max_y - 1, screen_dy + dh - 1);
+    if (dirty_x1 < dirty_x0 || dirty_y1 < dirty_y0) return;
+    if (vm) vm->mark_dirty_rect(dirty_x0, dirty_y0, dirty_x1, dirty_y1);
     uint32_t sprite_base = sprite_base_addr();
 
     for (int yy = 0; yy < dh; ++yy) {
@@ -565,15 +786,11 @@ void Real8Gfx::sspr(int sx, int sy, int sw, int sh, int dx, int dy, int dw, int 
                 uint8_t c = get_pixel_ram(sprite_base, srcx, srcy);
                 if (!palt_map[c]) {
                     vm->fb[dst_y][dst_x] = palette_map[c];
-                    if (dst_x < dirty_x0) dirty_x0 = dst_x; if (dst_x > dirty_x1) dirty_x1 = dst_x;
-                    if (dst_y < dirty_y0) dirty_y0 = dst_y; if (dst_y > dirty_y1) dirty_y1 = dst_y;
-                    drawn_any = true;
                 }
             }
             u += step_u;
         }
     }
-    if (drawn_any) vm->mark_dirty_rect(dirty_x0, dirty_y0, dirty_x1, dirty_y1);
 }
 
 // --- Map ---
@@ -652,6 +869,15 @@ void Real8Gfx::mset(int x, int y, uint8_t v) {
 
 void Real8Gfx::map(int mx, int my, int sx, int sy, int w, int h, int layer) {
     if (!vm->ram) return;
+    int sx0 = sx - cam_x;
+    int sy0 = sy - cam_y;
+    int sx1 = sx0 + (w * 8) - 1;
+    int sy1 = sy0 + (h * 8) - 1;
+    int dx0 = std::max(clip_x, sx0);
+    int dy0 = std::max(clip_y, sy0);
+    int dx1 = std::min(clip_x + clip_w - 1, sx1);
+    int dy1 = std::min(clip_y + clip_h - 1, sy1);
+    if (vm && dx0 <= dx1 && dy0 <= dy1) vm->mark_dirty_rect(dx0, dy0, dx1, dy1);
     for (int j = 0; j < h; ++j) {
         for (int i = 0; i < w; ++i) {
             uint8_t tile = mget(mx + i, my + j);
@@ -723,7 +949,7 @@ void Real8Gfx::palt_reset() {
 // --- Text ---
 
 void Real8Gfx::put_bitrow_1bpp(int x, int y, uint8_t bits, int w, uint8_t col) {
-    for (int i = 0; i < w; i++) if (bits & (0x80 >> i)) pset(x + i, y, col);
+    for (int i = 0; i < w; i++) if (bits & (0x80 >> i)) put_pixel_checked(x + i, y, col);
 }
 
 int Real8Gfx::draw_char_default(uint8_t p8, int x, int y, uint8_t col) {
@@ -775,6 +1001,8 @@ int Real8Gfx::draw_char_custom(uint8_t p8, int x, int y, uint8_t col) {
 int Real8Gfx::pprint(const char *s, int len, int x, int y, uint8_t col) {
     invalidateObjBatch();
     int cx = x, cy = y;
+    bool drew_any = false;
+    int min_x = 0, min_y = 0, max_x = -1, max_y = -1;
     for (int i = 0; i < len; i++) {
         uint8_t ch = (uint8_t)s[i];
         if (ch == '\n') { cy += 6; cx = x; continue; }
@@ -787,7 +1015,45 @@ int Real8Gfx::pprint(const char *s, int len, int x, int y, uint8_t col) {
             continue;
         }
         int adv = use_alt_font ? draw_char_custom(ch, cx, cy, col) : draw_char_default(ch, cx, cy, col);
+        if (adv > 0) {
+            int x0 = cx;
+            int y0 = cy;
+            int x1 = cx + adv - 1;
+            int y1 = cy + 5;
+            if (use_alt_font && vm) {
+                uint8_t *a = vm->cf_attr();
+                int h = a[0x002];
+                int xo = (int8_t)a[0x003];
+                int yo = (int8_t)a[0x004];
+                int draw_h = std::min(8, h);
+                if (draw_h <= 0) draw_h = 6;
+                x0 = cx + xo;
+                y0 = cy + yo;
+                x1 = x0 + 7;
+                y1 = y0 + draw_h - 1;
+            }
+            if (!drew_any) {
+                min_x = x0; min_y = y0; max_x = x1; max_y = y1;
+                drew_any = true;
+            } else {
+                if (x0 < min_x) min_x = x0;
+                if (y0 < min_y) min_y = y0;
+                if (x1 > max_x) max_x = x1;
+                if (y1 > max_y) max_y = y1;
+            }
+        }
         cx += adv;
+    }
+    if (drew_any && vm) {
+        int sx0 = min_x - cam_x;
+        int sy0 = min_y - cam_y;
+        int sx1 = max_x - cam_x;
+        int sy1 = max_y - cam_y;
+        int dx0 = std::max(clip_x, sx0);
+        int dy0 = std::max(clip_y, sy0);
+        int dx1 = std::min(clip_x + clip_w - 1, sx1);
+        int dy1 = std::min(clip_y + clip_h - 1, sy1);
+        if (dx0 <= dx1 && dy0 <= dy1) vm->mark_dirty_rect(dx0, dy0, dx1, dy1);
     }
     return cx;
 }

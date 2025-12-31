@@ -38,7 +38,7 @@ namespace {
     #define REAL8_GBA_STATE_SECTION EWRAM_DATA
     #else
     #define REAL8_GBA_FB_SECTION EWRAM_DATA
-    #define REAL8_GBA_STATE_SECTION
+    #define REAL8_GBA_STATE_SECTION EWRAM_DATA
     #endif
 
     EWRAM_DATA alignas(4) uint8_t gba_ram[0x8000];
@@ -212,6 +212,7 @@ namespace {
         std::vector<std::string> options;
         Real8Gfx::GfxState gfx_backup{};
         bool showingCredits = false;
+        bool showSkin = true;
         uint32_t inputMask = 0;
         uint32_t prevInputMask = 0;
 
@@ -220,6 +221,7 @@ namespace {
             options.push_back("CONTINUE");
             options.push_back("RESET GAME");
             options.push_back("SHOW FPS");
+            options.push_back("SHOW SKIN");
             options.push_back("CREDITS");
 
             selection = 0;
@@ -351,6 +353,12 @@ namespace {
                     int txtW = (int)strlen(status) * kFontWidth;
                     int statusX = (mx + mw) - txtW - 10;
                     vm.gpu.pprint(status, (int)strlen(status), statusX, oy, statusCol);
+                } else if (options[i] == "SHOW SKIN") {
+                    const char* status = showSkin ? "ON" : "OFF";
+                    int statusCol = showSkin ? 11 : 8;
+                    int txtW = (int)strlen(status) * kFontWidth;
+                    int statusX = (mx + mw) - txtW - 10;
+                    vm.gpu.pprint(status, (int)strlen(status), statusX, oy, statusCol);
                 }
             }
 
@@ -392,6 +400,7 @@ namespace {
 #endif
                         vm.resetInputState();
                         host.resetVideo();
+                        host.setSplashBackdrop(showSkin);
                         host.clearBorders();
                         close(vm);
                     } else {
@@ -401,6 +410,9 @@ namespace {
                     }
                 } else if (action == "SHOW FPS") {
                     vm.showStats = !vm.showStats;
+                } else if (action == "SHOW SKIN") {
+                    showSkin = !showSkin;
+                    host.setSplashBackdrop(showSkin);
                 } else if (action == "CREDITS") {
                     showingCredits = true;
                 }
@@ -444,6 +456,7 @@ int main(void) {
 
     GbaHost& host = g_host;
     Real8VM& vm = g_vm;
+    host.setProfileVM(&vm);
 
     host.log("[BOOT] start");
     host.log("[BOOT] vm bytes %lu", (unsigned long)sizeof(Real8VM));
@@ -506,11 +519,15 @@ int main(void) {
     GbaInGameMenu menu;
 
     while (true) {
+        REAL8_PROFILE_FRAME_BEGIN(&vm);
+        REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileInput);
         host.pollInput();
+        REAL8_PROFILE_END(&vm, Real8VM::kProfileInput);
         static int frameCounter = 0;
         const bool runFrame = ((frameCounter++ % REAL8_GBA_FRAME_DIV) == 0);
         if (runFrame) {
             if (menu.active) {
+                REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileMenu);
                 menu.syncInput(vm, host);
                 menu.update(vm, host, game);
                 if (menu.requestExit) {
@@ -519,9 +536,15 @@ int main(void) {
                 }
                 if (menu.active) {
                     menu.render(vm);
+                }
+                REAL8_PROFILE_END(&vm, Real8VM::kProfileMenu);
+                if (menu.active) {
+                    REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileBlit);
                     vm.show_frame();
+                    REAL8_PROFILE_END(&vm, Real8VM::kProfileBlit);
                 }
             } else {
+                REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileInput);
                 uint32_t menuInput = host.getPlayerInput(0);
                 bool menuPressed = ((menuInput & (1u << 6)) != 0);
                 if (menu.inputLatch) {
@@ -530,18 +553,30 @@ int main(void) {
                     }
                     menuPressed = false;
                 }
+                REAL8_PROFILE_END(&vm, Real8VM::kProfileInput);
                 if (menuPressed) {
+                    REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileMenu);
                     menu.open(vm);
                     menu.render(vm);
+                    REAL8_PROFILE_END(&vm, Real8VM::kProfileMenu);
+                    REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileBlit);
                     vm.show_frame();
+                    REAL8_PROFILE_END(&vm, Real8VM::kProfileBlit);
                 } else {
+                    REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileVm);
                     vm.runFrame();
+                    REAL8_PROFILE_END(&vm, Real8VM::kProfileVm);
+                    REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileBlit);
                     vm.show_frame();
+                    REAL8_PROFILE_END(&vm, Real8VM::kProfileBlit);
                 }
             }
         }
+        REAL8_PROFILE_FRAME_END(&vm);
 #if !REAL8_GBA_SKIP_VBLANK
+        REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileIdle);
         host.waitForVBlank();
+        REAL8_PROFILE_END(&vm, Real8VM::kProfileIdle);
 #endif
     }
 }

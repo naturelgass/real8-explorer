@@ -4,6 +4,8 @@
 #include <vector>
 #include "../../hal/real8_host.h"
 
+class Real8VM;
+
 class GbaHost : public IReal8Host {
 public:
     GbaHost();
@@ -17,6 +19,7 @@ public:
     void setWifiCredentials(const char* ssid, const char* pass) override;
 
     void clearBorders();
+    void setSplashBackdrop(bool enabled);
     void flipScreen(uint8_t (*framebuffer)[128], uint8_t *palette_map) override;
     void flipScreenDirty(uint8_t (*framebuffer)[128], uint8_t *palette_map,
                          int x0, int y0, int x1, int y1) override;
@@ -24,6 +27,7 @@ public:
     void beginFrame() override;
     bool queueSprite(const uint8_t* spriteSheet, int n, int x, int y, int w, int h, bool fx, bool fy) override;
     void cancelSpriteBatch() override;
+    void setProfileVM(Real8VM* vm);
 
     unsigned long getMillis() override;
     void log(const char* fmt, ...) override;
@@ -96,6 +100,10 @@ private:
     int tilesY1 = 0;
     uint8_t (*tilesFb)[128] = nullptr;
     bool inputPolled = false;
+#if defined(REAL8_GBA_HBLANK_DMA) && REAL8_GBA_HBLANK_DMA
+    bool hblankDmaPending = false;
+    bool hblankDmaActive = false;
+#endif
 #if defined(__GBA__) && REAL8_GBA_ENABLE_AUDIO
     static constexpr int kAudioSampleRate = 22050;
     static constexpr int kAudioFrameSamples = 368;
@@ -111,4 +119,5 @@ private:
     int objCount = 0;
     const uint8_t* objSpriteSheet = nullptr;
     bool objPending = false;
+    Real8VM* profileVm = nullptr;
 };
