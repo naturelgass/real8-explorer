@@ -271,6 +271,39 @@ namespace {
 #define IWRAM_CODE __attribute__((section(".iwram"), long_call))
 #define EWRAM_DATA __attribute__((section(".ewram")))
 
+#ifndef REAL8_GBA_IWRAM_INPUT
+#define REAL8_GBA_IWRAM_INPUT 1
+#endif
+#if REAL8_GBA_IWRAM_INPUT
+#define IWRAM_INPUT_CODE IWRAM_CODE
+#else
+#define IWRAM_INPUT_CODE
+#endif
+#ifndef REAL8_GBA_IWRAM_FLIP
+#define REAL8_GBA_IWRAM_FLIP 1
+#endif
+#ifndef REAL8_GBA_IWRAM_OBJBATCH
+#define REAL8_GBA_IWRAM_OBJBATCH 1
+#endif
+#ifndef REAL8_GBA_IWRAM_FLIP_DIRTY
+#define REAL8_GBA_IWRAM_FLIP_DIRTY 1
+#endif
+#if REAL8_GBA_IWRAM_FLIP
+#define IWRAM_FLIP_CODE IWRAM_CODE
+#else
+#define IWRAM_FLIP_CODE
+#endif
+#if REAL8_GBA_IWRAM_FLIP_DIRTY
+#define IWRAM_FLIP_DIRTY_CODE IWRAM_CODE
+#else
+#define IWRAM_FLIP_DIRTY_CODE
+#endif
+#if REAL8_GBA_IWRAM_OBJBATCH
+#define IWRAM_OBJBATCH_CODE IWRAM_CODE
+#else
+#define IWRAM_OBJBATCH_CODE
+#endif
+
     static void IWRAM_CODE blitFrame(u16* vram, const uint8_t (*framebuffer)[128], int xOff, int yOff) {
         const int stride = 240 / 2;
         const uint8_t* src = &framebuffer[0][0];
@@ -546,7 +579,7 @@ void GbaHost::setProfileVM(Real8VM* vm) {
     profileVm = vm;
 }
 
-bool GbaHost::queueSprite(const uint8_t* spriteSheet, int n, int x, int y, int w, int h, bool fx, bool fy) {
+bool IWRAM_OBJBATCH_CODE GbaHost::queueSprite(const uint8_t* spriteSheet, int n, int x, int y, int w, int h, bool fx, bool fy) {
 #if REAL8_GBA_TILEMODE
     if (!tileModeActive || !spriteSheet) return false;
     if (w != 1 || h != 1) return false;
@@ -667,7 +700,7 @@ void IWRAM_CODE GbaHost::blitFrameTiles(const uint8_t (*framebuffer)[128], int x
 #endif
 }
 
-void GbaHost::flipScreen(uint8_t (*framebuffer)[128], uint8_t *palette_map) {
+void IWRAM_FLIP_CODE GbaHost::flipScreen(uint8_t (*framebuffer)[128], uint8_t *palette_map) {
 #if REAL8_GBA_TILEMODE
     if (tileModeActive) {
         flipScreenDirty(framebuffer, palette_map, 0, 0, 127, 127);
@@ -704,7 +737,7 @@ void GbaHost::flipScreen(uint8_t (*framebuffer)[128], uint8_t *palette_map) {
     if (debugDirty) drawDebugOverlay();
 }
 
-void GbaHost::flipScreenDirty(uint8_t (*framebuffer)[128], uint8_t *palette_map,
+void IWRAM_FLIP_DIRTY_CODE GbaHost::flipScreenDirty(uint8_t (*framebuffer)[128], uint8_t *palette_map,
                               int x0, int y0, int x1, int y1) {
 #if REAL8_GBA_TILEMODE
     if (tileModeActive) {
@@ -875,7 +908,7 @@ bool GbaHost::renameGameUI(const char* currentPath) {
     return false;
 }
 
-uint32_t GbaHost::getPlayerInput(int playerIdx) {
+uint32_t IWRAM_INPUT_CODE GbaHost::getPlayerInput(int playerIdx) {
     if (playerIdx != 0) return 0;
     // Always refresh input so it works even if the main loop doesn't call waitForVBlank().
     pollInput();

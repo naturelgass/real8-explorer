@@ -12,6 +12,102 @@
 #define EWRAM_DATA
 #endif
 
+#if defined(__GBA__)
+#ifndef REAL8_GBA_IWRAM_CIRC
+#define REAL8_GBA_IWRAM_CIRC 1
+#endif
+#ifndef REAL8_GBA_IWRAM_PUTPIX
+#define REAL8_GBA_IWRAM_PUTPIX 1
+#endif
+#ifndef REAL8_GBA_IWRAM_PSETGET
+#define REAL8_GBA_IWRAM_PSETGET 1
+#endif
+#ifndef REAL8_GBA_IWRAM_GETPIX
+#define REAL8_GBA_IWRAM_GETPIX 1
+#endif
+#ifndef REAL8_GBA_IWRAM_CLS
+#define REAL8_GBA_IWRAM_CLS 1
+#endif
+#ifndef REAL8_GBA_IWRAM_OBJBATCH
+#define REAL8_GBA_IWRAM_OBJBATCH 1
+#endif
+#ifndef REAL8_GBA_IWRAM_MAP
+#define REAL8_GBA_IWRAM_MAP 1
+#endif
+#ifndef REAL8_GBA_SPRITE_BASE_CACHE
+#define REAL8_GBA_SPRITE_BASE_CACHE 1
+#endif
+#ifndef REAL8_GBA_IWRAM_SPR
+#define REAL8_GBA_IWRAM_SPR 1
+#endif
+#ifndef REAL8_GBA_IWRAM_SSPR
+#define REAL8_GBA_IWRAM_SSPR 1
+#endif
+#ifndef REAL8_GBA_IWRAM_SPR_HELPERS
+#define REAL8_GBA_IWRAM_SPR_HELPERS 1
+#endif
+#if REAL8_GBA_IWRAM_CIRC
+#define IWRAM_CIRC_CODE IWRAM_CODE
+#else
+#define IWRAM_CIRC_CODE
+#endif
+#if REAL8_GBA_IWRAM_PUTPIX
+#define IWRAM_PUTPIX_CODE IWRAM_CODE
+#else
+#define IWRAM_PUTPIX_CODE
+#endif
+#if REAL8_GBA_IWRAM_PSETGET
+#define IWRAM_PSETGET_CODE IWRAM_CODE
+#else
+#define IWRAM_PSETGET_CODE
+#endif
+#if REAL8_GBA_IWRAM_GETPIX
+#define IWRAM_GETPIX_CODE IWRAM_CODE
+#else
+#define IWRAM_GETPIX_CODE
+#endif
+#if REAL8_GBA_IWRAM_CLS
+#define IWRAM_CLS_CODE IWRAM_CODE
+#else
+#define IWRAM_CLS_CODE
+#endif
+#if REAL8_GBA_IWRAM_OBJBATCH
+#define IWRAM_OBJBATCH_CODE IWRAM_CODE
+#else
+#define IWRAM_OBJBATCH_CODE
+#endif
+#if REAL8_GBA_IWRAM_MAP
+#define IWRAM_MAP_CODE IWRAM_CODE
+#else
+#define IWRAM_MAP_CODE
+#endif
+#if REAL8_GBA_IWRAM_SPR
+#define IWRAM_SPR_CODE IWRAM_CODE
+#else
+#define IWRAM_SPR_CODE
+#endif
+#if REAL8_GBA_IWRAM_SSPR
+#define IWRAM_SSPR_CODE IWRAM_CODE
+#else
+#define IWRAM_SSPR_CODE
+#endif
+#if REAL8_GBA_IWRAM_SPR_HELPERS
+#define IWRAM_SPR_HELP_CODE IWRAM_CODE
+#else
+#define IWRAM_SPR_HELP_CODE
+#endif
+#else
+#define IWRAM_CIRC_CODE
+#define IWRAM_PUTPIX_CODE
+#define IWRAM_PSETGET_CODE
+#define IWRAM_GETPIX_CODE
+#define IWRAM_CLS_CODE
+#define IWRAM_OBJBATCH_CODE
+#define IWRAM_MAP_CODE
+#define IWRAM_SPR_CODE
+#define IWRAM_SSPR_CODE
+#define IWRAM_SPR_HELP_CODE
+#endif
 // Palette Definitions
 const uint8_t Real8Gfx::PALETTE_RGB[32][3] = {
     // Standard (0-15)
@@ -60,6 +156,9 @@ void Real8Gfx::beginFrame() {
     objBatchAllowed = true;
     objBatchActive = false;
     objSpriteCount = 0;
+#if defined(__GBA__) && REAL8_GBA_SPRITE_BASE_CACHE
+    sprite_base_cache_valid = false;
+#endif
     if (vm && vm->host) vm->host->beginFrame();
 }
 
@@ -76,7 +175,7 @@ struct SpriteChunkLut {
 
 static EWRAM_DATA SpriteChunkLut g_spriteChunkLut;
 
-static inline void updateSpriteChunkLut(const uint8_t* palette_map, const bool* palt_map) {
+static inline void IWRAM_SPR_HELP_CODE updateSpriteChunkLut(const uint8_t* palette_map, const bool* palt_map) {
     bool same = g_spriteChunkLut.valid;
     for (int i = 0; i < 16 && same; ++i) {
         const uint8_t palt_val = palt_map[i] ? 1u : 0u;
@@ -142,32 +241,51 @@ static inline int isqrt_int(int v) {
     return res;
 }
 
-uint32_t Real8Gfx::sprite_base_addr() const {
+uint32_t IWRAM_SPR_HELP_CODE Real8Gfx::sprite_base_addr() const {
     // Some builds/configs set spriteSheetMemMapping to 0x60 (sprites at 0x6000),
     // but not all carts/ports keep a mirrored copy of sprite data in that region.
     // If 0x6000 looks empty, fall back to the canonical PICO-8 sprite sheet base (0x0000).
     if (!vm || !vm->ram) return 0x0000;
 
-    if (vm->hwState.spriteSheetMemMapping == 0x60) {
+    const uint8_t mapping = vm->hwState.spriteSheetMemMapping;
+#if REAL8_GBA_SPRITE_BASE_CACHE
+    if (sprite_base_cache_valid && sprite_base_cache_mapping == mapping) {
+        return sprite_base_cache;
+    }
+#endif
+
+    uint32_t base = 0x0000;
+    if (mapping == 0x60) {
         // Cheap heuristic: sample a small window. If everything is 0, assume not mirrored.
         const uint8_t* r = vm->ram;
         bool any6000 = false;
         for (int i = 0; i < 64; ++i) {
             if (r[0x6000 + i] != 0) { any6000 = true; break; }
         }
-        if (any6000) return 0x6000;
-        // If 0x0000 has data, use it.
-        for (int i = 0; i < 64; ++i) {
-            if (r[i] != 0) return 0x0000;
+        if (any6000) {
+            base = 0x6000;
+        } else {
+            // If 0x0000 has data, use it.
+            bool any0 = false;
+            for (int i = 0; i < 64; ++i) {
+                if (r[i] != 0) { any0 = true; break; }
+            }
+            // Both look empty; default to 0x6000 to preserve mapping intent.
+            base = any0 ? 0x0000 : 0x6000;
         }
-        // Both look empty; default to 0x6000 to preserve mapping intent.
-        return 0x6000;
+    } else {
+        base = 0x0000;
     }
-    return 0x0000;
+#if REAL8_GBA_SPRITE_BASE_CACHE
+    sprite_base_cache_mapping = mapping;
+    sprite_base_cache = base;
+    sprite_base_cache_valid = true;
+#endif
+    return base;
 }
 
 
-uint8_t Real8Gfx::get_pixel_ram(uint32_t base_addr, int x, int y) {
+uint8_t IWRAM_GETPIX_CODE Real8Gfx::get_pixel_ram(uint32_t base_addr, int x, int y) {
     if (!vm->ram || x < 0 || x > 127 || y < 0 || y > 127) return 0;
     uint32_t idx = base_addr + (y * 64) + (x >> 1);
     uint8_t val = vm->ram[idx];
@@ -216,7 +334,7 @@ void Real8Gfx::updatePaletteFlags() {
     }
 }
 
-void Real8Gfx::invalidateObjBatch() {
+void IWRAM_OBJBATCH_CODE Real8Gfx::invalidateObjBatch() {
     if (!objBatchAllowed) return;
     if (objBatchActive) {
         if (vm && vm->host) vm->host->cancelSpriteBatch();
@@ -231,7 +349,7 @@ void Real8Gfx::invalidateObjBatch() {
     objSpriteCount = 0;
 }
 
-bool Real8Gfx::tryQueueObjSprite(int n, int x, int y, int w, int h, bool fx, bool fy) {
+bool IWRAM_OBJBATCH_CODE Real8Gfx::tryQueueObjSprite(int n, int x, int y, int w, int h, bool fx, bool fy) {
     if (!objBatchAllowed || !vm || !vm->host || !vm->ram) return false;
     if (w != 1 || h != 1) return false;
     if (draw_mask != 0 || fillp_pattern != 0xFFFFFFFFu) return false;
@@ -257,7 +375,7 @@ bool Real8Gfx::tryQueueObjSprite(int n, int x, int y, int w, int h, bool fx, boo
 
 // --- Primitives Implementation ---
 
-void Real8Gfx::put_pixel_raw(int x, int y, uint8_t col) {
+void IWRAM_PUTPIX_CODE Real8Gfx::put_pixel_raw(int x, int y, uint8_t col) {
     if (!vm->fb) return;
     if (x < 0 || x >= Real8VM::RAW_WIDTH || y < 0 || y >= Real8VM::HEIGHT) return;
 
@@ -270,7 +388,7 @@ void Real8Gfx::put_pixel_raw(int x, int y, uint8_t col) {
     }
 }
 
-void Real8Gfx::put_pixel_checked(int x, int y, uint8_t col) {
+void IWRAM_PUTPIX_CODE Real8Gfx::put_pixel_checked(int x, int y, uint8_t col) {
     int sx = x - cam_x;
     int sy = y - cam_y;
     if (sx < clip_x || sy < clip_y || sx >= (clip_x + clip_w) || sy >= (clip_y + clip_h)) return;
@@ -284,7 +402,7 @@ void Real8Gfx::put_pixel_checked(int x, int y, uint8_t col) {
     put_pixel_raw(sx, sy, palette_map[col & 0x0F]);
 }
 
-void Real8Gfx::pset(int x, int y, uint8_t col) { 
+void IWRAM_PSETGET_CODE Real8Gfx::pset(int x, int y, uint8_t col) { 
     invalidateObjBatch();
     int sx = x - cam_x;
     int sy = y - cam_y;
@@ -299,7 +417,7 @@ void Real8Gfx::pset(int x, int y, uint8_t col) {
     if (vm && !vm->skipDirtyRect) vm->mark_dirty_rect(sx, sy, sx, sy);
 }
 
-uint8_t Real8Gfx::pget(int x, int y) {
+uint8_t IWRAM_PSETGET_CODE Real8Gfx::pget(int x, int y) {
     // pget is relative to camera in PICO-8? No, pget(x,y) gets pixel at x,y relative to screen origin (0,0)
     // Actually, PICO-8 manual says pget is affected by camera.
     // However, most emulators impl pget as raw framebuffer access + camera offset.
@@ -309,15 +427,15 @@ uint8_t Real8Gfx::pget(int x, int y) {
     return vm->fb[ry][rx] & 0x0F;
 }
 
-void Real8Gfx::cls(int c) {
+void IWRAM_CLS_CODE Real8Gfx::cls(int c) {
     invalidateObjBatch();
     if (!vm->fb) return;
     uint8_t stored = c & 0x0F;
-    for (int y = 0; y < Real8VM::HEIGHT; ++y) memset(vm->fb[y], stored, Real8VM::RAW_WIDTH);
+    std::memset(&vm->fb[0][0], stored, (size_t)Real8VM::RAW_WIDTH * Real8VM::HEIGHT);
     
     // Also update 0x6000 RAM mirror if available
-    if (vm->ram && vm->screen_ram) {
-        memset(vm->screen_ram, (stored << 4) | stored, 0x2000);
+    if (vm->screen_ram) {
+        std::memset(vm->screen_ram, (stored << 4) | stored, 0x2000);
     }
     vm->mark_dirty_rect(0, 0, 127, 127);
     
@@ -336,7 +454,7 @@ static int computeOutCode(int x, int y, int xmin, int ymin, int xmax, int ymax) 
     return code;
 }
 
-void Real8Gfx::line(int x0, int y0, int x1, int y1, uint8_t c) {
+void IWRAM_CODE Real8Gfx::line(int x0, int y0, int x1, int y1, uint8_t c) {
     invalidateObjBatch();
     int sx0 = x0 - cam_x; int sy0 = y0 - cam_y;
     int sx1 = x1 - cam_x; int sy1 = y1 - cam_y;
@@ -428,7 +546,7 @@ void Real8Gfx::rect(int x0, int y0, int x1, int y1, uint8_t c) {
     line(x1, y1, x0, y1, c); line(x0, y1, x0, y0, c);
 }
 
-void Real8Gfx::rectfill(int x0, int y0, int x1, int y1, uint8_t c) {
+void IWRAM_CODE Real8Gfx::rectfill(int x0, int y0, int x1, int y1, uint8_t c) {
     invalidateObjBatch();
     if (x1 < x0) std::swap(x0, x1);
     if (y1 < y0) std::swap(y0, y1);
@@ -579,7 +697,7 @@ void Real8Gfx::rrectfill(int x, int y, int w, int h, int r, uint8_t c) {
     fill_rrect_corners(this, x0, y0, x1, y1, radius, c);
 }
 
-void Real8Gfx::circ(int cx, int cy, int r, uint8_t c) {
+void IWRAM_CIRC_CODE Real8Gfx::circ(int cx, int cy, int r, uint8_t c) {
     invalidateObjBatch();
     int sx0 = cx - r - cam_x;
     int sy0 = cy - r - cam_y;
@@ -602,7 +720,7 @@ void Real8Gfx::circ(int cx, int cy, int r, uint8_t c) {
     }
 }
 
-void Real8Gfx::circfill(int cx, int cy, int r, uint8_t c) {
+void IWRAM_CIRC_CODE Real8Gfx::circfill(int cx, int cy, int r, uint8_t c) {
     invalidateObjBatch();
     int sx0 = cx - r - cam_x;
     int sy0 = cy - r - cam_y;
@@ -726,7 +844,7 @@ void IWRAM_CODE Real8Gfx::spr_fast(int n, int x, int y, int w, int h, bool fx, b
     }
 }
 
-void Real8Gfx::spr(int n, int x, int y, int w, int h, bool fx, bool fy) {
+void IWRAM_SPR_CODE Real8Gfx::spr(int n, int x, int y, int w, int h, bool fx, bool fy) {
     if (tryQueueObjSprite(n, x, y, w, h, fx, fy)) return;
     invalidateObjBatch();
     if (draw_mask == 0) { spr_fast(n, x, y, w, h, fx, fy); return; }
@@ -762,7 +880,7 @@ void Real8Gfx::spr(int n, int x, int y, int w, int h, bool fx, bool fy) {
     vm->mark_dirty_rect(dx0, dy0, dx1, dy1);
 }
 
-void Real8Gfx::sspr(int sx, int sy, int sw, int sh, int dx, int dy, int dw, int dh, bool flip_x, bool flip_y) {
+void IWRAM_SSPR_CODE Real8Gfx::sspr(int sx, int sy, int sw, int sh, int dx, int dy, int dw, int dh, bool flip_x, bool flip_y) {
     invalidateObjBatch();
     if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0 || !vm->fb) return;
     REAL8_PROFILE_HOTSPOT(vm, Real8VM::kHotspotSspr);
@@ -830,7 +948,7 @@ void Real8Gfx::sset(int x, int y, uint8_t v) {
     }
 }
 
-uint8_t Real8Gfx::mget(int x, int y) {
+uint8_t IWRAM_MAP_CODE Real8Gfx::mget(int x, int y) {
     if (!vm->ram) return 0;
 
     const bool bigMap = vm->hwState.mapMemMapping >= 0x80;
@@ -888,7 +1006,7 @@ void Real8Gfx::mset(int x, int y, uint8_t v) {
     else if (idx < 8192) vm->ram[0x1000 + (idx - 4096)] = v;
 }
 
-void Real8Gfx::map(int mx, int my, int sx, int sy, int w, int h, int layer) {
+void IWRAM_MAP_CODE Real8Gfx::map(int mx, int my, int sx, int sy, int w, int h, int layer) {
     if (!vm->ram) return;
     int sx0 = sx - cam_x;
     int sy0 = sy - cam_y;

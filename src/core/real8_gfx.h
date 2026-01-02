@@ -143,6 +143,9 @@ private:
     bool paltStateDirty = true;
     bool paletteIdentity = true;
     bool paltDefault = true;
+    mutable uint32_t sprite_base_cache = 0x0000;
+    mutable uint8_t sprite_base_cache_mapping = 0x00;
+    mutable bool sprite_base_cache_valid = false;
 
     // Helpers
     void put_pixel_raw(int x, int y, uint8_t col);

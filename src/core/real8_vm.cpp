@@ -22,6 +22,44 @@
 #include <algorithm>
 #include <vector>
 
+#if defined(__GBA__)
+#define IWRAM_CODE __attribute__((section(".iwram"), long_call))
+#else
+#define IWRAM_CODE
+#endif
+
+#ifndef REAL8_GBA_IWRAM_INPUT
+#define REAL8_GBA_IWRAM_INPUT 1
+#endif
+
+#if REAL8_GBA_IWRAM_INPUT
+#define IWRAM_INPUT_CODE IWRAM_CODE
+#else
+#define IWRAM_INPUT_CODE
+#endif
+
+#if defined(__GBA__)
+#ifndef REAL8_GBA_IWRAM_MAPCHECK
+#define REAL8_GBA_IWRAM_MAPCHECK 1
+#endif
+#ifndef REAL8_GBA_IWRAM_DIRTYRECT
+#define REAL8_GBA_IWRAM_DIRTYRECT 1
+#endif
+#if REAL8_GBA_IWRAM_MAPCHECK
+#define IWRAM_MAPCHECK_CODE IWRAM_CODE
+#else
+#define IWRAM_MAPCHECK_CODE
+#endif
+#if REAL8_GBA_IWRAM_DIRTYRECT
+#define IWRAM_DIRTYRECT_CODE IWRAM_CODE
+#else
+#define IWRAM_DIRTYRECT_CODE
+#endif
+#else
+#define IWRAM_MAPCHECK_CODE
+#define IWRAM_DIRTYRECT_CODE
+#endif
+
 // --------------------------------------------------------------------------
 // STATIC HELPERS & PALETTE
 // --------------------------------------------------------------------------
@@ -100,10 +138,29 @@ namespace {
     private:
         lua_State* L_;
     };
+}
 
+static void IWRAM_INPUT_CODE update_gba_input(Real8VM* vm) {
+    if (!vm || !vm->host) return;
+
+    uint32_t* states = vm->btn_states;
+    vm->last_btn_states[0] = states[0];
+    const uint32_t state = vm->host->getPlayerInput(0);
+    states[0] = state;
+
+    uint8_t* counters = vm->btn_counters[0];
+    for (int b = 0; b < 6; ++b) {
+        counters[b] = (state & (1u << b)) ? (uint8_t)(counters[b] + 1u) : 0u;
+    }
+
+    vm->host->consumeLatchedInput();
+    vm->btn_state = state;
+
+    if (vm->ram) {
+        vm->ram[0x5F30] = (uint8_t)(state & 0xFF);
+        vm->ram[0x5F34] = (uint8_t)((state >> 8) & 0xFF);
+    }
 }
-
-
 // --------------------------------------------------------------------------
 // ERROR HANDLING (Using Debugger)
 // --------------------------------------------------------------------------
@@ -582,59 +639,63 @@ void Real8VM::runFrame()
     // INPUT PROCESSING (Synchronized with Logic Frame)
     // --------------------------------------------------------------------------
 
-    const int maxPlayers = isGba ? 1 : 8;
-    if (host) {
-        // 1. Poll Events: 
-        // Windows needs explicit polling. Libretro handles it externally.
-        if (!isLibretro) {
-            host->pollInput();
-        }
+    if (isGba) {
+        update_gba_input(this);
+    } else {
+        const int maxPlayers = 8;
+        if (host) {
+            // 1. Poll Events: 
+            // Windows needs explicit polling. Libretro handles it externally.
+            if (!isLibretro) {
+                host->pollInput();
+            }
 
-        // 2. Fetch State:
-        for (int i = 0; i < maxPlayers; i++) {
-            last_btn_states[i] = btn_states[i]; // Track history
-            btn_states[i] = host->getPlayerInput(i);
-        }
-    }
-
-    // Update Internal Counters (btnp support)
-    // This MUST happen here so counters increment only once per logic frame.
-    for (int p = 0; p < maxPlayers; p++) {
-        uint32_t state = btn_states[p];
-        
-        for (int b = 0; b < 6; b++) {
-            if (state & (1 << b)) {
-                // Button is held
-                btn_counters[p][b]++;
-            } else {
-                // Button is released
-                btn_counters[p][b] = 0;
+            // 2. Fetch State:
+            for (int i = 0; i < maxPlayers; i++) {
+                last_btn_states[i] = btn_states[i]; // Track history
+                btn_states[i] = host->getPlayerInput(i);
             }
         }
-    }
-    if (host) {
-        host->consumeLatchedInput();
-    }
 
-    // Update Legacy/Primary Player State for memory mapping
-    btn_state = btn_states[0];
+        // Update Internal Counters (btnp support)
+        // This MUST happen here so counters increment only once per logic frame.
+        for (int p = 0; p < maxPlayers; p++) {
+            uint32_t state = btn_states[p];
+            
+            for (int b = 0; b < 6; b++) {
+                if (state & (1 << b)) {
+                    // Button is held
+                    btn_counters[p][b]++;
+                } else {
+                    // Button is released
+                    btn_counters[p][b] = 0;
+                }
+            }
+        }
+        if (host) {
+            host->consumeLatchedInput();
+        }
 
-    // Update RAM Mapping
-    if (ram) {
-        MouseState ms = host->getMouseState();
-        int mx = (ms.x < 0) ? 0 : (ms.x > 127) ? 127 : ms.x;
-        int my = (ms.y < 0) ? 0 : (ms.y > 127) ? 127 : ms.y;
+        // Update Legacy/Primary Player State for memory mapping
+        btn_state = btn_states[0];
 
-        mouse_rel_x = mx - mouse_last_x;
-        mouse_rel_y = my - mouse_last_y;
-        mouse_last_x = mx;
-        mouse_last_y = my;
-        mouse_x = mx;
-        mouse_y = my;
-        mouse_buttons = ms.btn;
+        // Update RAM Mapping
+        if (ram) {
+            MouseState ms = host->getMouseState();
+            int mx = (ms.x < 0) ? 0 : (ms.x > 127) ? 127 : ms.x;
+            int my = (ms.y < 0) ? 0 : (ms.y > 127) ? 127 : ms.y;
 
-        ram[0x5F30] = (uint8_t)(btn_state & 0xFF);
-        ram[0x5F34] = (uint8_t)((btn_state >> 8) & 0xFF);
+            mouse_rel_x = mx - mouse_last_x;
+            mouse_rel_y = my - mouse_last_y;
+            mouse_last_x = mx;
+            mouse_last_y = my;
+            mouse_x = mx;
+            mouse_y = my;
+            mouse_buttons = ms.btn;
+
+            ram[0x5F30] = (uint8_t)(btn_state & 0xFF);
+            ram[0x5F34] = (uint8_t)((btn_state >> 8) & 0xFF);
+        }
     }
 
     // --------------------------------------------------------------------------
@@ -1071,7 +1132,7 @@ void Real8VM::detectCartFPS()
 // MEMORY & PIXEL ACCESS
 // --------------------------------------------------------------------------
 
-void Real8VM::mark_dirty_rect(int x0, int y0, int x1, int y1)
+void IWRAM_DIRTYRECT_CODE Real8VM::mark_dirty_rect(int x0, int y0, int x1, int y1)
 {
     if (x0 < dirty_x0) dirty_x0 = x0;
     if (y0 < dirty_y0) dirty_y0 = y0;
@@ -1098,7 +1159,7 @@ int computeOutCode(int x, int y, int xmin, int ymin, int xmax, int ymax) {
     return code;
 }
 
-bool Real8VM::map_check_flag(int x, int y, int w, int h, int flag)
+bool IWRAM_MAPCHECK_CODE Real8VM::map_check_flag(int x, int y, int w, int h, int flag)
 {
     // Simplified bounds check logic, ignoring strict Lua table parsing here for speed/simplicity in VM
     int i0 = std::max(0, x / 8); int i1 = std::min(15, (x + w - 1) / 8);
@@ -1193,7 +1254,7 @@ void Real8VM::show_frame()
 
     if (!host) return;
 
-    // If nothing drew since last present, don’t re-upload/re-render.
+    // If nothing drew since last present, donÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢t re-upload/re-render.
     if (dirty_x1 < 0 || dirty_y1 < 0) {
         return;
     }
@@ -1230,13 +1291,13 @@ void Real8VM::log(LogChannel ch, const char* fmt, ...)
     }
 }
 
-bool Real8VM::btn(int i, int p)
+bool IWRAM_INPUT_CODE Real8VM::btn(int i, int p)
 {
     if (p < 0 || p > 7) return false;
     return (btn_states[p] & (1 << i)) != 0;
 }
 
-bool Real8VM::btnp(int i, int p) {
+bool IWRAM_INPUT_CODE Real8VM::btnp(int i, int p) {
     if (i < 0 || i > 5 || p < 0 || p > 7) return false;
     int c = btn_counters[p][i];
     if (c == 1) return true;

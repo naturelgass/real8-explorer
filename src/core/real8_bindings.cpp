@@ -38,6 +38,21 @@ static const float TAU = 6.28318530718f;
 #define REAL8_EWRAM
 #endif
 
+#if defined(__GBA__)
+#define IWRAM_CODE __attribute__((section(".iwram"), long_call))
+#else
+#define IWRAM_CODE
+#endif
+
+#ifndef REAL8_GBA_IWRAM_BINDINGS
+#define REAL8_GBA_IWRAM_BINDINGS 1
+#endif
+
+#if REAL8_GBA_IWRAM_BINDINGS
+#define IWRAM_BINDINGS_CODE IWRAM_CODE
+#else
+#define IWRAM_BINDINGS_CODE
+#endif
 static Real8VM *g_vm = nullptr;
 
 static constexpr int kTrigLutSize = 1024;
@@ -1060,7 +1075,7 @@ static int l_cls(lua_State *L)
     vm->gpu.setCursor(0, 0);
     return 0;
 }
-static int l_pset(lua_State *L)
+static int IWRAM_BINDINGS_CODE l_pset(lua_State *L)
 {
     auto *vm = get_vm(L);
     int x = to_int_floor(L, 1);
@@ -1073,7 +1088,7 @@ static int l_pset(lua_State *L)
     vm->gpu.pset(x, y, (uint8_t)c);
     return 0;
 }
-static int l_pget(lua_State *L)
+static int IWRAM_BINDINGS_CODE l_pget(lua_State *L)
 {
     auto *vm = get_vm(L);
     int x = to_int_floor(L, 1);
@@ -1117,7 +1132,7 @@ static int l_pget(lua_State *L)
     lua_pushinteger(L, pixel);
     return 1;
 }
-static int l_line(lua_State *L)
+static int IWRAM_BINDINGS_CODE l_line(lua_State *L)
 {
     auto *vm = get_vm(L);
     int argc = lua_gettop(L);
@@ -1157,7 +1172,7 @@ static int l_line(lua_State *L)
 
     return 0;
 }
-static int l_rectfill(lua_State *L)
+static int IWRAM_BINDINGS_CODE l_rectfill(lua_State *L)
 {
     auto *vm = get_vm(L);
     int x0 = to_int_floor(L, 1);
@@ -2624,7 +2639,7 @@ static int l_map_check(lua_State *L)
     return 1;
 }
 
-static int l_spr(lua_State *L)
+static int IWRAM_BINDINGS_CODE l_spr(lua_State *L)
 {
     debug_spr_count++;
 
@@ -2650,7 +2665,7 @@ static int l_spr(lua_State *L)
 }
 // In real8_bindings.cpp, replace the l_sspr function:
 
-static int l_sspr(lua_State *L)
+static int IWRAM_BINDINGS_CODE l_sspr(lua_State *L)
 {
     auto *vm = get_vm(L);
     int sx = to_int_floor(L, 1), sy = to_int_floor(L, 2);
@@ -2693,7 +2708,7 @@ static int l_sset(lua_State *L)
     return 0;
 }
 
-static int l_map(lua_State *L)
+static int IWRAM_BINDINGS_CODE l_map(lua_State *L)
 {
     auto *vm = get_vm(L);
     int n = lua_gettop(L);
@@ -4522,7 +4537,7 @@ void register_pico8_api(lua_State *L)
     _G.len = string.len
     if _G.atan2 and not _G.math.atan2 then _G.math.atan2 = _G.atan2 end
 
-    _G["⬅️"] = 0; _G["➡️"] = 1; _G["⬆️"] = 2; _G["⬇️"] = 3; _G["🅾️"] = 4; _G["❎"] = 5
+    _G["â¬…ï¸"] = 0; _G["âž¡ï¸"] = 1; _G["â¬†ï¸"] = 2; _G["â¬‡ï¸"] = 3; _G["ðŸ…¾ï¸"] = 4; _G["âŽ"] = 5
     _G[string.char(139)] = 0; _G[string.char(145)] = 1
     _G[string.char(148)] = 2; _G[string.char(131)] = 3
     _G[string.char(142)] = 4; _G[string.char(151)] = 5
