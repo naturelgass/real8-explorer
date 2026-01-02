@@ -27,7 +27,12 @@
 #include "lvm.h"
 #include "ljit_gba.h"
 
-#if defined(LUA_GBA_BASELINE_JIT)
+
+/* Treat LUA_GBA_BASELINE_JIT as numeric (0/1). */
+#ifndef LUA_GBA_BASELINE_JIT
+#define LUA_GBA_BASELINE_JIT 0
+#endif
+#if LUA_GBA_BASELINE_JIT
 static int luaV_execute_jit(lua_State *L);
 static int g_lua_jit_fallback_depth = 0;
 #endif
@@ -582,7 +587,7 @@ void luaV_finishOp (lua_State *L) {
 #define vmcasenb(l,b)	case l: {b}		/* nb = no break */
 
 void luaV_execute (lua_State *L) {
-#if defined(LUA_GBA_BASELINE_JIT)
+#if LUA_GBA_BASELINE_JIT
   if (g_lua_jit_fallback_depth == 0 && luaV_execute_jit(L)) return;
 #endif
   CallInfo *ci = L->ci;
@@ -953,7 +958,7 @@ void luaV_execute (lua_State *L) {
   }
 }
 
-#if defined(LUA_GBA_BASELINE_JIT) && defined(__GNUC__)
+#if LUA_GBA_BASELINE_JIT && defined(__GNUC__)
 #if defined(__GBA__) && defined(LUA_GBA_JIT_IWRAM)
 #define LUA_GBA_IWRAM_CODE __attribute__((section(".iwram"), long_call))
 #else

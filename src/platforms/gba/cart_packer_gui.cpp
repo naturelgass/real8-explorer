@@ -4,6 +4,7 @@
 #include <process.h>
 
 #include <cctype>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -13,6 +14,9 @@ namespace {
     const int kPadding = 12;
     const int kButtonWidth = 110;
     const int kButtonHeight = 28;
+    const int kCheckboxHeight = 20;
+    const int kCheckboxRowGap = 6;
+    const int kCheckboxColumnGap = 16;
 
     const int kIdBrowseMake = 1001;
     const int kIdBrowseDevkit = 1002;
@@ -20,6 +24,12 @@ namespace {
     const int kIdBrowseCart = 1004;
     const int kIdGenerate = 1005;
     const int kIdSpinner = 1006;
+    const int kIdToggleAudio = 1101;
+    const int kIdToggleFastLua = 1102;
+    const int kIdToggleSkipVblank = 1103;
+    const int kIdToggleProfile = 1104;
+    const int kIdToggleBaselineJit = 1105;
+    const int kIdToggleJitIwram = 1106;
 
     const UINT kIdSpinnerTimer = 2001;
     const UINT kMsgBuildDone = WM_APP + 1;
@@ -34,6 +44,12 @@ namespace {
     HWND g_browseDevkitButton = nullptr;
     HWND g_browseGbaButton = nullptr;
     HWND g_browseCartButton = nullptr;
+    HWND g_toggleAudio = nullptr;
+    HWND g_toggleFastLua = nullptr;
+    HWND g_toggleSkipVblank = nullptr;
+    HWND g_toggleProfile = nullptr;
+    HWND g_toggleBaselineJit = nullptr;
+    HWND g_toggleJitIwram = nullptr;
 
     char g_makePath[MAX_PATH] = "";
     char g_devkitProPath[MAX_PATH] = "";
@@ -44,6 +60,17 @@ namespace {
     bool g_building = false;
     HANDLE g_buildThread = nullptr;
 
+    struct ToggleState {
+        int enableAudio;
+        int fastLua;
+        int skipVblank;
+        int profileGba;
+        int baselineJit;
+        int jitIwram;
+    };
+
+    const ToggleState kDefaultToggles = { 0, 1, 1, 0, 1, 0 };
+
     struct BuildParams {
         HWND hwnd;
         std::string makePath;
@@ -53,6 +80,7 @@ namespace {
         std::string gbaDir;
         std::string outputPath;
         std::string logPath;
+        ToggleState toggles;
     };
 
     struct BuildResult {
@@ -176,6 +204,221 @@ namespace {
         if (needsSlash) out[offset++] = '\\';
         memcpy(out + offset, file, fileLen);
         out[offset + fileLen] = '\0';
+        return true;
+    }
+
+    static void trimLineEnding(char* line) {
+        if (!line) return;
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+            line[--len] = '\0';
+        }
+    }
+
+    static bool containsIgnoreCase(const char* str, const char* needle) {
+        if (!str || !needle || !*needle) return false;
+        size_t needleLen = strlen(needle);
+        for (const char* p = str; *p; ++p) {
+            size_t i = 0;
+            while (i < needleLen && p[i] &&
+                   std::tolower((unsigned char)p[i]) == std::tolower((unsigned char)needle[i])) {
+                ++i;
+            }
+            if (i == needleLen) return true;
+        }
+        return false;
+    }
+
+    static bool lineHasRegionStats(const char* line, const char* region) {
+        if (!line || !region || !*region) return false;
+        size_t regionLen = strlen(region);
+        for (const char* p = line; *p; ++p) {
+            if (std::tolower((unsigned char)*p) != std::tolower((unsigned char)region[0])) continue;
+            size_t i = 1;
+            while (i < regionLen && p[i] &&
+                   std::tolower((unsigned char)p[i]) == std::tolower((unsigned char)region[i])) {
+                ++i;
+            }
+            if (i != regionLen) continue;
+            if (p != line) {
+                char before = p[-1];
+                if (std::isalnum((unsigned char)before) || before == '_') continue;
+            }
+            const char* after = p + regionLen;
+            while (*after == ' ' || *after == '\t') ++after;
+            if (*after == ':' || std::isdigit((unsigned char)*after)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static bool parseMakeToggleValue(const char* makefilePath, const char* key, int& outValue) {
+        if (!makefilePath || !*makefilePath || !key || !*key) return false;
+        FILE* file = fopen(makefilePath, "r");
+        if (!file) return false;
+
+        char line[512] = "";
+        size_t keyLen = strlen(key);
+        bool found = false;
+        while (fgets(line, sizeof(line), file)) {
+            trimLineEnding(line);
+            const char* p = line;
+            while (*p == ' ' || *p == '\t') ++p;
+            if (*p == '#' || *p == '\0') continue;
+            if (strncmp(p, key, keyLen) != 0) continue;
+            if (p[keyLen] && !std::isspace(static_cast<unsigned char>(p[keyLen])) &&
+                p[keyLen] != '?' && p[keyLen] != '=') {
+                continue;
+            }
+            const char* assign = strstr(p + keyLen, "?=");
+            if (!assign) {
+                assign = strchr(p + keyLen, '=');
+                if (assign) {
+                    assign += 1;
+                }
+            } else {
+                assign += 2;
+            }
+            if (!assign) continue;
+            while (*assign == ' ' || *assign == '\t') ++assign;
+            if (!*assign) continue;
+            int value = std::atoi(assign);
+            outValue = value ? 1 : 0;
+            found = true;
+            break;
+        }
+
+        fclose(file);
+        return found;
+    }
+
+    static ToggleState loadToggleDefaultsFromMakefile(const char* gbaDir) {
+        ToggleState defaults = kDefaultToggles;
+        if (!gbaDir || !*gbaDir) return defaults;
+
+        char makefilePath[MAX_PATH] = "";
+        if (!buildPath(gbaDir, "Makefile", makefilePath, sizeof(makefilePath))) {
+            return defaults;
+        }
+        if (!fileExists(makefilePath)) return defaults;
+
+        int value = 0;
+        if (parseMakeToggleValue(makefilePath, "REAL8_GBA_ENABLE_AUDIO", value)) {
+            defaults.enableAudio = value;
+        }
+        if (parseMakeToggleValue(makefilePath, "REAL8_GBA_FAST_LUA", value)) {
+            defaults.fastLua = value;
+        }
+        if (parseMakeToggleValue(makefilePath, "REAL8_GBA_SKIP_VBLANK", value)) {
+            defaults.skipVblank = value;
+        }
+        if (parseMakeToggleValue(makefilePath, "REAL8_PROFILE_GBA", value)) {
+            defaults.profileGba = value;
+        }
+        if (parseMakeToggleValue(makefilePath, "LUA_GBA_BASELINE_JIT", value)) {
+            defaults.baselineJit = value;
+        }
+        if (parseMakeToggleValue(makefilePath, "REAL8_GBA_JIT_IWRAM", value)) {
+            defaults.jitIwram = value;
+        }
+
+        return defaults;
+    }
+
+    static void setCheckboxState(HWND checkbox, int value) {
+        if (!checkbox) return;
+        SendMessageA(checkbox, BM_SETCHECK, value ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+
+    static int getCheckboxState(HWND checkbox) {
+        if (!checkbox) return 0;
+        return SendMessageA(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED ? 1 : 0;
+    }
+
+    static void applyToggleState(const ToggleState& state) {
+        setCheckboxState(g_toggleAudio, state.enableAudio);
+        setCheckboxState(g_toggleFastLua, state.fastLua);
+        setCheckboxState(g_toggleSkipVblank, state.skipVblank);
+        setCheckboxState(g_toggleProfile, state.profileGba);
+        setCheckboxState(g_toggleBaselineJit, state.baselineJit);
+        setCheckboxState(g_toggleJitIwram, state.jitIwram);
+    }
+
+    static ToggleState readToggleStateFromUi() {
+        ToggleState state = {};
+        state.enableAudio = getCheckboxState(g_toggleAudio);
+        state.fastLua = getCheckboxState(g_toggleFastLua);
+        state.skipVblank = getCheckboxState(g_toggleSkipVblank);
+        state.profileGba = getCheckboxState(g_toggleProfile);
+        state.baselineJit = getCheckboxState(g_toggleBaselineJit);
+        state.jitIwram = getCheckboxState(g_toggleJitIwram);
+        return state;
+    }
+
+    static void syncToggleDefaultsFromMakefile() {
+        ToggleState defaults = loadToggleDefaultsFromMakefile(g_gbaDir);
+        applyToggleState(defaults);
+    }
+
+    static void appendMakeVar(std::string& args, const char* name, int value) {
+        if (!name || !*name) return;
+        args.push_back(' ');
+        args += name;
+        args.push_back('=');
+        args += value ? "1" : "0";
+    }
+
+    static bool readMemoryUsageFromLog(const char* logPath, std::string& out) {
+        if (!logPath || !*logPath) return false;
+        FILE* file = fopen(logPath, "r");
+        if (!file) return false;
+
+        char line[512] = "";
+        std::string header;
+        std::string romLine;
+        std::string iwramLine;
+        std::string ewramLine;
+
+        while (fgets(line, sizeof(line), file)) {
+            trimLineEnding(line);
+            if (!line[0]) continue;
+
+            if (containsIgnoreCase(line, "Memory region")) {
+                header = line;
+                continue;
+            }
+
+            if (lineHasRegionStats(line, "EWRAM")) {
+                ewramLine = line;
+            } else if (lineHasRegionStats(line, "IWRAM")) {
+                iwramLine = line;
+            } else if (lineHasRegionStats(line, "ROM")) {
+                romLine = line;
+            }
+        }
+
+        fclose(file);
+
+        if (romLine.empty() && iwramLine.empty() && ewramLine.empty()) return false;
+
+        out.clear();
+        out += "Memory usage:\n";
+        if (!header.empty()) {
+            out += header;
+            out += "\n";
+        }
+        if (!ewramLine.empty()) {
+            out += ewramLine;
+            out += "\n";
+        }
+        if (!iwramLine.empty()) {
+            out += iwramLine;
+            out += "\n";
+        }
+        if (!romLine.empty()) {
+            out += romLine;
+        }
         return true;
     }
 
@@ -335,13 +578,19 @@ namespace {
         return true;
     }
 
-    static bool runMakeCommand(const char* gbaDir, const char* makePath, const char* devkitArmPath, const char* devkitProPath, const char* inputPath, const char* logPath, std::string& err) {
+    static bool runMakeCommand(const char* gbaDir, const char* makePath, const char* devkitArmPath, const char* devkitProPath, const ToggleState& toggles, const char* inputPath, const char* logPath, std::string& err) {
         if (!makePath || !*makePath) return false;
         if (!devkitArmPath || !*devkitArmPath) return false;
 
         std::string args = "V=1 rom CART_PNG=\"";
         args += inputPath;
         args += "\"";
+        appendMakeVar(args, "REAL8_GBA_ENABLE_AUDIO", toggles.enableAudio);
+        appendMakeVar(args, "REAL8_GBA_FAST_LUA", toggles.fastLua);
+        appendMakeVar(args, "REAL8_GBA_SKIP_VBLANK", toggles.skipVblank);
+        appendMakeVar(args, "REAL8_PROFILE_GBA", toggles.profileGba);
+        appendMakeVar(args, "LUA_GBA_BASELINE_JIT", toggles.baselineJit);
+        appendMakeVar(args, "REAL8_GBA_JIT_IWRAM", toggles.jitIwram);
 
         char makeDir[MAX_PATH] = "";
         if (!getDirFromPath(makePath, makeDir, sizeof(makeDir))) {
@@ -582,8 +831,8 @@ namespace {
         return true;
     }
 
-    static bool runMake(const char* gbaDir, const char* makePath, const char* devkitArmPath, const char* devkitProPath, const char* inputPath, const char* logPath, std::string& err) {
-        if (runMakeCommand(gbaDir, makePath, devkitArmPath, devkitProPath, inputPath, logPath, err)) return true;
+    static bool runMake(const char* gbaDir, const char* makePath, const char* devkitArmPath, const char* devkitProPath, const ToggleState& toggles, const char* inputPath, const char* logPath, std::string& err) {
+        if (runMakeCommand(gbaDir, makePath, devkitArmPath, devkitProPath, toggles, inputPath, logPath, err)) return true;
         if (err.empty()) {
             err = "Failed to launch make. Check the selected path and permissions.";
         }
@@ -682,6 +931,7 @@ namespace {
                      params->makePath.c_str(),
                      params->devkitArmPath.c_str(),
                      params->devkitProPath.c_str(),
+                     params->toggles,
                      params->cartPath.c_str(),
                      params->logPath.c_str(),
                      err)) {
@@ -694,6 +944,11 @@ namespace {
             result->success = true;
             result->message = "Generated:\n";
             result->message += params->outputPath;
+            std::string memoryUsage;
+            if (readMemoryUsageFromLog(params->logPath.c_str(), memoryUsage)) {
+                result->message += "\n\n";
+                result->message += memoryUsage;
+            }
         }
 
         PostMessageA(params->hwnd, kMsgBuildDone, result->success ? 1 : 0, reinterpret_cast<LPARAM>(result));
@@ -769,6 +1024,7 @@ namespace {
                     showMessage("Makefile not found in the selected folder.", MB_ICONWARNING | MB_OK);
                 } else {
                     setSelectedGbaDir(folder);
+                    syncToggleDefaultsFromMakefile();
                 }
             }
             CoTaskMemFree(pidl);
@@ -875,6 +1131,7 @@ namespace {
         params->gbaDir = gbaDir;
         params->outputPath = outputPath;
         params->logPath = logPath;
+        params->toggles = readToggleStateFromUi();
 
         setBusy(true);
         startSpinner(hwnd);
@@ -1064,13 +1321,124 @@ namespace {
                 GetModuleHandleA(nullptr),
                 nullptr);
 
+            const int toggleLabelY = kPadding + 208;
+            CreateWindowExA(
+                0,
+                "STATIC",
+                "Feature toggles (from Makefile defaults)",
+                WS_CHILD | WS_VISIBLE,
+                kPadding,
+                toggleLabelY,
+                rect.right - (kPadding * 2),
+                16,
+                hwnd,
+                nullptr,
+                GetModuleHandleA(nullptr),
+                nullptr);
+
+            const int checkboxYStart = toggleLabelY + 18;
+            const int checkboxWidth = (rect.right - (kPadding * 2) - kCheckboxColumnGap) / 2;
+            const int checkboxRightX = kPadding + checkboxWidth + kCheckboxColumnGap;
+            int checkboxY = checkboxYStart;
+
+            g_toggleAudio = CreateWindowExA(
+                0,
+                "BUTTON",
+                "Enable Audio",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                kPadding,
+                checkboxY,
+                checkboxWidth,
+                kCheckboxHeight,
+                hwnd,
+                (HMENU)kIdToggleAudio,
+                GetModuleHandleA(nullptr),
+                nullptr);
+
+            g_toggleFastLua = CreateWindowExA(
+                0,
+                "BUTTON",
+                "Fast Lua",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                checkboxRightX,
+                checkboxY,
+                checkboxWidth,
+                kCheckboxHeight,
+                hwnd,
+                (HMENU)kIdToggleFastLua,
+                GetModuleHandleA(nullptr),
+                nullptr);
+
+            checkboxY += kCheckboxHeight + kCheckboxRowGap;
+
+            g_toggleSkipVblank = CreateWindowExA(
+                0,
+                "BUTTON",
+                "Skip VBlank",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                kPadding,
+                checkboxY,
+                checkboxWidth,
+                kCheckboxHeight,
+                hwnd,
+                (HMENU)kIdToggleSkipVblank,
+                GetModuleHandleA(nullptr),
+                nullptr);
+
+            g_toggleProfile = CreateWindowExA(
+                0,
+                "BUTTON",
+                "Profile GBA",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                checkboxRightX,
+                checkboxY,
+                checkboxWidth,
+                kCheckboxHeight,
+                hwnd,
+                (HMENU)kIdToggleProfile,
+                GetModuleHandleA(nullptr),
+                nullptr);
+
+            checkboxY += kCheckboxHeight + kCheckboxRowGap;
+
+            g_toggleBaselineJit = CreateWindowExA(
+                0,
+                "BUTTON",
+                "Baseline JIT",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                kPadding,
+                checkboxY,
+                checkboxWidth,
+                kCheckboxHeight,
+                hwnd,
+                (HMENU)kIdToggleBaselineJit,
+                GetModuleHandleA(nullptr),
+                nullptr);
+
+            g_toggleJitIwram = CreateWindowExA(
+                0,
+                "BUTTON",
+                "JIT in IWRAM",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                checkboxRightX,
+                checkboxY,
+                checkboxWidth,
+                kCheckboxHeight,
+                hwnd,
+                (HMENU)kIdToggleJitIwram,
+                GetModuleHandleA(nullptr),
+                nullptr);
+
+            applyToggleState(kDefaultToggles);
+
+            const int generateY = checkboxY + kCheckboxHeight + 10;
             g_generateButton = CreateWindowExA(
                 0,
                 "BUTTON",
                 "Generate",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 kPadding,
-                kPadding + 212,
+                generateY,
                 kButtonWidth,
                 kButtonHeight,
                 hwnd,
@@ -1084,7 +1452,7 @@ namespace {
                 "",
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
                 kPadding + kButtonWidth + 8,
-                kPadding + 212,
+                generateY,
                 24,
                 kButtonHeight,
                 hwnd,
@@ -1138,6 +1506,7 @@ namespace {
             }
 
             applyDefaultPaths();
+            syncToggleDefaultsFromMakefile();
 
             updateGenerateEnabled();
             break;
@@ -1211,12 +1580,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
     HWND hwnd = CreateWindowExA(
         0,
         className,
-        "Pico2GBA",
+        "Pico2GBA v1.0 by @natureglass",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         560,
-        312,
+        390,
         nullptr,
         nullptr,
         instance,

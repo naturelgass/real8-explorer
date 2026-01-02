@@ -171,7 +171,7 @@ static int l_stat(lua_State *L)
         lua_pushstring(L, vm ? vm->param_str.c_str() : ""); 
         return 1;
     case 7: // Current FPS
-        lua_pushnumber(L, vm ? vm->debugFPS : 0);
+        lua_pushnumber(L, vm ? vm->displayFPS : 0);
         return 1;
     case 8: // Target FPS
         // Fixed: target_fps -> targetFPS, added L arg
@@ -194,6 +194,7 @@ static int l_stat(lua_State *L)
         return 1;
 
     // --- AUDIO INFO (16-26) ---
+#if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
     case 16: // SFX index on Channel 0
     case 17: // SFX index on Channel 1
     case 18: // SFX index on Channel 2
@@ -231,7 +232,7 @@ static int l_stat(lua_State *L)
         lua_pushinteger(L, vm ? vm->audio.get_music_ticks_on_pattern() : 0);
         return 1;
     }
-
+#endif
     // --- INPUT ---
     case 28: // Raw keyboard (SDL scancode)
     {
@@ -303,7 +304,7 @@ static int l_stat(lua_State *L)
         lua_pushinteger(L, (vm && devkit_enabled && ptr_lock) ? vm->mouse_rel_y : 0);
         return 1;
 
-
+#if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
     // --- AUDIO INFO (46-57) ---
     case 46:
     case 47:
@@ -339,7 +340,7 @@ static int l_stat(lua_State *L)
     case 57: // Music Playing?
         lua_pushboolean(L, vm && vm->audio.is_music_playing());
         return 1;
-
+#endif
     // --- RTC (Real Time Clock) ---
     case 80: // Year
     case 81: // Month
@@ -398,7 +399,9 @@ static int l_stat(lua_State *L)
         lua_pushinteger(L, 0);
         return 1;
     case 110: // Frame-by-frame mode flag
+        #if !defined(__GBA__)
         lua_pushboolean(L, vm && vm->debug.step_mode);
+        #endif
         return 1;
     case 120: // Bytestream availability
     case 121: // Bytestream availability
@@ -2846,7 +2849,6 @@ static int l_btnp(lua_State *L)
     lua_pushboolean(L, vm->btnp(i, p));
     return 1;
 }
-
 static int l_sfx(lua_State *L)
 {
     auto *vm = get_vm(L);
@@ -2856,7 +2858,10 @@ static int l_sfx(lua_State *L)
     int offset = (int)luaL_optinteger(L, 3, 0);
     int length = (int)luaL_optinteger(L, 4, -1);
 
+    #if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
     vm->audio.play_sfx(idx, ch, offset, length);
+    #endif
+
     return 0;
 }
 static int l_music(lua_State *L)
@@ -2866,10 +2871,14 @@ static int l_music(lua_State *L)
     int pat = to_int_floor(L, 1);
     int fade_len = (int)luaL_optinteger(L, 2, 0);
     int mask = (int)luaL_optinteger(L, 3, 0x0f);
-    vm->audio.play_music(pat, fade_len, mask);
+
+    #if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
+        vm->audio.play_music(pat, fade_len, mask);
+    #endif
+
     return 0;
 }
-
+#if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
 void Real8VM::init_wavetables()
 {
     for (int i = 0; i < 2048; i++)
@@ -2905,6 +2914,7 @@ void Real8VM::init_wavetables()
         wavetables[7][i] = wavetables[0][i];
     }
 }
+#endif
 
 // --------------------------------------------------------------------------
 // PERSISTENT DATA IMPLEMENTATION
@@ -3989,7 +3999,15 @@ static int l_reload(lua_State *L)
     {
         // If filename (arg 4) is present, PICO-8 loads from another cart.
         // For a basic port, you can ignore arg 4 or return 0 to indicate failure.
-        memcpy(&vm->ram[dest], &vm->rom[src], len);
+        size_t rom_size = (vm->rom_size != 0) ? vm->rom_size : (vm->rom_readonly ? 0u : 0x8000u);
+        size_t copy_len = 0;
+        if ((size_t)src < rom_size) {
+            copy_len = std::min((size_t)len, rom_size - (size_t)src);
+            memcpy(&vm->ram[dest], &vm->rom[src], copy_len);
+        }
+        if (copy_len < (size_t)len) {
+            memset(&vm->ram[dest + copy_len], 0, (size_t)len - copy_len);
+        }
     }
     return 0;
 }
@@ -4005,13 +4023,20 @@ static int l_cstore(lua_State *L)
     if (dest == 0 && src == 0 && len == 0)
         len = 0x4300;
 
-    if (vm->rom && vm->ram)
+    if (vm->ram)
     {
         // Apply mask 0x8000 to prevent overflow
         if (dest + len > 0x8000)
             len = 0x8000 - dest;
         if (src + len > 0x8000)
             len = 0x8000 - src;
+        if (len <= 0)
+            return 0;
+
+        if (!vm->ensureWritableRom()) {
+            if (vm->host) vm->host->log("[Real8] cstore: failed to allocate ROM buffer");
+            return 0;
+        }
 
         memcpy(&vm->rom[dest], &vm->ram[src], len);
 

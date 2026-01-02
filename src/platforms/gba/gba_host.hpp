@@ -65,7 +65,7 @@ public:
 
 private:
     void initVideo();
-#if defined(__GBA__) && REAL8_GBA_ENABLE_AUDIO
+#if REAL8_GBA_ENABLE_AUDIO
     void initAudio();
     void submitAudioFrame();
 #endif
@@ -100,11 +100,7 @@ private:
     int tilesY1 = 0;
     uint8_t (*tilesFb)[128] = nullptr;
     bool inputPolled = false;
-#if defined(REAL8_GBA_HBLANK_DMA) && REAL8_GBA_HBLANK_DMA
-    bool hblankDmaPending = false;
-    bool hblankDmaActive = false;
-#endif
-#if defined(__GBA__) && REAL8_GBA_ENABLE_AUDIO
+#if REAL8_GBA_ENABLE_AUDIO
     static constexpr int kAudioSampleRate = 22050;
     static constexpr int kAudioFrameSamples = 368;
     static constexpr int kAudioRingSamples = 4096;

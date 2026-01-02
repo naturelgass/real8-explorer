@@ -17,9 +17,7 @@ struct lua_State;
 namespace {
     volatile uint32_t g_vblankTicks = 0;
     GbaHost* g_gbaHost = nullptr;
-#if defined(__GBA__)
     bool g_timerInit = false;
-#endif
 
 #ifndef REAL8_GBA_TILEMODE
 #define REAL8_GBA_TILEMODE 1
@@ -28,7 +26,7 @@ namespace {
     volatile uint16_t* const kMgbaDebugEnable = reinterpret_cast<volatile uint16_t*>(0x4FFF780);
     volatile char* const kMgbaDebugString = reinterpret_cast<volatile char*>(0x4FFF600);
 
-#if defined(__GBA__) && !defined(REAL8_GBA_DEBUG_OVERLAY)
+#if !defined(REAL8_GBA_DEBUG_OVERLAY)
 #define REAL8_GBA_DEBUG_OVERLAY 0
 #endif
 
@@ -45,7 +43,12 @@ namespace {
 #endif
     constexpr int kSplashPaletteOffset = 16;
 
-#if defined(__GBA__)
+#ifndef REG_KEYINPUT
+#define REG_KEYINPUT *(volatile u16*)(0x04000130)
+#endif
+#ifndef KEY_MASK
+#define KEY_MASK 0x03FF
+#endif
 #ifndef REG_DMA3SAD
 #define REG_DMA3SAD *(volatile u32*)(0x040000D4)
 #define REG_DMA3DAD *(volatile u32*)(0x040000D8)
@@ -251,38 +254,25 @@ namespace {
     }
 
     static inline void initSystemTimer() {
-#if defined(__GBA__)
         if (g_timerInit) return;
-        if (REG_TM2CNT_H & TIMER_ENABLE) {
-            g_timerInit = true;
-            return;
-        }
+
+        // Always (re)initialize TM2/TM3 as a 32-bit free-running counter.
         REG_TM2CNT_H = 0;
         REG_TM3CNT_H = 0;
         REG_TM2CNT_L = 0;
         REG_TM3CNT_L = 0;
-        REG_TM2CNT_H = TIMER_ENABLE | TIMER_DIV_1;
-        REG_TM3CNT_H = TIMER_ENABLE | TIMER_CASCADE;
-        g_timerInit = true;
-#endif
-    }
-#endif
 
-#if defined(__GBA__)
-#if defined(REAL8_GBA_FB_IN_IWRAM)
-#define IWRAM_CODE __attribute__((long_call))
-#else
+        REG_TM2CNT_H = TIMER_ENABLE | TIMER_DIV_1;   // low
+        REG_TM3CNT_H = TIMER_ENABLE | TIMER_CASCADE; // high
+
+        g_timerInit = true;
+    }
+
 #define IWRAM_CODE __attribute__((section(".iwram"), long_call))
-#endif
 #define EWRAM_DATA __attribute__((section(".ewram")))
-#else
-#define IWRAM_CODE
-#define EWRAM_DATA
-#endif
 
     static void IWRAM_CODE blitFrame(u16* vram, const uint8_t (*framebuffer)[128], int xOff, int yOff) {
         const int stride = 240 / 2;
-#if defined(__GBA__)
         const uint8_t* src = &framebuffer[0][0];
         u16* dst = vram + (yOff * stride + (xOff / 2));
         const u32 srcAddr = (u32)src;
@@ -302,20 +292,6 @@ namespace {
                 dst += stride;
             }
         }
-#else
-        for (int y = 0; y < 128; ++y) {
-            u16* row16 = vram + ((y + yOff) * stride + (xOff / 2));
-            u32* row32 = (u32*)row16;
-            const uint8_t* src = framebuffer[y];
-            for (int x = 0; x < 128; x += 4) {
-                u32 v = (u32)src[x]
-                    | ((u32)src[x + 1] << 8)
-                    | ((u32)src[x + 2] << 16)
-                    | ((u32)src[x + 3] << 24);
-                row32[x / 4] = v;
-            }
-        }
-#endif
     }
 
     static inline void blitPixel(u16* vram, int stride, int x, int y, uint8_t color) {
@@ -351,22 +327,6 @@ namespace {
     }
 #endif
 
-#if defined(REAL8_GBA_HBLANK_DMA) && REAL8_GBA_HBLANK_DMA
-    constexpr int kLinePitch = 240;
-    constexpr int kLineBufLines = 128;
-    constexpr int kLineXOff = 56;
-    constexpr int kLineYOff = 16;
-    static EWRAM_DATA alignas(4) uint8_t g_linebuf[kLineBufLines][kLinePitch];
-
-    static void IWRAM_CODE stageLinebuf(const uint8_t (*framebuffer)[128]) {
-        if (!framebuffer) return;
-        for (int y = 0; y < kLineBufLines; ++y) {
-            uint8_t* dst = g_linebuf[y];
-            std::memset(dst, 16, kLinePitch);
-            std::memcpy(dst + kLineXOff, framebuffer[y], 128);
-        }
-    }
-#endif
 
     static bool initSplashBackdrop() {
         const size_t splashPixels = 240u * 160u;
@@ -418,7 +378,7 @@ namespace {
 GbaHost::GbaHost() {
     g_gbaHost = this;
     initVideo();
-#if defined(__GBA__) && REAL8_GBA_ENABLE_AUDIO
+#if REAL8_GBA_ENABLE_AUDIO
     initAudio();
 #endif
 }
@@ -438,11 +398,6 @@ void GbaHost::initVideo() {
     objCount = 0;
     objSpriteSheet = nullptr;
     objPending = false;
-#if defined(REAL8_GBA_HBLANK_DMA) && REAL8_GBA_HBLANK_DMA
-    hblankDmaPending = false;
-    hblankDmaActive = false;
-    REG_DMA3CNT = 0;
-#endif
     REG_DISPCNT = MODE_4 | BG2_ON;
     BG_PALETTE[0] = RGB5(0, 0, 0);
     splashBackdropActive = initSplashBackdrop();
@@ -455,11 +410,6 @@ void GbaHost::initVideo() {
     }
 #else
     tileModeActive = false;
-#if defined(REAL8_GBA_HBLANK_DMA) && REAL8_GBA_HBLANK_DMA
-    hblankDmaPending = false;
-    hblankDmaActive = false;
-    REG_DMA3CNT = 0;
-#endif
     REG_DISPCNT = MODE_4 | BG2_ON;
     BG_PALETTE[0] = RGB5(0, 0, 0);
     splashBackdropActive = initSplashBackdrop();
@@ -495,7 +445,7 @@ void GbaHost::setSplashBackdrop(bool enabled) {
     clearBorders();
 }
 
-#if defined(__GBA__) && REAL8_GBA_ENABLE_AUDIO
+#if REAL8_GBA_ENABLE_AUDIO
 void GbaHost::initAudio() {
     if (audioInit) return;
 
@@ -542,39 +492,18 @@ void GbaHost::submitAudioFrame() {
 #endif
 
 void GbaHost::waitForVBlank() {
+    // Profile the *waiting* portion as idle (so ID shows real us, not 0).
+    if (profileVm) REAL8_PROFILE_BEGIN(profileVm, Real8VM::kProfileIdle);
+
     while (REG_VCOUNT >= 160) {
     }
     while (REG_VCOUNT < 160) {
-#if defined(REAL8_GBA_HBLANK_DMA) && REAL8_GBA_HBLANK_DMA
-        if (hblankDmaActive && REG_VCOUNT >= kLineBufLines) {
-            REG_DMA3CNT = 0;
-            hblankDmaActive = false;
-        }
-#endif
     }
-#if REAL8_GBA_TILEMODE
-    if (tileModeActive && tilesPending && tilesFb) {
-        blitFrameTiles(tilesFb, tilesX0, tilesY0, tilesX1, tilesY1);
-        tilesPending = false;
-        tilesFb = nullptr;
-    }
-    if (tileModeActive) {
-        flushSpriteBatch();
-    }
-#endif
-#if defined(__GBA__) && REAL8_GBA_ENABLE_AUDIO
+
+    if (profileVm) REAL8_PROFILE_END(profileVm, Real8VM::kProfileIdle);
+
+#if REAL8_GBA_ENABLE_AUDIO
     submitAudioFrame();
-#endif
-#if defined(REAL8_GBA_HBLANK_DMA) && REAL8_GBA_HBLANK_DMA
-    if (hblankDmaPending) {
-        REG_DMA3CNT = 0;
-        REG_DMA3SAD = (u32)&g_linebuf[0][0];
-        REG_DMA3DAD = (u32)((u16*)VRAM + (kLineYOff * (kLinePitch / 2)));
-        REG_DMA3CNT = (kLinePitch / 2) | DMA_16 | DMA_SRC_INC | DMA_DST_INC
-                    | DMA_REPEAT | DMA_START_HBL | DMA_ENABLE;
-        hblankDmaPending = false;
-        hblankDmaActive = true;
-    }
 #endif
     inputPolled = false;
     ++g_vblankTicks;
@@ -690,7 +619,12 @@ void GbaHost::flushSpriteBatch() {
 void IWRAM_CODE GbaHost::blitFrameTiles(const uint8_t (*framebuffer)[128], int x0, int y0, int x1, int y1) {
 #if REAL8_GBA_TILEMODE
     if (!framebuffer) return;
-    if (x1 < 0 || y1 < 0 || x0 > 127 || y0 > 127) return;
+    if (x1 < 0 || y1 < 0 || x0 > 127 || y0 > 127) {
+        // Some draw paths don\'t mark a dirty rect. Fall back to a full blit.
+        u16* vram = (u16*)VRAM;
+        blitFrame(vram, framebuffer, 56, 16);
+        return;
+    }
 
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
@@ -721,11 +655,7 @@ void IWRAM_CODE GbaHost::blitFrameTiles(const uint8_t (*framebuffer)[128], int x
                 packed16[row * 2] = (uint16_t)(b0 | (b1 << 8));
                 packed16[row * 2 + 1] = (uint16_t)(b2 | (b3 << 8));
             }
-#if defined(__GBA__)
             dma3Copy32Wait(packed16, tile, 8);
-#else
-            std::memcpy(tile, packed16, sizeof(packed16));
-#endif
         }
     }
 #else
@@ -760,16 +690,6 @@ void GbaHost::flipScreen(uint8_t (*framebuffer)[128], uint8_t *palette_map) {
         }
     }
     paletteValid = true;
-
-#if defined(REAL8_GBA_HBLANK_DMA) && REAL8_GBA_HBLANK_DMA
-    if (!tileModeActive) {
-        // HBlank DMA repeat avoids per-line DMA setup by streaming staged lines.
-        stageLinebuf(framebuffer);
-        hblankDmaPending = true;
-        if (debugDirty) drawDebugOverlay();
-        return;
-    }
-#endif
 
     u16* vram = (u16*)VRAM;
     const int xOff = 56;
@@ -842,15 +762,6 @@ void GbaHost::flipScreenDirty(uint8_t (*framebuffer)[128], uint8_t *palette_map,
     }
     paletteValid = true;
 
-#if defined(REAL8_GBA_HBLANK_DMA) && REAL8_GBA_HBLANK_DMA
-    if (!tileModeActive && x0 <= 0 && y0 <= 0 && x1 >= 127 && y1 >= 127) {
-        stageLinebuf(framebuffer);
-        hblankDmaPending = true;
-        if (debugDirty) drawDebugOverlay();
-        return;
-    }
-#endif
-
     if (x0 <= 0 && y0 <= 0 && x1 >= 127 && y1 >= 127) {
         u16* vram = (u16*)VRAM;
         blitFrame(vram, framebuffer, 56, 16);
@@ -867,7 +778,6 @@ void GbaHost::flipScreenDirty(uint8_t (*framebuffer)[128], uint8_t *palette_map,
 }
 
 unsigned long GbaHost::getMillis() {
-#if defined(__GBA__)
     initSystemTimer();
     u32 high1 = REG_TM3CNT_L;
     u32 low = REG_TM2CNT_L;
@@ -878,9 +788,6 @@ unsigned long GbaHost::getMillis() {
     }
     u32 ticks = (high1 << 16) | low;
     return (unsigned long)(((uint64_t)ticks * 1000u) >> 24);
-#else
-    return (unsigned long)((g_vblankTicks * 1000u) / 60u);
-#endif
 }
 
 void GbaHost::log(const char* fmt, ...) {
@@ -896,9 +803,34 @@ void GbaHost::log(const char* fmt, ...) {
 
 void GbaHost::delayMs(int ms) {
     if (ms <= 0) return;
-    int frames = (ms + 15) / 16;
-    for (int i = 0; i < frames; ++i) {
-        waitForVBlank();
+
+    // Use the 24-bit free-running timer (TM2/TM3 @ 2^24 Hz) so we don't quantize
+    // delays to whole VBlanks. Quantizing 33ms to 3 VBlanks is what causes 20fps.
+    initSystemTimer();
+
+    auto readTicks = []() -> u32 {
+        u32 high1 = REG_TM3CNT_L;
+        u32 low   = REG_TM2CNT_L;
+        u32 high2 = REG_TM3CNT_L;
+        if (high1 != high2) {
+            low   = REG_TM2CNT_L;
+            high1 = high2;
+        }
+        return (high1 << 16) | low;
+    };
+
+    const u32 start = readTicks();
+    const u32 waitTicks = (u32)(((uint64_t)ms * (1u << 24)) / 1000u);
+    const u32 frameTicks = (u32)((1u << 24) / 60u); // ~279620 ticks
+
+    while ((u32)(readTicks() - start) < waitTicks) {
+        // If we still have ~a frame or more to wait, yield until next VBlank.
+        // Otherwise, spin for the remainder for accurate timing.
+        const u32 elapsed = (u32)(readTicks() - start);
+        const u32 remaining = waitTicks - elapsed;
+        if (remaining > frameTicks) {
+            waitForVBlank();
+        }
     }
 }
 
@@ -945,19 +877,25 @@ bool GbaHost::renameGameUI(const char* currentPath) {
 
 uint32_t GbaHost::getPlayerInput(int playerIdx) {
     if (playerIdx != 0) return 0;
-    if (!inputPolled) {
-        pollInput();
-    }
+    // Always refresh input so it works even if the main loop doesn't call waitForVBlank().
+    pollInput();
     return inputMask | latchedInputMask;
 }
 
-void GbaHost::pollInput() {
-    if (inputPolled) return;
-    scanKeys();
-    keysHeldState = (uint16_t)keysHeld();
-    keysDownState = (uint16_t)keysDown();
+void IWRAM_CODE GbaHost::pollInput() {
+    // Do not early-out; some codepaths no longer call waitForVBlank() which was
+    // the only thing resetting inputPolled.
+
+    // KEYINPUT is active-low; convert to active-high.
+    const u16 now  = (u16)((~REG_KEYINPUT) & KEY_MASK);
+    const u16 down = (u16)(now & ~keysHeldState);
+
+    keysHeldState = now;
+    keysDownState = down;
+
     inputMask = mapPicoButtons(keysHeldState);
     latchedInputMask |= mapPicoButtons(keysDownState);
+
     inputPolled = true;
 }
 
@@ -977,7 +915,7 @@ void GbaHost::setInputConfigData(const std::vector<uint8_t>& data) {
 }
 
 void GbaHost::pushAudio(const int16_t* samples, int count) {
-#if defined(__GBA__) && REAL8_GBA_ENABLE_AUDIO
+#if REAL8_GBA_ENABLE_AUDIO
     if (!audioInit) initAudio();
     if (!samples || count <= 0) {
         audioRingHead = 0;
@@ -1012,7 +950,12 @@ void GbaHost::pushAudio(const int16_t* samples, int count) {
 void IWRAM_CODE GbaHost::blitFrameDirty(const uint8_t (*framebuffer)[128], int x0, int y0, int x1, int y1) {
     REAL8_PROFILE_HOTSPOT(profileVm, Real8VM::kHotspotBlitDirty);
     if (!framebuffer) return;
-    if (x1 < 0 || y1 < 0 || x0 > 127 || y0 > 127) return;
+    if (x1 < 0 || y1 < 0 || x0 > 127 || y0 > 127) {
+        // Some draw paths don\'t mark a dirty rect. Fall back to a full blit.
+        u16* vram = (u16*)VRAM;
+        blitFrame(vram, framebuffer, 56, 16);
+        return;
+    }
 
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
@@ -1043,7 +986,6 @@ void IWRAM_CODE GbaHost::blitFrameDirty(const uint8_t (*framebuffer)[128], int x
 
         int evenCount = width & ~1;
         if (evenCount > 0) {
-#if defined(__GBA__)
             const u32 srcAddr = (u32)src;
             const u32 dstAddr = (u32)dst;
             if (((srcAddr | dstAddr) & 3u) == 0 && ((evenCount & 3) == 0)) {
@@ -1051,9 +993,6 @@ void IWRAM_CODE GbaHost::blitFrameDirty(const uint8_t (*framebuffer)[128], int x
             } else {
                 dma3Copy16(src, dst, (u32)(evenCount / 2));
             }
-#else
-            std::memcpy(dst, src, (size_t)evenCount);
-#endif
             src += evenCount;
             dst += evenCount / 2;
             dx += evenCount;
@@ -1092,7 +1031,7 @@ void GbaHost::updateOverlay() {
 }
 
 void GbaHost::renderDebugOverlay() {
-#if defined(__GBA__) && (REAL8_GBA_DEBUG_OVERLAY == 0)
+#if (REAL8_GBA_DEBUG_OVERLAY == 0)
     debugDirty = false;
     return;
 #endif
@@ -1109,7 +1048,7 @@ void GbaHost::pushDebugLine(const char* line) {
 }
 
 void GbaHost::drawDebugOverlay() {
-#if defined(__GBA__) && (REAL8_GBA_DEBUG_OVERLAY == 0)
+#if (REAL8_GBA_DEBUG_OVERLAY == 0)
     debugDirty = false;
     return;
 #endif

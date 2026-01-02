@@ -130,6 +130,7 @@ void Real8Debugger::poke(int addr, uint8_t val) {
     }
 }
 
+#if !defined(__GBA__)
 // --------------------------------------------------------------------------
 // STATIC HOOK
 // --------------------------------------------------------------------------
@@ -167,3 +168,4 @@ void Real8Debugger::luaHook(lua_State *L, lua_Debug *ar)
         }
     }
 }
+#endif

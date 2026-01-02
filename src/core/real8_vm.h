@@ -10,8 +10,12 @@
 
 #include "../hal/real8_host.h"
 #include "real8_memattrs.h"
+
+#if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
 #include "real8_audio.h"
 #include "real8_debugger.h"
+#endif
+
 #include "real8_gfx.h"
 #include "real8_cart.h"
 
@@ -23,7 +27,7 @@
 #define REAL8_PROFILE_GBA 0
 #endif
 
-#if defined(__GBA__) && REAL8_PROFILE_GBA
+#if REAL8_PROFILE_GBA
 #define REAL8_PROFILE_ENABLED 1
 #else
 #define REAL8_PROFILE_ENABLED 0
@@ -44,11 +48,7 @@
 #endif
 
 #if !defined(REAL8_HAS_LIBRETRO_BUFFERS)
-#if defined(__GBA__)
 #define REAL8_HAS_LIBRETRO_BUFFERS 0
-#else
-#define REAL8_HAS_LIBRETRO_BUFFERS 1
-#endif
 #endif
 
 // Logging Macros
@@ -131,7 +131,12 @@ public:
 
   int targetFPS = 30;
   int debugFPS = 0;
+  int displayFPS = 0;
   float debugFrameMS = 0.0f; 
+  unsigned long app_fps_last_ms = 0;
+  int app_fps_counter = 0;
+  unsigned long display_fps_last_ms = 0;
+  int display_fps_counter = 0;
 
   bool showStats = false;
   bool crt_filter = false;
@@ -154,7 +159,9 @@ public:
   size_t getStateSize();
   bool serialize(void* data, size_t size);
   bool unserialize(const void* data, size_t size);
+  #if !defined(__GBA__)
   int16_t audio_buffer[4096]; // Fixed size, plenty of headroom
+  #endif
 #if REAL8_HAS_LIBRETRO_BUFFERS
   uint32_t screen_buffer[128 * 128]; // Raw 32-bit output for Libretro
   uint32_t palette_lut[32]; // Cache RGBA values for the 32 pico-8 colors
@@ -169,8 +176,14 @@ public:
   // --------------------------------------------------------------------------
   uint8_t *ram = nullptr;
   uint8_t *rom = nullptr;
+  size_t rom_size = 0;
+  bool rom_readonly = false;
+  bool rom_owned = false;
   uint8_t (*fb)[RAW_WIDTH] = nullptr; 
   uint8_t (*alt_fb)[RAW_WIDTH] = nullptr;
+
+  void setRomView(const uint8_t* data, size_t size, bool readOnly);
+  bool ensureWritableRom();
 
   // Aliases
   uint8_t (*gfx)[128] = nullptr;
@@ -189,9 +202,11 @@ public:
   // --------------------------------------------------------------------------
   // SUBSYSTEMS
   // --------------------------------------------------------------------------
-  IReal8Host *host; 
+  IReal8Host *host;
+  #if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
   AudioEngine audio;
   Real8Debugger debug;
+  #endif
   Real8Gfx gpu; // The Graphics Subsystem
 
   // --------------------------------------------------------------------------
@@ -243,11 +258,12 @@ public:
   // --------------------------------------------------------------------------
   // AUDIO & WAVETABLES
   // --------------------------------------------------------------------------
+#if !defined(__GBA__)
   float wavetables[8][2048]; 
   void init_wavetables();
   AudioStateSnapshot getAudioState() { return audio.getState(); }
   void setAudioState(const AudioStateSnapshot& s) { audio.setState(s); }
-
+#endif
   // --------------------------------------------------------------------------
   // CARTS & LOADING
   // --------------------------------------------------------------------------
@@ -334,5 +350,6 @@ private:
   int lua_ref_draw = LUA_NOREF;
   int lua_ref_init = LUA_NOREF;
   
+  void renderProfileOverlay();
   void initDefaultPalette(); // Still used for VM reboot reset
 };

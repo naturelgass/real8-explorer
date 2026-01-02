@@ -143,8 +143,29 @@ static inline int isqrt_int(int v) {
 }
 
 uint32_t Real8Gfx::sprite_base_addr() const {
-    return (vm && vm->hwState.spriteSheetMemMapping == 0x60) ? 0x6000 : 0x0000;
+    // Some builds/configs set spriteSheetMemMapping to 0x60 (sprites at 0x6000),
+    // but not all carts/ports keep a mirrored copy of sprite data in that region.
+    // If 0x6000 looks empty, fall back to the canonical PICO-8 sprite sheet base (0x0000).
+    if (!vm || !vm->ram) return 0x0000;
+
+    if (vm->hwState.spriteSheetMemMapping == 0x60) {
+        // Cheap heuristic: sample a small window. If everything is 0, assume not mirrored.
+        const uint8_t* r = vm->ram;
+        bool any6000 = false;
+        for (int i = 0; i < 64; ++i) {
+            if (r[0x6000 + i] != 0) { any6000 = true; break; }
+        }
+        if (any6000) return 0x6000;
+        // If 0x0000 has data, use it.
+        for (int i = 0; i < 64; ++i) {
+            if (r[i] != 0) return 0x0000;
+        }
+        // Both look empty; default to 0x6000 to preserve mapping intent.
+        return 0x6000;
+    }
+    return 0x0000;
 }
+
 
 uint8_t Real8Gfx::get_pixel_ram(uint32_t base_addr, int x, int y) {
     if (!vm->ram || x < 0 || x > 127 || y < 0 || y > 127) return 0;
@@ -963,8 +984,6 @@ int Real8Gfx::draw_char_default(uint8_t p8, int x, int y, uint8_t col) {
         return 4;
     }
 }
-
-// In real8_gfx.cpp
 
 int Real8Gfx::draw_char_custom(uint8_t p8, int x, int y, uint8_t col) {
     uint8_t *a = vm->cf_attr();

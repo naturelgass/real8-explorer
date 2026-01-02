@@ -4,7 +4,6 @@
 #include <cstring>
 #include <algorithm>
 #include <string>
-#include <vector>
 
 #include "gba_host.hpp"
 #include "cart_blob.h"
@@ -21,47 +20,19 @@ namespace {
     const int kScreenCenterX = 64;
     const int kFontWidth = 5;
 
-    #if defined(__GBA__)
     #define EWRAM_DATA __attribute__((section(".ewram")))
     #define IWRAM_DATA __attribute__((section(".iwram")))
-    #else
-    #define EWRAM_DATA
-    #define IWRAM_DATA
-    #endif
 
-    #ifndef REAL8_GBA_FB_IN_IWRAM
-    #define REAL8_GBA_FB_IN_IWRAM 0
-    #endif
-
-    #if REAL8_GBA_FB_IN_IWRAM
-    #define REAL8_GBA_FB_SECTION IWRAM_DATA
-    #define REAL8_GBA_STATE_SECTION EWRAM_DATA
-    #else
     #define REAL8_GBA_FB_SECTION EWRAM_DATA
     #define REAL8_GBA_STATE_SECTION EWRAM_DATA
-    #endif
 
     EWRAM_DATA alignas(4) uint8_t gba_ram[0x8000];
-    EWRAM_DATA alignas(4) uint8_t gba_rom[0x8000];
     REAL8_GBA_FB_SECTION alignas(4) uint8_t gba_fb[128][128];
 
     REAL8_GBA_STATE_SECTION static GameData g_game;
     REAL8_GBA_STATE_SECTION static GbaHost g_host;
     EWRAM_DATA static Real8VM g_vm(&g_host);
 
-#ifndef REAL8_GBA_FORCE_30FPS
-#define REAL8_GBA_FORCE_30FPS 1
-#endif
-
-#ifndef REAL8_GBA_FRAME_DIV
-#define REAL8_GBA_FRAME_DIV 1
-#endif
-
-#ifndef REAL8_GBA_SKIP_VBLANK
-#define REAL8_GBA_SKIP_VBLANK 0
-#endif
-
-#if defined(__GBA__)
 #ifndef REG_DMA3SAD
 #define REG_DMA3SAD *(volatile u32*)(0x040000D4)
 #define REG_DMA3DAD *(volatile u32*)(0x040000D8)
@@ -100,7 +71,6 @@ namespace {
         while (REG_DMA3CNT & DMA_ENABLE) {
         }
     }
-#endif
 
     static void showSplash() {
         REG_DISPCNT = MODE_4 | BG2_ON | 0x80;
@@ -139,7 +109,10 @@ namespace {
         REG_DISPCNT = MODE_4 | BG2_ON;
     }
 
-    bool loadCartFromBlob(GameData &game) {
+    bool loadCartFromBlob(GameData &game, const uint8_t** rom_view, size_t* rom_size) {
+        if (rom_view) *rom_view = nullptr;
+        if (rom_size) *rom_size = 0;
+
         const uint8_t* blob = cart_blob_bin;
         const size_t blob_size = cart_blob_bin_size;
 
@@ -167,6 +140,9 @@ namespace {
         game.lua_code_ptr = reinterpret_cast<const char*>(src);
         game.lua_code_size = lua_size;
         game.cart_id = "game.p8.png";
+
+        if (rom_view) *rom_view = payload;
+        if (rom_size) *rom_size = kCartFixedBytes;
 
         return true;
     }
@@ -204,12 +180,20 @@ namespace {
         vm.show_frame();
     }
 
+    constexpr const char* kMenuOptions[] = {
+        "CONTINUE",
+        "RESET GAME",
+        "SHOW FPS",
+        "SHOW SKIN",
+        "CREDITS"
+    };
+    constexpr int kMenuOptionCount = (int)(sizeof(kMenuOptions) / sizeof(kMenuOptions[0]));
+
     struct GbaInGameMenu {
         bool active = false;
         bool inputLatch = false;
         bool requestExit = false;
         int selection = 0;
-        std::vector<std::string> options;
         Real8Gfx::GfxState gfx_backup{};
         bool showingCredits = false;
         bool showSkin = true;
@@ -217,13 +201,7 @@ namespace {
         uint32_t prevInputMask = 0;
 
         void build(Real8VM& vm) {
-            options.clear();
-            options.push_back("CONTINUE");
-            options.push_back("RESET GAME");
-            options.push_back("SHOW FPS");
-            options.push_back("SHOW SKIN");
-            options.push_back("CREDITS");
-
+            (void)vm;
             selection = 0;
             showingCredits = false;
             inputMask = 0;
@@ -245,9 +223,9 @@ namespace {
 
         void syncInput(Real8VM& vm, GbaHost& host) {
             prevInputMask = inputMask;
-            for (int i = 0; i < 8; ++i) {
-                vm.btn_states[i] = host.getPlayerInput(i);
-            }
+            vm.btn_states[0] = host.getPlayerInput(0);
+            for (int i = 1; i < 8; ++i) vm.btn_states[i] = 0;
+
             inputMask = vm.btn_states[0];
             vm.btn_mask = inputMask;
 
@@ -320,7 +298,7 @@ namespace {
             vm.gpu.fillp(0);
 
             int mw = 100;
-            int mh = (int)(options.size() * 11) + 16;
+            int mh = (kMenuOptionCount * 11) + 16;
             int mx = (128 - mw) / 2;
             int my = (128 - mh) / 2;
 
@@ -331,29 +309,30 @@ namespace {
             const char* title = "PAUSED";
             vm.gpu.pprint(title, (int)strlen(title), getCenteredX(title), my + 2, 6);
 
-            for (int i = 0; i < (int)options.size(); ++i) {
+            for (int i = 0; i < kMenuOptionCount; ++i) {
+                const char* option = kMenuOptions[i];
                 int oy = my + 15 + (i * 11);
                 int ox = mx + 13;
                 int col = (i == selection) ? 7 : 6;
 
                 if (i == selection) vm.gpu.pprint(">", 1, ox - 6, oy, 7);
-                vm.gpu.pprint(options[i].c_str(), (int)options[i].length(), ox, oy, col);
+                vm.gpu.pprint(option, (int)strlen(option), ox, oy, col);
 
-                if (options[i] == "MUSIC") {
+                if (strcmp(option, "MUSIC") == 0) {
                     for (int b = 0; b < 10; ++b) {
                         vm.gpu.pprint("|", 1, mx + mw - 45 + (b * 3), oy, (b < vm.volume_music) ? 11 : 5);
                     }
-                } else if (options[i] == "SFX") {
+                } else if (strcmp(option, "SFX") == 0) {
                     for (int b = 0; b < 10; ++b) {
                         vm.gpu.pprint("|", 1, mx + mw - 45 + (b * 3), oy, (b < vm.volume_sfx) ? 11 : 5);
                     }
-                } else if (options[i] == "SHOW FPS") {
+                } else if (strcmp(option, "SHOW FPS") == 0) {
                     const char* status = vm.showStats ? "ON" : "OFF";
                     int statusCol = vm.showStats ? 11 : 8;
                     int txtW = (int)strlen(status) * kFontWidth;
                     int statusX = (mx + mw) - txtW - 10;
                     vm.gpu.pprint(status, (int)strlen(status), statusX, oy, statusCol);
-                } else if (options[i] == "SHOW SKIN") {
+                } else if (strcmp(option, "SHOW SKIN") == 0) {
                     const char* status = showSkin ? "ON" : "OFF";
                     int statusCol = showSkin ? 11 : 8;
                     int txtW = (int)strlen(status) * kFontWidth;
@@ -366,7 +345,7 @@ namespace {
         }
 
         void update(Real8VM& vm, GbaHost& host, GameData& game) {
-            if (options.empty()) return;
+            if (kMenuOptionCount == 0) return;
 
             if (showingCredits) {
                 if ((inputMask & ~prevInputMask) != 0) {
@@ -378,26 +357,23 @@ namespace {
 
             if (vm.btnp(2)) {
                 selection--;
-                if (selection < 0) selection = (int)options.size() - 1;
+                if (selection < 0) selection = kMenuOptionCount - 1;
             }
             if (vm.btnp(3)) {
                 selection++;
-                if (selection >= (int)options.size()) selection = 0;
+                if (selection >= kMenuOptionCount) selection = 0;
             }
 
             if (vm.btnp(5)) {
-                const std::string& action = options[selection];
+                const char* action = kMenuOptions[selection];
 
-                if (action == "CONTINUE") {
+                if (strcmp(action, "CONTINUE") == 0) {
                     close(vm);
-                } else if (action == "RESET GAME") {
+                } else if (strcmp(action, "RESET GAME") == 0) {
                     showSplash();
                     host.waitForVBlank();
                     vm.rebootVM();
                     if (vm.loadGame(game)) {
-#if REAL8_GBA_FORCE_30FPS
-                        vm.targetFPS = 30;
-#endif
                         vm.resetInputState();
                         host.resetVideo();
                         host.setSplashBackdrop(showSkin);
@@ -408,12 +384,12 @@ namespace {
                         vm.show_frame();
                         build(vm);
                     }
-                } else if (action == "SHOW FPS") {
+                } else if (strcmp(action, "SHOW FPS") == 0) {
                     vm.showStats = !vm.showStats;
-                } else if (action == "SHOW SKIN") {
+                } else if (strcmp(action, "SHOW SKIN") == 0) {
                     showSkin = !showSkin;
                     host.setSplashBackdrop(showSkin);
-                } else if (action == "CREDITS") {
+                } else if (strcmp(action, "CREDITS") == 0) {
                     showingCredits = true;
                 }
             }
@@ -463,8 +439,8 @@ int main(void) {
     host.renderDebugOverlay();
 
     vm.ram = gba_ram;
-    vm.rom = gba_rom;
     vm.fb = (uint8_t (*)[128])gba_fb;
+    vm.setRomView(nullptr, 0, true);
 
     host.log("[BOOT] initMemory");
     host.renderDebugOverlay();
@@ -484,12 +460,15 @@ int main(void) {
     game.cart_id.clear();
     host.log("[BOOT] load blob");
     host.renderDebugOverlay();
-    if (!loadCartFromBlob(game)) {
+    const uint8_t* rom_view = nullptr;
+    size_t rom_size = 0;
+    if (!loadCartFromBlob(game, &rom_view, &rom_size)) {
         host.log("[BOOT] blob fail");
         showSolid(RGB5(31, 0, 31));
         host.renderDebugOverlay();
         while (true) host.waitForVBlank();
     }
+    vm.setRomView(rom_view, rom_size, true);
     const bool hasLua = (game.lua_code_ptr && game.lua_code_size > 0) || !game.lua_code.empty();
     if (!hasLua) {
         host.log("[BOOT] lua missing");
@@ -509,74 +488,70 @@ int main(void) {
     host.log("[BOOT] loadGame ok");
     host.renderDebugOverlay();
 
-#if REAL8_GBA_FORCE_30FPS
-    vm.targetFPS = 30;
-#endif
-
     host.resetVideo();
     host.clearBorders();
 
     GbaInGameMenu menu;
 
-    while (true) {
+        while (true) {
         REAL8_PROFILE_FRAME_BEGIN(&vm);
+
+        // Input: once per refresh (waitForVBlank() resets inputPolled)
         REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileInput);
         host.pollInput();
         REAL8_PROFILE_END(&vm, Real8VM::kProfileInput);
-        static int frameCounter = 0;
-        const bool runFrame = ((frameCounter++ % REAL8_GBA_FRAME_DIV) == 0);
-        if (runFrame) {
+
+        // Run menu/VM every refresh. Real8VM enforces 30fps carts internally by
+        // skipping Lua every other call when targetFPS==30.
+        if (menu.active) {
+            REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileMenu);
+            menu.syncInput(vm, host);
+            menu.update(vm, host, game);
+            if (menu.requestExit) {
+                menu.requestExit = false;
+                gbaSoftReset();
+            }
             if (menu.active) {
+                menu.render(vm);
+            }
+            REAL8_PROFILE_END(&vm, Real8VM::kProfileMenu);
+        } else {
+            REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileMenu);
+            uint32_t menuInput = host.getPlayerInput(0);
+            bool menuPressed = ((menuInput & (1u << 6)) != 0);
+            if (menu.inputLatch) {
+                if (menuInput == 0) {
+                    menu.inputLatch = false;
+                }
+                menuPressed = false;
+            }
+            REAL8_PROFILE_END(&vm, Real8VM::kProfileMenu);
+
+            if (menuPressed) {
                 REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileMenu);
-                menu.syncInput(vm, host);
-                menu.update(vm, host, game);
-                if (menu.requestExit) {
-                    menu.requestExit = false;
-                    gbaSoftReset();
-                }
-                if (menu.active) {
-                    menu.render(vm);
-                }
+                menu.open(vm);
+                menu.render(vm);
                 REAL8_PROFILE_END(&vm, Real8VM::kProfileMenu);
-                if (menu.active) {
-                    REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileBlit);
-                    vm.show_frame();
-                    REAL8_PROFILE_END(&vm, Real8VM::kProfileBlit);
-                }
             } else {
-                REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileInput);
-                uint32_t menuInput = host.getPlayerInput(0);
-                bool menuPressed = ((menuInput & (1u << 6)) != 0);
-                if (menu.inputLatch) {
-                    if (menuInput == 0) {
-                        menu.inputLatch = false;
-                    }
-                    menuPressed = false;
-                }
-                REAL8_PROFILE_END(&vm, Real8VM::kProfileInput);
-                if (menuPressed) {
-                    REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileMenu);
-                    menu.open(vm);
-                    menu.render(vm);
-                    REAL8_PROFILE_END(&vm, Real8VM::kProfileMenu);
-                    REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileBlit);
-                    vm.show_frame();
-                    REAL8_PROFILE_END(&vm, Real8VM::kProfileBlit);
-                } else {
-                    REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileVm);
-                    vm.runFrame();
-                    REAL8_PROFILE_END(&vm, Real8VM::kProfileVm);
-                    REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileBlit);
-                    vm.show_frame();
-                    REAL8_PROFILE_END(&vm, Real8VM::kProfileBlit);
-                }
+                REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileVm);
+                vm.runFrame();
+                REAL8_PROFILE_END(&vm, Real8VM::kProfileVm);
             }
         }
-        REAL8_PROFILE_FRAME_END(&vm);
+
 #if !REAL8_GBA_SKIP_VBLANK
+        // One VBlank wait per refresh = fixed pacing + correct ID profiling
         REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileIdle);
         host.waitForVBlank();
         REAL8_PROFILE_END(&vm, Real8VM::kProfileIdle);
 #endif
+
+        // Present during VBlank (on 30fps carts this typically no-ops on skipped refreshes)
+        REAL8_PROFILE_BEGIN(&vm, Real8VM::kProfileBlit);
+        vm.show_frame();
+        REAL8_PROFILE_END(&vm, Real8VM::kProfileBlit);
+
+        REAL8_PROFILE_FRAME_END(&vm);
     }
+
 }

@@ -21,6 +21,11 @@
 
 
 
+
+/* Treat LUA_GBA_BASELINE_JIT as numeric (0/1). */
+#ifndef LUA_GBA_BASELINE_JIT
+#define LUA_GBA_BASELINE_JIT 0
+#endif
 Closure *luaF_newCclosure (lua_State *L, int n) {
   Closure *c = &luaC_newobj(L, LUA_TCCL, sizeCclosure(n), NULL, 0)->cl;
   c->c.nupvalues = cast_byte(n);
@@ -129,7 +134,7 @@ Proto *luaF_newproto (lua_State *L) {
   f->linedefined = 0;
   f->lastlinedefined = 0;
   f->source = NULL;
-#if defined(LUA_GBA_BASELINE_JIT)
+#if LUA_GBA_BASELINE_JIT
   f->jit = NULL;
   f->jit_flags = 0;
 #endif
@@ -138,7 +143,7 @@ Proto *luaF_newproto (lua_State *L) {
 
 
 void luaF_freeproto (lua_State *L, Proto *f) {
-#if defined(LUA_GBA_BASELINE_JIT)
+#if LUA_GBA_BASELINE_JIT
   luaJitFreeProto(L, f);
 #endif
   luaM_freearray(L, f->code, f->sizecode);

@@ -367,7 +367,9 @@ bool Real8Tools::InjectBinaryMod(Real8VM* vm, IReal8Host* host, const std::strin
     if (data.empty()) return false;
     if (vm->ram && addr + data.size() <= 0x8000) {
         memcpy(vm->ram + addr, data.data(), data.size());
-        if (vm->rom) memcpy(vm->rom, vm->ram, 0x8000);
+        if (vm->rom && !vm->rom_readonly) {
+            memcpy(vm->rom, vm->ram, 0x8000);
+        }
         return true;
     }
     return false;

@@ -8,6 +8,8 @@ A PICO-8 explorer + emulator front-end for multiple platforms.
 
 ---
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/naturelgass/real8-explorer)
+
 ## Table of contents
 
 - [Platforms](#platforms)

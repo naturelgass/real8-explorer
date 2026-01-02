@@ -6,8 +6,12 @@
 #include "real8_compression.h"
 #include "real8_bindings.h"
 #include "real8_fonts.h"
-#include "real8_shell.h"
-#include "real8_tools.h"
+
+#if !defined(__GBA__)
+    #include "real8_shell.h"
+    #include "real8_tools.h"
+#endif
+
 #include <lodePNG.h> 
 
 #include <sstream>
@@ -17,19 +21,6 @@
 #include <cstdio>
 #include <algorithm>
 #include <vector>
-
-#if defined(__GBA__) && !defined(REAL8_GBA_ENABLE_DEBUGGER)
-#define REAL8_GBA_ENABLE_DEBUGGER 0
-#endif
-#if defined(__GBA__) && !defined(REAL8_GBA_ENABLE_STATS)
-#define REAL8_GBA_ENABLE_STATS 0
-#endif
-#if defined(__GBA__) && !defined(REAL8_GBA_FAST_LUA)
-#define REAL8_GBA_FAST_LUA 1
-#endif
-#ifndef REAL8_GBA_MAX_PLAYERS
-#define REAL8_GBA_MAX_PLAYERS 2
-#endif
 
 // --------------------------------------------------------------------------
 // STATIC HELPERS & PALETTE
@@ -112,54 +103,6 @@ namespace {
 
 }
 
-#if REAL8_PROFILE_ENABLED && defined(__GBA__)
-#ifndef REG_TM2CNT_L
-#define REG_TM2CNT_L *(volatile uint16_t*)(0x04000108)
-#define REG_TM2CNT_H *(volatile uint16_t*)(0x0400010A)
-#define REG_TM3CNT_L *(volatile uint16_t*)(0x0400010C)
-#define REG_TM3CNT_H *(volatile uint16_t*)(0x0400010E)
-#endif
-#ifndef TIMER_ENABLE
-#define TIMER_ENABLE (1u << 7)
-#endif
-#ifndef TIMER_CASCADE
-#define TIMER_CASCADE (1u << 2)
-#endif
-#ifndef TIMER_DIV_1
-#define TIMER_DIV_1 0x0000
-#endif
-
-namespace {
-    bool g_profileTimerInit = false;
-
-    static inline void profileInitTimer() {
-        if (g_profileTimerInit) return;
-        if (REG_TM2CNT_H & TIMER_ENABLE) {
-            g_profileTimerInit = true;
-            return;
-        }
-        REG_TM2CNT_H = 0;
-        REG_TM3CNT_H = 0;
-        REG_TM2CNT_L = 0;
-        REG_TM3CNT_L = 0;
-        REG_TM2CNT_H = TIMER_ENABLE | TIMER_DIV_1;
-        REG_TM3CNT_H = TIMER_ENABLE | TIMER_CASCADE;
-        g_profileTimerInit = true;
-    }
-
-    static inline uint32_t profileReadCycles() {
-        profileInitTimer();
-        uint32_t high1 = REG_TM3CNT_L;
-        uint32_t low = REG_TM2CNT_L;
-        uint32_t high2 = REG_TM3CNT_L;
-        if (high1 != high2) {
-            low = REG_TM2CNT_L;
-            high1 = high2;
-        }
-        return (high1 << 16) | low;
-    }
-}
-#endif
 
 // --------------------------------------------------------------------------
 // ERROR HANDLING (Using Debugger)
@@ -195,7 +138,7 @@ static int traceback(lua_State *L) {
     // Standard stack trace
     luaL_traceback(L, L, msg, 1);
     
-#if !defined(__GBA__) || REAL8_GBA_ENABLE_DEBUGGER
+#if !defined(__GBA__)
     if (vm && vm->host && vm->host->isConsoleOpen()) {
         vm->host->log("[LUA ERROR] %s", msg);
 
@@ -228,7 +171,10 @@ static int traceback(lua_State *L) {
 // LIFECYCLE
 // --------------------------------------------------------------------------
 
-Real8VM::Real8VM(IReal8Host *h) : host(h), debug(this), gpu(this)
+Real8VM::Real8VM(IReal8Host *h) : host(h), gpu(this)
+#if !defined(__GBA__)
+, debug(this)
+#endif
 {
     L = nullptr;
     ram = nullptr;
@@ -255,7 +201,9 @@ Real8VM::Real8VM(IReal8Host *h) : host(h), debug(this), gpu(this)
     volume_music = 7;
     volume_sfx = 10;
     
+    #if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
     audio.init(this);
+    #endif
     crt_filter = false;
     showSkin = false;
     
@@ -266,8 +214,13 @@ Real8VM::Real8VM(IReal8Host *h) : host(h), debug(this), gpu(this)
         currentRepoUrl = IReal8Host::DEFAULT_GAMES_REPOSITORY;
     }
 
+#if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
     init_wavetables();
+#endif
+
+#if !defined(__GBA__)
     Real8Tools::LoadSettings(this, host);
+#endif
 
 }
 
@@ -281,7 +234,42 @@ Real8VM::~Real8VM()
     if (fb) { P8_FREE(fb); fb = nullptr; }
 #endif
     if (ram) { P8_FREE(ram); ram = nullptr; }
-    if (rom) { P8_FREE(rom); rom = nullptr; }
+    if (rom && rom_owned) { P8_FREE(rom); }
+    rom = nullptr;
+}
+
+void Real8VM::setRomView(const uint8_t* data, size_t size, bool readOnly)
+{
+    if (rom && rom_owned) {
+        P8_FREE(rom);
+    }
+    rom = const_cast<uint8_t*>(data);
+    rom_size = size;
+    rom_readonly = readOnly;
+    rom_owned = false;
+}
+
+bool Real8VM::ensureWritableRom()
+{
+    if (rom && !rom_readonly) return true;
+
+    uint8_t* new_rom = (uint8_t*)calloc(1, 0x8000);
+    if (!new_rom) return false;
+
+    if (rom && rom_size > 0) {
+        size_t copy = (rom_size < 0x8000) ? rom_size : 0x8000;
+        memcpy(new_rom, rom, copy);
+    }
+
+    if (rom && rom_owned) {
+        P8_FREE(rom);
+    }
+
+    rom = new_rom;
+    rom_size = 0x8000;
+    rom_readonly = false;
+    rom_owned = true;
+    return true;
 }
 
 bool Real8VM::initMemory()
@@ -293,8 +281,15 @@ bool Real8VM::initMemory()
     }
 
     if (!rom) {
-        rom = (uint8_t *)calloc(1, 0x8000);
-        if (!rom) return false;
+        if (!rom_readonly) {
+            rom = (uint8_t *)calloc(1, 0x8000);
+            if (!rom) return false;
+            rom_size = 0x8000;
+            rom_owned = true;
+            rom_readonly = false;
+        }
+    } else if (rom_size == 0 && !rom_readonly) {
+        rom_size = 0x8000;
     }
 
     // 2. Setup Aliases
@@ -335,6 +330,12 @@ void Real8VM::rebootVM()
     }
     
     targetFPS = 30;
+    debugFPS = 0;
+    displayFPS = 0;
+    app_fps_last_ms = 0;
+    app_fps_counter = 0;
+    display_fps_last_ms = 0;
+    display_fps_counter = 0;
     patchModActive = false;
     
     // Reset Lua
@@ -375,7 +376,7 @@ void Real8VM::rebootVM()
         gbaLog("[BOOT] REBOOT LUA REG");
         lua_pushlightuserdata(L, (void*)this);
         lua_setglobal(L, "__pico8_vm_ptr");
-#if !defined(__GBA__) || REAL8_GBA_ENABLE_DEBUGGER
+#if !defined(__GBA__)
         if (!isGba) {
             lua_sethook(L, Real8Debugger::luaHook, LUA_MASKLINE, 0);
         }
@@ -408,7 +409,7 @@ void Real8VM::rebootVM()
     
     if (ram) memset(ram, 0, 0x8000);
     if (fb) memset(fb, 0, WIDTH * HEIGHT);
-    if (rom) memset(rom, 0, 0x8000);
+    if (rom && !rom_readonly) memset(rom, 0, 0x8000);
     memset(custom_font, 0, 0x800);
     clear_menu_items();
     gbaLog("[BOOT] REBOOT CORE OK");
@@ -432,6 +433,7 @@ void Real8VM::rebootVM()
     resetInputState();
     gbaLog("[BOOT] REBOOT INPUT OK");
 
+    #if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
     // Reset Audio
     audio.music_pattern = -1;
     for(int i=0; i<4; i++) {
@@ -443,18 +445,21 @@ void Real8VM::rebootVM()
         audio.channels[i].tick_counter = 0;
     }
     gbaLog("[BOOT] REBOOT AUDIO OK");
+    #endif
 }
 
 void Real8VM::forceExit()
 {
-#if !defined(__GBA__) || REAL8_GBA_ENABLE_DEBUGGER
+#if !defined(__GBA__)
     if (debug.paused) debug.forceExit();
 #endif
     saveCartData();
+    #if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
     for (int i = 0; i < 4; i++) {
         audio.channels[i].sfx_id = -1;
         audio.channels[i].current_vol = 0;
     }
+    #endif
     gpu.pal_reset();
     gpu.fillp(0);
     gpu.draw_mask = 0;
@@ -497,11 +502,11 @@ void Real8VM::runFrame()
 {
     const bool isLibretro = isLibretroPlatform;
     const bool isGba = isGbaPlatform;
-#if !defined(__GBA__)
+#if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
     const bool gbaAudioDisabled = isGba && kGbaAudioDisabledDefault;
 #endif
 
-#if !defined(__GBA__) || REAL8_GBA_ENABLE_DEBUGGER
+#if !defined(__GBA__)
     // Debugger Paused?
     if (debug.paused && !debug.step_mode) {
         show_frame(); 
@@ -577,7 +582,7 @@ void Real8VM::runFrame()
     // INPUT PROCESSING (Synchronized with Logic Frame)
     // --------------------------------------------------------------------------
 
-    const int maxPlayers = isGba ? REAL8_GBA_MAX_PLAYERS : 8;
+    const int maxPlayers = isGba ? 1 : 8;
     if (host) {
         // 1. Poll Events: 
         // Windows needs explicit polling. Libretro handles it externally.
@@ -633,25 +638,20 @@ void Real8VM::runFrame()
     }
 
     // --------------------------------------------------------------------------
-    // FPS MONITORING
+    // FPS MONITORING (App FPS)
     // --------------------------------------------------------------------------
-#if !defined(__GBA__) || REAL8_GBA_ENABLE_STATS
-    static unsigned long last_fps_time = 0;
-    static int fps_counter = 0;
-    
     if (host) {
         unsigned long now = host->getMillis();
-        if (last_fps_time == 0) last_fps_time = now;
+        if (app_fps_last_ms == 0) app_fps_last_ms = now;
 
-        fps_counter++;
+        app_fps_counter++;
 
-        if (now - last_fps_time >= 1000) {
-            debugFPS = fps_counter;
-            fps_counter = 0;
-            last_fps_time = now;
+        if (now - app_fps_last_ms >= 1000) {
+            debugFPS = app_fps_counter;
+            app_fps_counter = 0;
+            app_fps_last_ms = now;
         }
     }
-#endif
 
     // --------------------------------------------------------------------------
     // LUA EXECUTION
@@ -709,7 +709,7 @@ void Real8VM::runFrame()
     }
 
     // Debug Logs
-#if !defined(__GBA__) || REAL8_GBA_ENABLE_STATS
+#if !defined(__GBA__)
     static int debug_log_timer = 0;
     if (showStats && ++debug_log_timer > 60) { 
         debug_log_timer = 0;
@@ -736,7 +736,6 @@ void Real8VM::runFrame()
     // 5. OVERLAYS & AUDIO UPDATE
     // --------------------------------------------------------------------------
     
-#if !defined(__GBA__) || REAL8_GBA_ENABLE_STATS
     // FPS Overlay
     if (showStats && L) {
         lua_getglobal(L, "__p8_sys_overlay");
@@ -759,98 +758,7 @@ void Real8VM::runFrame()
             gpu.camera(bk_cx, bk_cy); gpu.setPen(bk_pen);
         }
     }
-#if REAL8_PROFILE_ENABLED
-    if (showStats && isGba && profile_last_frame_cycles > 0) {
-        int bk_cx = gpu.cam_x, bk_cy = gpu.cam_y;
-        int bk_clip_x = gpu.clip_x, bk_clip_y = gpu.clip_y;
-        int bk_clip_w = gpu.clip_w, bk_clip_h = gpu.clip_h;
-        uint8_t bk_pen = gpu.getPen();
-        gpu.camera(0, 0); gpu.clip(0, 0, WIDTH, HEIGHT);
-
-        const int line_h = 6;
-        const int box_h = (line_h * 8) + 2;
-        gpu.rectfill(0, 0, 127, box_h - 1, 0);
-
-        auto to_us = [](uint32_t cycles) -> uint32_t {
-            return (uint32_t)(((uint64_t)cycles * 1000000u) / 16777216u);
-        };
-        auto pct10 = [&](uint32_t cycles) -> uint32_t {
-            return profile_last_frame_cycles ? (uint32_t)((cycles * 1000u) / profile_last_frame_cycles) : 0u;
-        };
-
-        char line[32];
-        int y = 1;
-        uint32_t vm_us = to_us(profile_last_bucket_cycles[kProfileVm]);
-        uint32_t dr_us = to_us(profile_last_bucket_cycles[kProfileDraw]);
-        uint32_t bl_us = to_us(profile_last_bucket_cycles[kProfileBlit]);
-        uint32_t in_us = to_us(profile_last_bucket_cycles[kProfileInput]);
-        uint32_t mn_us = to_us(profile_last_bucket_cycles[kProfileMenu]);
-        uint32_t id_us = to_us(profile_last_bucket_cycles[kProfileIdle]);
-        const uint32_t top_cycles = profile_last_bucket_cycles[kProfileVm]
-            + profile_last_bucket_cycles[kProfileBlit]
-            + profile_last_bucket_cycles[kProfileInput]
-            + profile_last_bucket_cycles[kProfileMenu];
-        const uint32_t rest_cycles = (profile_last_frame_cycles > top_cycles)
-            ? (profile_last_frame_cycles - top_cycles)
-            : 0u;
-        uint32_t rs_us = to_us(rest_cycles);
-        uint32_t vm_pct10 = pct10(profile_last_bucket_cycles[kProfileVm]);
-        uint32_t dr_pct10 = pct10(profile_last_bucket_cycles[kProfileDraw]);
-        uint32_t bl_pct10 = pct10(profile_last_bucket_cycles[kProfileBlit]);
-        uint32_t in_pct10 = pct10(profile_last_bucket_cycles[kProfileInput]);
-        uint32_t mn_pct10 = pct10(profile_last_bucket_cycles[kProfileMenu]);
-        uint32_t id_pct10 = pct10(profile_last_bucket_cycles[kProfileIdle]);
-        uint32_t rs_pct10 = pct10(rest_cycles);
-
-        snprintf(line, sizeof(line), "VM %luus %lu.%lu%%",
-                 (unsigned long)vm_us,
-                 (unsigned long)(vm_pct10 / 10),
-                 (unsigned long)(vm_pct10 % 10));
-        gpu.pprint(line, (int)strlen(line), 1, y, 11); y += line_h;
-        snprintf(line, sizeof(line), "DR %luus %lu.%lu%%",
-                 (unsigned long)dr_us,
-                 (unsigned long)(dr_pct10 / 10),
-                 (unsigned long)(dr_pct10 % 10));
-        gpu.pprint(line, (int)strlen(line), 1, y, 11); y += line_h;
-        snprintf(line, sizeof(line), "BL %luus %lu.%lu%%",
-                 (unsigned long)bl_us,
-                 (unsigned long)(bl_pct10 / 10),
-                 (unsigned long)(bl_pct10 % 10));
-        gpu.pprint(line, (int)strlen(line), 1, y, 11); y += line_h;
-        snprintf(line, sizeof(line), "IN %luus %lu.%lu%%",
-                 (unsigned long)in_us,
-                 (unsigned long)(in_pct10 / 10),
-                 (unsigned long)(in_pct10 % 10));
-        gpu.pprint(line, (int)strlen(line), 1, y, 11); y += line_h;
-        snprintf(line, sizeof(line), "MN %luus %lu.%lu%%",
-                 (unsigned long)mn_us,
-                 (unsigned long)(mn_pct10 / 10),
-                 (unsigned long)(mn_pct10 % 10));
-        gpu.pprint(line, (int)strlen(line), 1, y, 11); y += line_h;
-        snprintf(line, sizeof(line), "ID %luus %lu.%lu%%",
-                 (unsigned long)id_us,
-                 (unsigned long)(id_pct10 / 10),
-                 (unsigned long)(id_pct10 % 10));
-        gpu.pprint(line, (int)strlen(line), 1, y, 11); y += line_h;
-        snprintf(line, sizeof(line), "RS %luus %lu.%lu%%",
-                 (unsigned long)rs_us,
-                 (unsigned long)(rs_pct10 / 10),
-                 (unsigned long)(rs_pct10 % 10));
-        gpu.pprint(line, (int)strlen(line), 1, y, 11); y += line_h;
-        snprintf(line, sizeof(line), "HS S%lu SS%lu L%lu R%lu B%lu",
-                 (unsigned long)profile_last_hotspots[kHotspotSprMasked],
-                 (unsigned long)profile_last_hotspots[kHotspotSspr],
-                 (unsigned long)profile_last_hotspots[kHotspotLineSlow],
-                 (unsigned long)profile_last_hotspots[kHotspotRectfillSlow],
-                 (unsigned long)profile_last_hotspots[kHotspotBlitDirty]);
-        gpu.pprint(line, (int)strlen(line), 1, y, 11);
-
-        gpu.camera(bk_cx, bk_cy);
-        gpu.clip(bk_clip_x, bk_clip_y, bk_clip_w, bk_clip_h);
-        gpu.setPen(bk_pen);
-    }
-#endif
-#endif
+    renderProfileOverlay();
 
     // Update Audio (Normal Path)
 #if defined(__GBA__)
@@ -895,7 +803,7 @@ bool Real8VM::loadGame(const GameData& game)
         memcpy(ram + 0x3000, game.sprite_flags, 0x100);
         memcpy(ram + 0x3100, game.music, 0x100);
         memcpy(ram + 0x3200, game.sfx, 0x1100);
-        if (rom) memcpy(rom, ram, 0x8000);
+        if (rom && !rom_readonly) memcpy(rom, ram, 0x8000);
         gpu.pal_reset(); 
     }
 
@@ -986,9 +894,12 @@ bool Real8VM::loadGame(const GameData& game)
     }
     gbaLog("[BOOT] cart ok");
 
+#if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
     if (host) host->pushAudio(nullptr, 0);
     gbaLog("[BOOT] audio ok");
+#endif
 
+#if !defined(__GBA__) 
     auto applyMods = [&]() {
         if (!host) return;
         std::string modCartPath;
@@ -997,6 +908,7 @@ bool Real8VM::loadGame(const GameData& game)
         else modCartPath = currentGameId;
         Real8Tools::ApplyMods(this, host, modCartPath);
     };
+#endif
 
     // Install traceback handler for better error messages
     lua_pushcfunction(L, traceback);
@@ -1027,7 +939,7 @@ bool Real8VM::loadGame(const GameData& game)
 
     if (lua_len > 0) {
         if (!useGbaInitWatchdog) {
-#if !defined(__GBA__) || REAL8_GBA_ENABLE_DEBUGGER
+#if !defined(__GBA__)
             debug.setSource(game.lua_code);
 #endif
         }
@@ -1052,9 +964,11 @@ bool Real8VM::loadGame(const GameData& game)
         }
         if (useGbaInitWatchdog && host) host->log("[BOOT] Lua run ok");
 
+    #if !defined(__GBA__)
         if (useGbaInitWatchdog && host) host->log("[BOOT] Mods");
         applyMods();
         if (useGbaInitWatchdog && host) host->log("[BOOT] Mods ok");
+    #endif
 
         // _init (make it fatal so you see it immediately)
         cacheLuaRefs();
@@ -1071,7 +985,9 @@ bool Real8VM::loadGame(const GameData& game)
         }
         cacheLuaRefs();
     } else {
+        #if !defined(__GBA__)
         applyMods();
+        #endif
         cacheLuaRefs();
     }
 
@@ -1163,49 +1079,6 @@ void Real8VM::mark_dirty_rect(int x0, int y0, int x1, int y1)
     if (y1 > dirty_y1) dirty_y1 = y1;
 }
 
-#if REAL8_PROFILE_ENABLED
-void Real8VM::profileFrameBegin() {
-#if defined(__GBA__)
-    profile_frame_start_cycles = profileReadCycles();
-    for (int i = 0; i < kProfileCount; ++i) profile_bucket_cycles[i] = 0;
-    for (int i = 0; i < kHotspotCount; ++i) profile_hotspots[i] = 0;
-#endif
-}
-
-void Real8VM::profileFrameEnd() {
-#if defined(__GBA__)
-    uint32_t now = profileReadCycles();
-    profile_last_frame_cycles = now - profile_frame_start_cycles;
-    std::memcpy(profile_last_bucket_cycles, profile_bucket_cycles, sizeof(profile_bucket_cycles));
-    std::memcpy(profile_last_hotspots, profile_hotspots, sizeof(profile_hotspots));
-#endif
-}
-
-void Real8VM::profileBegin(int id) {
-#if defined(__GBA__)
-    if (id >= 0 && id < kProfileCount) {
-        profile_bucket_start[id] = profileReadCycles();
-    }
-#endif
-}
-
-void Real8VM::profileEnd(int id) {
-#if defined(__GBA__)
-    if (id >= 0 && id < kProfileCount) {
-        uint32_t now = profileReadCycles();
-        profile_bucket_cycles[id] += (now - profile_bucket_start[id]);
-    }
-#endif
-}
-
-void Real8VM::profileHotspot(int id) {
-#if defined(__GBA__)
-    if (id >= 0 && id < kHotspotCount) {
-        ++profile_hotspots[id];
-    }
-#endif
-}
-#endif
 
 // --------------------------------------------------------------------------
 // GRAPHICS PRIMITIVES
@@ -1259,6 +1132,18 @@ void Real8VM::updatePaletteLUT() {
 
 void Real8VM::show_frame()
 {
+    if (host) {
+        unsigned long now = host->getMillis();
+        if (display_fps_last_ms == 0) display_fps_last_ms = now;
+
+        display_fps_counter++;
+
+        if (now - display_fps_last_ms >= 1000) {
+            displayFPS = display_fps_counter;
+            display_fps_counter = 0;
+            display_fps_last_ms = now;
+        }
+    }
     // --------------------------------------------------------
     // LIBRETRO OPTIMIZED PATH
     // --------------------------------------------------------
@@ -1367,8 +1252,13 @@ void Real8VM::saveState()
 {
     if (currentGameId.empty() || !L) return;
     std::string fname = "/" + currentGameId + ".sav";
-    std::vector<uint8_t> saveBuffer; saveBuffer.resize(0x8000);
-    if (ram) memcpy(saveBuffer.data(), ram, 0x8000);
+    static std::vector<uint8_t> saveBuffer;
+    saveBuffer.resize(0x8000);
+    if (ram) {
+        memcpy(saveBuffer.data(), ram, 0x8000);
+    } else {
+        memset(saveBuffer.data(), 0, 0x8000);
+    }
 
     lua_getglobal(L, "_p8_save_state");
     if (lua_isfunction(L, -1)) {
@@ -1376,9 +1266,10 @@ void Real8VM::saveState()
             size_t len = 0; const char *str = lua_tolstring(L, -1, &len);
             if (str && len > 0) {
                 uint32_t len32 = (uint32_t)len;
-                uint8_t *pLen = (uint8_t *)&len32;
-                for(int i=0; i<4; i++) saveBuffer.push_back(pLen[i]);
-                saveBuffer.insert(saveBuffer.end(), str, str + len);
+                saveBuffer.resize(0x8000 + sizeof(len32) + len);
+                uint8_t *dst = saveBuffer.data() + 0x8000;
+                memcpy(dst, &len32, sizeof(len32));
+                memcpy(dst + sizeof(len32), str, len);
             }
             lua_pop(L, 1);
         } else lua_pop(L, 1);
@@ -1493,6 +1384,7 @@ void Real8VM::run_menu_item(int index)
 // LIBRETRO SERIALIZATION
 // --------------------------------------------------------------------------
 
+#if !defined(__GBA__)
 size_t Real8VM::getStateSize() {
     // RAM (32k) + Cart Data (256b) + Audio State (approx ~200-300 bytes)
     // We add sizeof(AudioStateSnapshot) to ensure exact sizing.
@@ -1559,3 +1451,4 @@ bool Real8VM::unserialize(const void* data, size_t size) {
     mark_dirty_rect(0, 0, 127, 127);
     return true;
 }
+#endif

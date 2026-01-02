@@ -98,36 +98,84 @@ CART_PACKER_GUI_SRCS := cart_packer_gui.cpp ../../core/real8_cart.cpp ../../core
 #---------------------------------------------------------------------------------
 # Toolchain flags
 #---------------------------------------------------------------------------------
-ARCH := -mthumb -mthumb-interwork
+# Build knobs
+OPT  ?= -O2          # try -Os for size-focused builds
+WARN ?= -w           # set to empty to see warnings
+LTO  ?= 1            # 1 enables -flto
 
-CFLAGS  ?= -g -w -O2 $(ARCH) -D__GBA__ -DLUA_32BITS
-CFLAGS  += -I$(DEVKITPRO)/libgba/include -DREAL8_GBA_DEBUG_DOT
-REAL8_GBA_FB_IN_IWRAM ?= 0
-CFLAGS += -DREAL8_GBA_FB_IN_IWRAM=$(REAL8_GBA_FB_IN_IWRAM)
-REAL8_GBA_ENABLE_AUDIO ?= 0
-CFLAGS += -DREAL8_GBA_ENABLE_AUDIO=$(REAL8_GBA_ENABLE_AUDIO)
-REAL8_GBA_ENABLE_DEBUGGER ?= 0
-CFLAGS += -DREAL8_GBA_ENABLE_DEBUGGER=$(REAL8_GBA_ENABLE_DEBUGGER)
-REAL8_GBA_ENABLE_STATS ?= 1
-CFLAGS += -DREAL8_GBA_ENABLE_STATS=$(REAL8_GBA_ENABLE_STATS)
-REAL8_GBA_FAST_LUA ?= 1
-CFLAGS += -DREAL8_GBA_FAST_LUA=$(REAL8_GBA_FAST_LUA)
-REAL8_GBA_MAX_PLAYERS ?= 1
-CFLAGS += -DREAL8_GBA_MAX_PLAYERS=$(REAL8_GBA_MAX_PLAYERS)
-REAL8_GBA_HBLANK_DMA ?= 0
-CFLAGS += -DREAL8_GBA_HBLANK_DMA=$(REAL8_GBA_HBLANK_DMA)
-REAL8_PROFILE_GBA ?= 0
-CFLAGS += -DREAL8_PROFILE_GBA=$(REAL8_PROFILE_GBA)
-CFLAGS += -DLUA_GBA_BASELINE_JIT=1 -DLUA_GBA_JIT_MAX_OPS=8192
-REAL8_GBA_JIT_IWRAM ?= 1
-ifeq ($(REAL8_GBA_JIT_IWRAM),1)
-  CFLAGS += -DLUA_GBA_JIT_IWRAM
+# ARM7TDMI tuning (GBA CPU)
+ARCH := -mthumb -mthumb-interwork -mcpu=arm7tdmi -mtune=arm7tdmi
+
+# Base C/C++ flags (without per-directory include paths)
+CFLAGS_BASE  ?= -g $(WARN) $(OPT) $(ARCH) -D__GBA__ -DLUA_32BITS
+CFLAGS_BASE  += -I$(DEVKITPRO)/libgba/include
+
+# Enable linker dead-stripping
+CFLAGS_BASE  += -ffunction-sections -fdata-sections
+
+# Reduce unwind/exception metadata bloat (especially important on GBA)
+CFLAGS_BASE  += -fno-unwind-tables -fno-asynchronous-unwind-tables
+
+# Optional debug dot (kept default ON to preserve current behavior)
+REAL8_GBA_DEBUG_DOT ?= 1
+ifeq ($(REAL8_GBA_DEBUG_DOT),1)
+  CFLAGS_BASE += -DREAL8_GBA_DEBUG_DOT
 endif
 
-CXXFLAGS ?= $(CFLAGS) -fexceptions -std=gnu++17
+#---------------------------------------------------------------------------------
+# Your existing feature toggles
+#---------------------------------------------------------------------------------
+
+REAL8_GBA_ENABLE_AUDIO ?= 0
+CFLAGS_BASE += -DREAL8_GBA_ENABLE_AUDIO=$(REAL8_GBA_ENABLE_AUDIO)
+
+REAL8_GBA_FAST_LUA ?= 1
+CFLAGS_BASE += -DREAL8_GBA_FAST_LUA=$(REAL8_GBA_FAST_LUA)
+
+REAL8_GBA_SKIP_VBLANK ?= 1
+CFLAGS_BASE += -DREAL8_GBA_SKIP_VBLANK=$(REAL8_GBA_SKIP_VBLANK)
+
+REAL8_PROFILE_GBA ?= 0
+CFLAGS_BASE += -DREAL8_PROFILE_GBA=$(REAL8_PROFILE_GBA)
+
+LUA_GBA_BASELINE_JIT ?= 1
+ifeq ($(LUA_GBA_BASELINE_JIT),1)
+  CFLAGS_BASE += -DLUA_GBA_BASELINE_JIT
+  CFLAGS_BASE += -DLUA_GBA_JIT_MAX_OPS=8192
+endif
+
+REAL8_GBA_JIT_IWRAM ?= 0
+ifeq ($(REAL8_GBA_JIT_IWRAM),1)
+  CFLAGS_BASE += -DLUA_GBA_JIT_IWRAM
+endif
+
+#---------------------------------------------------------------------------------
+
+# C++ flags: strip exceptions/RTTI to reduce ROM + unwind tables on ARM7
+CXXFLAGS_BASE ?= $(CFLAGS_BASE) -std=gnu++17 \
+  -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit
+
+# Assembler flags
 ASFLAGS  ?= -g $(ARCH)
 
+# Optional LTO
+ifeq ($(LTO),1)
+  CFLAGS_BASE   += -flto
+  CXXFLAGS_BASE += -flto
+  LDFLAGS       += -flto
+endif
+
+# Use setjmp/longjmp instead of throw/catch
+CFLAGS_BASE += -DLUA_USE_LONGJMP
+
 LIBS ?= -lstdc++ -lgba -lm
+
+# Linker flags:
+#  -gc-sections drops unused code/data (needs -ffunction-sections/-fdata-sections)
+#  --print-memory-usage is handy to see IWRAM/EWRAM/ROM usage summary
+LDFLAGS += -Wl,--gc-sections -Wl,--print-memory-usage
+
+# Keep your existing heap/stack symbols (only meaningful if your linker script uses them)
 LDFLAGS += -Wl,--defsym=__heap_size=0x10000 -Wl,--defsym=__stack_size=0x8000
 LDFLAGS += -Wl,-Map,REAL8_GBA.map
 
@@ -164,8 +212,9 @@ export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
-export CFLAGS := $(CFLAGS) $(INCLUDE)
-export CXXFLAGS := $(CFLAGS) -fexceptions -std=gnu++17
+# Apply include paths to the exported compiler flags used in the build dir.
+export CFLAGS   := $(CFLAGS_BASE) $(INCLUDE)
+export CXXFLAGS := $(CXXFLAGS_BASE) $(INCLUDE)
 
 .PHONY: all clean rom tools
 
