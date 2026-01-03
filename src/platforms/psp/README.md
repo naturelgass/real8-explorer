@@ -14,7 +14,6 @@ REAL-8 Explorer for PSP is the native host for the Real8 VM + Shell. It provides
 - [Toolchain setup (pspdev)](#toolchain-setup-pspdev)
 - [Build steps (Makefile)](#build-steps-makefile)
 - [Usage](#usage)
-- [Screenshots](#screenshots)
 - [Notes and limitations](#notes-and-limitations)
 
 ## Overview
@@ -109,16 +108,6 @@ This produces `EBOOT.PBP` in the same folder.
 ### Exit
 
 - Use the in-app quit option, or press the PSP HOME button
-
-## Screenshots
-
-### PSP splash (PIC1)
-
-![PSP PIC1](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/src/platforms/psp/PIC1.PNG)
-
-### Default wallpaper
-
-![PSP wallpaper](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/src/platforms/psp/wallpaper.png)
 
 ## Notes and limitations
 

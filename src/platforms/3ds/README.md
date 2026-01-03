@@ -140,10 +140,6 @@ make cia
 
 ![REAL-8 on 3DS](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8-3DS.png)
 
-### Default wallpaper
-
-![Default wallpaper](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/src/platforms/3ds/romfs/wallpaper.png)
-
 ## Notes and limitations
 
 - Audio requires DSP firmware at `sdmc:/3ds/dspfirm.cdc` (install via DSP1 or 3ds.hacks.guide).

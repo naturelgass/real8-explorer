@@ -153,10 +153,6 @@ The output `Real8Switch.nro` is generated in `build/switch`.
 
 ![REAL-8 on Switch](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8Switch.png)
 
-### Default wallpaper
-
-![Default wallpaper](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/src/platforms/switch/romfs/real8/config/wallpaper.png)
-
 ## Notes and limitations
 
 - No system clipboard integration.
