@@ -113,13 +113,6 @@ The build outputs `Real-8 VM.exe` and copies `SDL2.dll` next to it.
 ### Windows Debug Console
 ![Windows Debug Console](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/WindowsDebugConsole.png)
 
-## Not yet implemented
-
-- Network configuration stubs: `setWifiCredentials` and `setNetworkActive` are no-ops
-- Overlay updates are unimplemented (`updateOverlay` is empty)
-- Storage reporting uses placeholder values (used = 0, total = 1GB)
-- Export Vars menu item is defined but not wired into the Windows menu
-
 ## Scope
 
 This README describes the Windows host only. Core VM, Shell, and cross-platform features live elsewhere in the REAL-8 Explorer codebase.
