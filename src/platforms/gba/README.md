@@ -133,5 +133,5 @@ Outputs:
 - A build log is saved to `build/pico2gba_build.log`.
 - Last-used paths are cached in `build/pico2gba.ini`.
 
-### Nintendo GBA
+### Pico2GBA GUI Dialog
 ![REAL-8 - Pico2GBA](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8-Pico2GBA-GUI.png)
