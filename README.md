@@ -13,7 +13,7 @@ A PICO-8 explorer + emulator front-end for multiple platforms.
 ## Table of contents
 
 - [Platforms](#platforms)
-- [GBA implementation (short)](#gba-implementation-short)
+- [GBA implementation](#gba-implementation-short)
 - [Features](#features)
 - [Supported cart formats](#supported-cart-formats)
 - [Usage](#usage)
@@ -43,7 +43,8 @@ A PICO-8 explorer + emulator front-end for multiple platforms.
 
 The GBA target packages a single `.p8.png` cart into a standalone ROM and boots it directly (no shell).
 It renders a 128x128 framebuffer centered in Mode 4 and leans on IWRAM/EWRAM optimizations to hit speed.
-See `src/platforms/gba/README.md` for full build steps, memory layout, and tuning tips.
+This implementation is optimized to run on a Real GBA hardware!
+See [GBA README](src/platforms/gba/README.md) for full build steps, memory layout, and tuning tips.
 
 ## Features
 
