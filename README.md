@@ -27,15 +27,15 @@ A PICO-8 explorer + emulator front-end for multiple platforms.
 
 ## Platforms
 
-| Target | Host / Integration | Status |
-|------:|---------------------|--------|
-| **Windows** | SDL host + native menus/tooling | ✅ |
-| **Linux** | SDL host | ✅ |
-| **Nintendo Switch** | libnx host integration | ✅ |
-| **Nintendo 3DS** | citro2d / citro3d | ✅ |
-| **Sony PSP** | PSP Software Development Kit | ✅ |
-| **Libretro** | Libretro API core | ✅ |
-| **PICO-8 to GBA** | devkitARM / GBA Sdk ([GBA README](src/platforms/gba/README.md)) | ✅ |
+| Target | Host / Integration | Status | Details |
+|------:|---------------------|--------|---------|
+| **Windows** | SDL host + native menus/tooling | ✅ | [Windows README](src/platforms/windows/README.md) |
+| **Linux** | SDL host | ✅ | [Linux README](src/platforms/linux/README.md) |
+| **Nintendo Switch** | libnx host integration | ✅ | [Switch README](src/platforms/switch/README.md) |
+| **Nintendo 3DS** | citro2d / citro3d | ✅ | [3DS README](src/platforms/3ds/README.md) |
+| **Sony PSP** | PSP Software Development Kit | ✅ | [PSP README](src/platforms/psp/README.md) |
+| **Libretro** | Libretro API core | ✅ | [Liberto README](src/platforms/libretro/README.md) |
+| **PICO-8 to GBA** | devkitARM / GBA Sdk | ✅ | [GBA README](src/platforms/gba/README.md) |
 
 ---
 

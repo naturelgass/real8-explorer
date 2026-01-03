@@ -1,31 +1,127 @@
 # REAL-8 Explorer for Windows
 
-REAL-8 Explorer for Windows is the Windows host of the REAL-8 Browser. It provides a native SDL-based window, menus, input, and tooling around the core Real8 VM and Shell so you can browse, load, and run REAL-8 carts on Windows.
+REAL-8 Explorer for Windows is the desktop host for the Real8 VM + Shell. It provides a native SDL window, menu bar, input, and tooling so you can browse, launch, and debug PICO-8 carts on Windows.
+
+> Not affiliated with Lexaloffle Games or PICO-8.
+
+![REAL-8 Windows Shell](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/WindowsShellMenu.png)
+
+## Table of contents
+
+- [Overview](#overview)
+- [Features](#features)
+- [Supported cart formats](#supported-cart-formats)
+- [Build requirements](#build-requirements)
+- [Build steps (CMake)](#build-steps-cmake)
+- [Usage](#usage)
+- [Screenshots](#screenshots)
+- [Not yet implemented](#not-yet-implemented)
+- [Scope](#scope)
+
+## Overview
+
+- Focused Windows host around the core Real8 VM + Shell.
+- Optimized for quick cart testing, modding, and debugging.
+- Works with local carts or repository lists.
 
 ## Features
 
-- Windowed, resizable SDL host with fullscreen toggle, Stretch and drag-and-drop cart loading
-- Native Windows menu bar with File / Options / Settings / Effects / Extra actions
-- Load carts from disk (.p8 / .png) and set a games repository URL
-- Shell browser controls for showing repo games, repo snapshots, and local snapshots
-- Save and load VM state
-- Screenshot capture to Pictures\Real8 Screenshots (or project screenshots folder)
-- Wallpaper support with import, scaling, and on-disk persistence
-- Rendering options: CRT scanline filter and interpolation toggle
-- Audio controls: music and SFX toggles with queued-audio sync
-- Input: keyboard + SDL gamepad support with a remap UI and per-player configs
-- Debug Console with logging, pause/resume, step, breakpoints, memory tools
-- Real-time modding window with live variable editing, favorites, and command prompt
-- Export tools: GFX, MAP, and music tracks to a chosen folder
-- Crash handler that logs exceptions to logs.txt and shows a Windows dialog
+### Core experience
 
-## Not yet implemented (Windows host)
+| Area | Details |
+| --- | --- |
+| Cart loading | Load `.p8` and `.png` carts from disk, drag-and-drop supported |
+| Library and browsing | Local library, repository URL support, remote games with folders and genre |
+| Save states | Save and load VM state |
+| Wallpaper | Import custom backgrounds, toggle on or off, scaling, persistence |
+| Video | Windowed and resizable, fullscreen toggle, stretch modes |
+| Effects | Interpolation toggle, CRT scanline filter |
+| Audio | Music and SFX toggles with queued-audio sync |
+| Screenshots | Save to `Pictures\Real8 Screenshots` or the project screenshots folder |
+| Modding | Boot carts with mods created in the Windows version |
 
-- Network configuration is stubbed: setWifiCredentials and setNetworkActive are no-ops, and network info is fixed to localhost/desktop mode
-- Overlay updates are unimplemented (updateOverlay is empty)
+### Windows host UI
+
+| Area | Details |
+| --- | --- |
+| Menu bar | Native Windows menus: File, Options, Settings, Effects, Extra |
+| Shell controls | Browse repo games, repo snapshots, and local snapshots |
+| Input | Keyboard and SDL gamepad support, remap UI, per-player configs (up to 8 players), thumbstick support |
+
+### Tooling and debugging
+
+| Tooling | Details |
+| --- | --- |
+| Debug console | Logging, pause and resume, step, breakpoints, memory tools |
+| Live Lua injection | PEEK, POKE, and custom commands with console feedback |
+| Real-time modding | Live variable editing, favorites, command prompt |
+| Export tools | Export GFX, MAP, and music tracks to a chosen folder |
+| Crash handling | Exception logging to `logs.txt` and a Windows dialog |
+
+## Supported cart formats
+
+| Format | Notes |
+| --- | --- |
+| `.p8` | Text cart source |
+| `.png` | Image/cart container |
+
+## Build requirements
+
+| Requirement | Notes |
+| --- | --- |
+| CMake 3.10+ | Build system for the Windows host |
+| C++17 compiler | MSVC or MinGW |
+| SDL2 | Windowing, input, audio |
+| lodepng | PNG loading |
+
+Dependencies can be provided via vcpkg or your preferred package manager.
+
+## Build steps (CMake)
+
+```sh
+cmake -S src/platforms/windows -B build/windows
+cmake --build build/windows --config Release
+```
+
+Optional vcpkg toolchain example:
+
+```sh
+cmake -S src/platforms/windows -B build/windows ^
+  -DCMAKE_TOOLCHAIN_FILE=path\to\vcpkg\scripts\buildsystems\vcpkg.cmake
+```
+
+The build outputs `Real-8 VM.exe` and copies `SDL2.dll` next to it.
+
+## Usage
+
+### Load a cart
+
+- Use the menu: File -> Open, then select a `.p8` or `.png`
+- Or drag and drop a cart onto the window
+
+### Save and load state
+
+- Use the menu or the Shell save and load entries
+
+### Repo browsing
+
+- Set a repository URL in the menu, then browse by folders or genre
+
+## Screenshots
+
+### Windows Shell
+![Windows Shell](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/WindowsShellMenu.png)
+
+### Windows Debug Console
+![Windows Debug Console](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/WindowsDebugConsole.png)
+
+## Not yet implemented
+
+- Network configuration stubs: `setWifiCredentials` and `setNetworkActive` are no-ops
+- Overlay updates are unimplemented (`updateOverlay` is empty)
 - Storage reporting uses placeholder values (used = 0, total = 1GB)
 - Export Vars menu item is defined but not wired into the Windows menu
 
 ## Scope
 
-This README describes the Windows host only. Core VM, Shell, and cross-platform features live elsewhere in the REAL-8 Browser codebase.
+This README describes the Windows host only. Core VM, Shell, and cross-platform features live elsewhere in the REAL-8 Explorer codebase.
