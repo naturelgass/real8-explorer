@@ -13,11 +13,11 @@ A PICO-8 explorer + emulator front-end for multiple platforms.
 ## Table of contents
 
 - [Platforms](#platforms)
-- [GBA implementation](#gba-implementation)
 - [Features](#features)
 - [Supported cart formats](#supported-cart-formats)
 - [Usage](#usage)
 - [What needs more work](#what-needs-more-work)
+- [GBA implementation](#gba-implementation)
 - [Why](#why)
 - [Screenshots](#screenshots)
 - [Contributing](#contributing)
@@ -38,13 +38,6 @@ A PICO-8 explorer + emulator front-end for multiple platforms.
 | **PICO-8 to GBA** | devkitARM / GBA Sdk | ✅ | [README](src/platforms/gba/README.md) |
 
 ---
-
-## GBA implementation
-
-The GBA target packages a single `.p8.png` cart into a standalone GBA ROM and boots it directly (no shell).
-It renders a 128x128 framebuffer centered in Mode 4 and leans on IWRAM/EWRAM optimizations to hit speed.
-### This implementation is optimized to run on a Real GBA hardware! ###
-See [GBA README](src/platforms/gba/README.md) for full build steps, memory layout, and tuning tips.
 
 ## Features
 
@@ -121,6 +114,15 @@ See [GBA README](src/platforms/gba/README.md) for full build steps, memory layou
 - The Sound Engine in some games might not emulate correctly
 - Save state (only works in a few games, in others it loads the game corrupted)
 - Compatibility is good, but I would like to support the difficult ones as well (Poom, R-Type etc)
+
+---
+
+## GBA implementation
+
+The GBA target packages a single `.p8.png` cart into a standalone GBA ROM and boots it directly (no shell).
+It renders a 128x128 framebuffer centered in Mode 4 and leans on IWRAM/EWRAM optimizations to hit speed.
+### This implementation is optimized to run on a Real GBA hardware! ###
+See [GBA README](src/platforms/gba/README.md) for full build steps, memory layout, and tuning tips.
 
 ---
 
