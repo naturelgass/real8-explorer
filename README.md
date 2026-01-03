@@ -29,13 +29,13 @@ A PICO-8 explorer + emulator front-end for multiple platforms.
 
 | Target | Host / Integration | Status | Details |
 |------:|---------------------|--------|---------|
-| **Windows** | SDL host + native menus/tooling | ✅ | [Windows README](src/platforms/windows/README.md) |
-| **Linux** | SDL host | ✅ | [Linux README](src/platforms/linux/README.md) |
-| **Nintendo Switch** | libnx host integration | ✅ | [Switch README](src/platforms/switch/README.md) |
-| **Nintendo 3DS** | citro2d / citro3d | ✅ | [3DS README](src/platforms/3ds/README.md) |
-| **Sony PSP** | PSP Software Development Kit | ✅ | [PSP README](src/platforms/psp/README.md) |
-| **Libretro** | Libretro API core | ✅ | [Liberto README](src/platforms/libretro/README.md) |
-| **PICO-8 to GBA** | devkitARM / GBA Sdk | ✅ | [GBA README](src/platforms/gba/README.md) |
+| **Windows** | SDL host + native menus/tooling | ✅ | [README](src/platforms/windows/README.md) |
+| **Linux** | SDL host | ✅ | [README](src/platforms/linux/README.md) |
+| **Nintendo Switch** | libnx host integration | ✅ | [README](src/platforms/switch/README.md) |
+| **Nintendo 3DS** | citro2d / citro3d | ✅ | [README](src/platforms/3ds/README.md) |
+| **Sony PSP** | PSP Software Development Kit | ✅ | [README](src/platforms/psp/README.md) |
+| **Libretro** | Libretro API core | ✅ | [README](src/platforms/libretro/README.md) |
+| **PICO-8 to GBA** | devkitARM / GBA Sdk | ✅ | [README](src/platforms/gba/README.md) |
 
 ---
 
