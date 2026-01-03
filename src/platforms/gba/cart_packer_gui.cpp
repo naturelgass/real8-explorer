@@ -24,12 +24,12 @@ namespace {
     const int kIdBrowseCart = 1004;
     const int kIdGenerate = 1005;
     const int kIdSpinner = 1006;
+    const int kIdBrowseSkin = 1007;
+    const int kIdReset = 1008;
     const int kIdToggleAudio = 1101;
-    const int kIdToggleFastLua = 1102;
+    const int kIdToggleCflahBase = 1102;
     const int kIdToggleSkipVblank = 1103;
     const int kIdToggleProfile = 1104;
-    const int kIdToggleBaselineJit = 1105;
-    const int kIdToggleJitIwram = 1106;
 
     const UINT kIdSpinnerTimer = 2001;
     const UINT kMsgBuildDone = WM_APP + 1;
@@ -38,23 +38,25 @@ namespace {
     HWND g_devkitEdit = nullptr;
     HWND g_gbaEdit = nullptr;
     HWND g_cartEdit = nullptr;
+    HWND g_skinEdit = nullptr;
     HWND g_generateButton = nullptr;
+    HWND g_resetButton = nullptr;
     HWND g_spinner = nullptr;
     HWND g_browseMakeButton = nullptr;
     HWND g_browseDevkitButton = nullptr;
     HWND g_browseGbaButton = nullptr;
     HWND g_browseCartButton = nullptr;
+    HWND g_browseSkinButton = nullptr;
     HWND g_toggleAudio = nullptr;
-    HWND g_toggleFastLua = nullptr;
+    HWND g_toggleCflahBase = nullptr;
     HWND g_toggleSkipVblank = nullptr;
     HWND g_toggleProfile = nullptr;
-    HWND g_toggleBaselineJit = nullptr;
-    HWND g_toggleJitIwram = nullptr;
 
     char g_makePath[MAX_PATH] = "";
     char g_devkitProPath[MAX_PATH] = "";
     char g_gbaDir[MAX_PATH] = "";
     char g_cartPath[MAX_PATH] = "";
+    char g_skinPath[MAX_PATH] = "";
     char g_iniPath[MAX_PATH] = "";
 
     bool g_building = false;
@@ -62,14 +64,12 @@ namespace {
 
     struct ToggleState {
         int enableAudio;
-        int fastLua;
         int skipVblank;
         int profileGba;
-        int baselineJit;
-        int jitIwram;
+        int cflahBase;
     };
 
-    const ToggleState kDefaultToggles = { 0, 1, 1, 0, 1, 0 };
+    const ToggleState kDefaultToggles = { 0, 1, 0, 0 };
 
     struct BuildParams {
         HWND hwnd;
@@ -77,6 +77,7 @@ namespace {
         std::string devkitArmPath;
         std::string devkitProPath;
         std::string cartPath;
+        std::string customSkinPath;
         std::string gbaDir;
         std::string outputPath;
         std::string logPath;
@@ -307,20 +308,14 @@ namespace {
         if (parseMakeToggleValue(makefilePath, "REAL8_GBA_ENABLE_AUDIO", value)) {
             defaults.enableAudio = value;
         }
-        if (parseMakeToggleValue(makefilePath, "REAL8_GBA_FAST_LUA", value)) {
-            defaults.fastLua = value;
-        }
         if (parseMakeToggleValue(makefilePath, "REAL8_GBA_SKIP_VBLANK", value)) {
             defaults.skipVblank = value;
         }
         if (parseMakeToggleValue(makefilePath, "REAL8_PROFILE_GBA", value)) {
             defaults.profileGba = value;
         }
-        if (parseMakeToggleValue(makefilePath, "LUA_GBA_BASELINE_JIT", value)) {
-            defaults.baselineJit = value;
-        }
-        if (parseMakeToggleValue(makefilePath, "REAL8_GBA_JIT_IWRAM", value)) {
-            defaults.jitIwram = value;
+        if (parseMakeToggleValue(makefilePath, "REAL8_GBA_CUSTOM_SKIN", value)) {
+            defaults.cflahBase = value;
         }
 
         return defaults;
@@ -338,27 +333,29 @@ namespace {
 
     static void applyToggleState(const ToggleState& state) {
         setCheckboxState(g_toggleAudio, state.enableAudio);
-        setCheckboxState(g_toggleFastLua, state.fastLua);
+        setCheckboxState(g_toggleCflahBase, state.cflahBase);
         setCheckboxState(g_toggleSkipVblank, state.skipVblank);
         setCheckboxState(g_toggleProfile, state.profileGba);
-        setCheckboxState(g_toggleBaselineJit, state.baselineJit);
-        setCheckboxState(g_toggleJitIwram, state.jitIwram);
     }
 
     static ToggleState readToggleStateFromUi() {
         ToggleState state = {};
         state.enableAudio = getCheckboxState(g_toggleAudio);
-        state.fastLua = getCheckboxState(g_toggleFastLua);
         state.skipVblank = getCheckboxState(g_toggleSkipVblank);
         state.profileGba = getCheckboxState(g_toggleProfile);
-        state.baselineJit = getCheckboxState(g_toggleBaselineJit);
-        state.jitIwram = getCheckboxState(g_toggleJitIwram);
+        state.cflahBase = getCheckboxState(g_toggleCflahBase);
         return state;
     }
 
     static void syncToggleDefaultsFromMakefile() {
         ToggleState defaults = loadToggleDefaultsFromMakefile(g_gbaDir);
         applyToggleState(defaults);
+    }
+
+    static void ensureCustomSkinToggle() {
+        if (g_skinPath[0]) {
+            setCheckboxState(g_toggleCflahBase, 1);
+        }
     }
 
     static void appendMakeVar(std::string& args, const char* name, int value) {
@@ -586,11 +583,9 @@ namespace {
         args += inputPath;
         args += "\"";
         appendMakeVar(args, "REAL8_GBA_ENABLE_AUDIO", toggles.enableAudio);
-        appendMakeVar(args, "REAL8_GBA_FAST_LUA", toggles.fastLua);
         appendMakeVar(args, "REAL8_GBA_SKIP_VBLANK", toggles.skipVblank);
         appendMakeVar(args, "REAL8_PROFILE_GBA", toggles.profileGba);
-        appendMakeVar(args, "LUA_GBA_BASELINE_JIT", toggles.baselineJit);
-        appendMakeVar(args, "REAL8_GBA_JIT_IWRAM", toggles.jitIwram);
+        appendMakeVar(args, "REAL8_GBA_CUSTOM_SKIN", toggles.cflahBase);
 
         char makeDir[MAX_PATH] = "";
         if (!getDirFromPath(makePath, makeDir, sizeof(makeDir))) {
@@ -868,6 +863,41 @@ namespace {
         }
     }
 
+    static void clearPathValue(char* path, HWND edit, const char* iniKey) {
+        if (path) {
+            path[0] = '\0';
+        }
+        if (edit) {
+            SetWindowTextA(edit, "");
+        }
+        if (iniKey) {
+            saveIniValue(iniKey, "");
+        }
+    }
+
+    static bool copyCustomSkinFile(const char* gbaDir, const char* skinPath, std::string& err) {
+        if (!skinPath || !*skinPath) return true;
+        if (!fileExists(skinPath)) {
+            err = "Selected custom skin file not found.";
+            return false;
+        }
+        char destPath[MAX_PATH] = "";
+        if (!buildPath(gbaDir, "custom_skin.png", destPath, sizeof(destPath))) {
+            err = "Failed to build custom skin destination path.";
+            return false;
+        }
+        if (_stricmp(skinPath, destPath) == 0) {
+            return true;
+        }
+        if (!CopyFileA(skinPath, destPath, FALSE)) {
+            DWORD copyErr = GetLastError();
+            err = "Failed to copy custom skin file. ";
+            err += formatWin32Error(copyErr);
+            return false;
+        }
+        return true;
+    }
+
     static void setSelectedMake(const char* path) {
         if (!path) return;
         snprintf(g_makePath, sizeof(g_makePath), "%s", path);
@@ -900,6 +930,15 @@ namespace {
         updateGenerateEnabled();
     }
 
+    static void setSelectedCustomSkin(const char* path) {
+        if (!path) return;
+        snprintf(g_skinPath, sizeof(g_skinPath), "%s", path);
+        SetWindowTextA(g_skinEdit, g_skinPath);
+        saveIniValue("skin", g_skinPath);
+        setCheckboxState(g_toggleCflahBase, 1);
+        updateGenerateEnabled();
+    }
+
     static void showMessage(const char* text, UINT flags) {
         MessageBoxA(nullptr, text, "Pico2GBA", flags);
     }
@@ -926,18 +965,22 @@ namespace {
         BuildResult* result = new BuildResult();
         std::string err;
 
-        deleteCartBlob(params->gbaDir.c_str());
-        if (!runMake(params->gbaDir.c_str(),
-                     params->makePath.c_str(),
-                     params->devkitArmPath.c_str(),
-                     params->devkitProPath.c_str(),
-                     params->toggles,
-                     params->cartPath.c_str(),
-                     params->logPath.c_str(),
-                     err)) {
-            result->success = false;
-            result->message = err;
-        } else if (!copyBuiltRom(params->gbaDir.c_str(), params->outputPath.c_str(), err)) {
+        bool ok = copyCustomSkinFile(params->gbaDir.c_str(), params->customSkinPath.c_str(), err);
+        if (ok) {
+            deleteCartBlob(params->gbaDir.c_str());
+            ok = runMake(params->gbaDir.c_str(),
+                         params->makePath.c_str(),
+                         params->devkitArmPath.c_str(),
+                         params->devkitProPath.c_str(),
+                         params->toggles,
+                         params->cartPath.c_str(),
+                         params->logPath.c_str(),
+                         err);
+        }
+        if (ok) {
+            ok = copyBuiltRom(params->gbaDir.c_str(), params->outputPath.c_str(), err);
+        }
+        if (!ok) {
             result->success = false;
             result->message = err;
         } else {
@@ -1020,13 +1063,14 @@ namespace {
         if (pidl) {
             char folder[MAX_PATH] = "";
             if (SHGetPathFromIDListA(pidl, folder)) {
-                if (!hasMakefile(folder)) {
-                    showMessage("Makefile not found in the selected folder.", MB_ICONWARNING | MB_OK);
-                } else {
-                    setSelectedGbaDir(folder);
-                    syncToggleDefaultsFromMakefile();
+                    if (!hasMakefile(folder)) {
+                        showMessage("Makefile not found in the selected folder.", MB_ICONWARNING | MB_OK);
+                    } else {
+                        setSelectedGbaDir(folder);
+                        syncToggleDefaultsFromMakefile();
+                        ensureCustomSkinToggle();
+                    }
                 }
-            }
             CoTaskMemFree(pidl);
         }
     }
@@ -1047,11 +1091,45 @@ namespace {
         }
     }
 
+    static void handleBrowseCustomSkin(HWND owner) {
+        char filePath[MAX_PATH] = "";
+        OPENFILENAMEA ofn = {};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = owner;
+        ofn.lpstrFile = filePath;
+        ofn.nMaxFile = sizeof(filePath);
+        ofn.lpstrFilter = "PNG Images (*.png)\0*.png\0";
+        ofn.nFilterIndex = 1;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+
+        if (GetOpenFileNameA(&ofn)) {
+            if (!endsWithIgnoreCase(filePath, ".png")) {
+                showMessage("Select a .png file for the custom skin.", MB_ICONWARNING | MB_OK);
+                return;
+            }
+            setSelectedCustomSkin(filePath);
+        }
+    }
+
+    static void handleReset() {
+        clearPathValue(g_makePath, g_makeEdit, "make");
+        clearPathValue(g_devkitProPath, g_devkitEdit, "devkitpro");
+        clearPathValue(g_gbaDir, g_gbaEdit, "gbadir");
+        clearPathValue(g_cartPath, g_cartEdit, "cart");
+        clearPathValue(g_skinPath, g_skinEdit, "skin");
+        applyDefaultPaths();
+        syncToggleDefaultsFromMakefile();
+        ensureCustomSkinToggle();
+        updateGenerateEnabled();
+    }
+
     static void setBusy(bool busy) {
         EnableWindow(g_browseMakeButton, !busy);
         EnableWindow(g_browseDevkitButton, !busy);
         EnableWindow(g_browseGbaButton, !busy);
         EnableWindow(g_browseCartButton, !busy);
+        EnableWindow(g_browseSkinButton, !busy);
+        EnableWindow(g_resetButton, !busy);
         EnableWindow(g_generateButton, !busy && g_makePath[0] != '\0' && g_devkitProPath[0] != '\0' && g_gbaDir[0] != '\0' && g_cartPath[0] != '\0');
         SetWindowTextA(g_generateButton, busy ? "Generating..." : "Generate");
     }
@@ -1069,6 +1147,11 @@ namespace {
 
         if (!g_cartPath[0] || !fileExists(g_cartPath)) {
             showMessage("Select a .p8.png cart first.", MB_ICONWARNING | MB_OK);
+            return;
+        }
+
+        if (g_skinPath[0] && !fileExists(g_skinPath)) {
+            showMessage("Selected custom skin file was not found.", MB_ICONWARNING | MB_OK);
             return;
         }
 
@@ -1128,6 +1211,7 @@ namespace {
         params->devkitArmPath = devkitArmPath;
         params->devkitProPath = devkitProPath;
         params->cartPath = g_cartPath;
+        params->customSkinPath = g_skinPath;
         params->gbaDir = gbaDir;
         params->outputPath = outputPath;
         params->logPath = logPath;
@@ -1321,7 +1405,49 @@ namespace {
                 GetModuleHandleA(nullptr),
                 nullptr);
 
-            const int toggleLabelY = kPadding + 208;
+            CreateWindowExA(
+                0,
+                "STATIC",
+                "Step 5: (Optional) Select custom Skin",
+                WS_CHILD | WS_VISIBLE,
+                kPadding,
+                kPadding + 208,
+                rect.right - (kPadding * 2),
+                16,
+                hwnd,
+                nullptr,
+                GetModuleHandleA(nullptr),
+                nullptr);
+
+            g_skinEdit = CreateWindowExA(
+                WS_EX_CLIENTEDGE,
+                "EDIT",
+                "",
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+                kPadding,
+                kPadding + 226,
+                rect.right - (kPadding * 2) - (kButtonWidth + 10),
+                24,
+                hwnd,
+                nullptr,
+                GetModuleHandleA(nullptr),
+                nullptr);
+
+            g_browseSkinButton = CreateWindowExA(
+                0,
+                "BUTTON",
+                "Browse...",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                rect.right - kPadding - kButtonWidth,
+                kPadding + 226,
+                kButtonWidth,
+                24,
+                hwnd,
+                (HMENU)kIdBrowseSkin,
+                GetModuleHandleA(nullptr),
+                nullptr);
+
+            const int toggleLabelY = kPadding + 260;
             CreateWindowExA(
                 0,
                 "STATIC",
@@ -1355,17 +1481,17 @@ namespace {
                 GetModuleHandleA(nullptr),
                 nullptr);
 
-            g_toggleFastLua = CreateWindowExA(
+            g_toggleCflahBase = CreateWindowExA(
                 0,
                 "BUTTON",
-                "Fast Lua",
+                "Use Custom Skin",
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
                 checkboxRightX,
                 checkboxY,
                 checkboxWidth,
                 kCheckboxHeight,
                 hwnd,
-                (HMENU)kIdToggleFastLua,
+                (HMENU)kIdToggleCflahBase,
                 GetModuleHandleA(nullptr),
                 nullptr);
 
@@ -1399,45 +1525,31 @@ namespace {
                 GetModuleHandleA(nullptr),
                 nullptr);
 
-            checkboxY += kCheckboxHeight + kCheckboxRowGap;
-
-            g_toggleBaselineJit = CreateWindowExA(
-                0,
-                "BUTTON",
-                "Baseline JIT",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                kPadding,
-                checkboxY,
-                checkboxWidth,
-                kCheckboxHeight,
-                hwnd,
-                (HMENU)kIdToggleBaselineJit,
-                GetModuleHandleA(nullptr),
-                nullptr);
-
-            g_toggleJitIwram = CreateWindowExA(
-                0,
-                "BUTTON",
-                "JIT in IWRAM",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                checkboxRightX,
-                checkboxY,
-                checkboxWidth,
-                kCheckboxHeight,
-                hwnd,
-                (HMENU)kIdToggleJitIwram,
-                GetModuleHandleA(nullptr),
-                nullptr);
-
             applyToggleState(kDefaultToggles);
 
             const int generateY = checkboxY + kCheckboxHeight + 10;
+            const int resetX = kPadding;
+            const int generateX = kPadding + kButtonWidth + 10;
+            g_resetButton = CreateWindowExA(
+                0,
+                "BUTTON",
+                "Reset",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                resetX,
+                generateY,
+                kButtonWidth,
+                kButtonHeight,
+                hwnd,
+                (HMENU)kIdReset,
+                GetModuleHandleA(nullptr),
+                nullptr);
+
             g_generateButton = CreateWindowExA(
                 0,
                 "BUTTON",
                 "Generate",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                kPadding,
+                generateX,
                 generateY,
                 kButtonWidth,
                 kButtonHeight,
@@ -1451,7 +1563,7 @@ namespace {
                 "STATIC",
                 "",
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
-                kPadding + kButtonWidth + 8,
+                generateX + kButtonWidth + 8,
                 generateY,
                 24,
                 kButtonHeight,
@@ -1465,10 +1577,12 @@ namespace {
                 char iniDevkit[MAX_PATH] = "";
                 char iniGba[MAX_PATH] = "";
                 char iniCart[MAX_PATH] = "";
+                char iniSkin[MAX_PATH] = "";
                 loadIniValue("make", iniMake, sizeof(iniMake));
                 loadIniValue("devkitpro", iniDevkit, sizeof(iniDevkit));
                 loadIniValue("gbadir", iniGba, sizeof(iniGba));
                 loadIniValue("cart", iniCart, sizeof(iniCart));
+                loadIniValue("skin", iniSkin, sizeof(iniSkin));
                 if (iniMake[0]) setSelectedMake(iniMake);
                 if (!iniDevkit[0]) {
                     char legacyDevkit[MAX_PATH] = "";
@@ -1486,6 +1600,7 @@ namespace {
                 }
                 if (iniGba[0]) setSelectedGbaDir(iniGba);
                 if (iniCart[0]) setSelectedCart(iniCart);
+                if (iniSkin[0]) setSelectedCustomSkin(iniSkin);
             }
 
             if (!g_devkitProPath[0]) {
@@ -1507,6 +1622,7 @@ namespace {
 
             applyDefaultPaths();
             syncToggleDefaultsFromMakefile();
+            ensureCustomSkinToggle();
 
             updateGenerateEnabled();
             break;
@@ -1521,6 +1637,10 @@ namespace {
                 handleBrowseGbaDir(hwnd);
             } else if (id == kIdBrowseCart) {
                 handleBrowseCart(hwnd);
+            } else if (id == kIdBrowseSkin) {
+                handleBrowseCustomSkin(hwnd);
+            } else if (id == kIdReset) {
+                handleReset();
             } else if (id == kIdGenerate) {
                 handleGenerate(hwnd);
             }
@@ -1585,7 +1705,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         560,
-        390,
+        420,
         nullptr,
         nullptr,
         instance,

@@ -990,10 +990,13 @@ bool Real8VM::loadGame(const GameData& game)
     if (game.lua_code_ptr && game.lua_code_size > 0) {
         lua_src = game.lua_code_ptr;
         lua_len = game.lua_code_size;
-    } else {
+    }
+#if !defined(__GBA__)
+    else {
         lua_src = game.lua_code.c_str();
         lua_len = game.lua_code.size();
     }
+#endif
 
     if (useGbaInitWatchdog && host) {
         host->log("[BOOT] Lua bytes: %lu", (unsigned long)lua_len);

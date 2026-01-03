@@ -33,6 +33,9 @@ CART_BLOB := cart_blob.bin
 SPLASH_PNG := splash.png
 SPLASH_IMG := splash_img.bin
 SPLASH_PAL := splash_pal.bin
+CUSTOM_SKIN_PNG := custom_skin.png
+CUSTOM_SKIN_IMG := custom_skin_img.bin
+CUSTOM_SKIN_PAL := custom_skin_pal.bin
 
 #---------------------------------------------------------------------------------
 # Host cart packer
@@ -129,6 +132,12 @@ endif
 REAL8_GBA_ENABLE_AUDIO ?= 0
 CFLAGS_BASE += -DREAL8_GBA_ENABLE_AUDIO=$(REAL8_GBA_ENABLE_AUDIO)
 
+REAL8_GBA_DEFAULT_SKIN_ON ?= 1
+CFLAGS_BASE += -DREAL8_GBA_DEFAULT_SKIN_ON=$(REAL8_GBA_DEFAULT_SKIN_ON)
+
+REAL8_GBA_CUSTOM_SKIN ?= 0
+CFLAGS_BASE += -DREAL8_GBA_CUSTOM_SKIN=$(REAL8_GBA_CUSTOM_SKIN)
+
 REAL8_GBA_FAST_LUA ?= 1
 CFLAGS_BASE += -DREAL8_GBA_FAST_LUA=$(REAL8_GBA_FAST_LUA)
 
@@ -199,6 +208,9 @@ EXCLUDE_CPPFILES := real8_shell.cpp real8_tools.cpp real8_cart.cpp real8_compres
 CPPFILES := $(filter-out $(EXCLUDE_CPPFILES),$(CPPFILES))
 
 BINFILES := $(CART_BLOB) $(SPLASH_IMG) $(SPLASH_PAL)
+ifeq ($(REAL8_GBA_CUSTOM_SKIN),1)
+  BINFILES += $(CUSTOM_SKIN_IMG) $(CUSTOM_SKIN_PAL)
+endif
 
 export OFILES_SOURCES := $(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
 export OFILES_BIN := $(addsuffix .o,$(BINFILES))
@@ -218,7 +230,7 @@ export CXXFLAGS := $(CXXFLAGS_BASE) $(INCLUDE)
 
 .PHONY: all clean rom tools
 
-rom: $(BUILD) $(CART_BLOB) $(SPLASH_IMG) $(SPLASH_PAL)
+rom: $(BUILD) $(BINFILES)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
 ifeq ($(OS),Windows_NT)
@@ -262,6 +274,14 @@ $(SPLASH_IMG) $(SPLASH_PAL): $(SPLASH_PNG)
 	$(call MV_F,splash.pal.bin,$(SPLASH_PAL))
 	$(call RM_F,splash.h)
 
+ifeq ($(REAL8_GBA_CUSTOM_SKIN),1)
+$(CUSTOM_SKIN_IMG) $(CUSTOM_SKIN_PAL): $(CUSTOM_SKIN_PNG)
+	@$(GRIT) $(CUSTOM_SKIN_PNG) -gb -gB8 -m! -p -ftb -o custom_skin
+	$(call MV_F,custom_skin.img.bin,$(CUSTOM_SKIN_IMG))
+	$(call MV_F,custom_skin.pal.bin,$(CUSTOM_SKIN_PAL))
+	$(call RM_F,custom_skin.h)
+endif
+
 clean:
 	@echo clean ...
 	$(call RM_RF,$(BUILD))
@@ -270,9 +290,14 @@ clean:
 	$(call RM_F,$(CART_BLOB))
 	$(call RM_F,$(SPLASH_IMG))
 	$(call RM_F,$(SPLASH_PAL))
+	$(call RM_F,$(CUSTOM_SKIN_IMG))
+	$(call RM_F,$(CUSTOM_SKIN_PAL))
 	$(call RM_F,splash.img.bin)
 	$(call RM_F,splash.pal.bin)
 	$(call RM_F,splash.h)
+	$(call RM_F,custom_skin.img.bin)
+	$(call RM_F,custom_skin.pal.bin)
+	$(call RM_F,custom_skin.h)
 
 else
 

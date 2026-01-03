@@ -11,6 +11,13 @@
 
 #include "build/splash_img_bin.h"
 #include "build/splash_pal_bin.h"
+#if !defined(REAL8_GBA_CUSTOM_SKIN)
+#define REAL8_GBA_CUSTOM_SKIN 0
+#endif
+#if REAL8_GBA_CUSTOM_SKIN
+#include "build/custom_skin_img_bin.h"
+#include "build/custom_skin_pal_bin.h"
+#endif
 
 struct lua_State;
 
@@ -441,13 +448,23 @@ namespace {
 
     static bool initSplashBackdrop() {
         const size_t splashPixels = 240u * 160u;
-        if (splash_img_bin_size < splashPixels) return false;
-        const size_t palEntries = splash_pal_bin_size / 2;
+        const uint8_t* skin_img = splash_img_bin;
+        size_t skin_img_size = splash_img_bin_size;
+        const uint8_t* skin_pal = splash_pal_bin;
+        size_t skin_pal_size = splash_pal_bin_size;
+#if REAL8_GBA_CUSTOM_SKIN
+        skin_img = custom_skin_img_bin;
+        skin_img_size = custom_skin_img_bin_size;
+        skin_pal = custom_skin_pal_bin;
+        skin_pal_size = custom_skin_pal_bin_size;
+#endif
+        if (skin_img_size < splashPixels) return false;
+        const size_t palEntries = skin_pal_size / 2;
         if (palEntries == 0) return false;
 
         const size_t maxColors = 256u - kSplashPaletteOffset;
         const size_t palCount = (palEntries < maxColors) ? palEntries : maxColors;
-        const u16* pal = reinterpret_cast<const u16*>(splash_pal_bin);
+        const u16* pal = reinterpret_cast<const u16*>(skin_pal);
         for (size_t i = 0; i < palCount; ++i) {
             BG_PALETTE[kSplashPaletteOffset + i] = pal[i];
         }
@@ -456,7 +473,7 @@ namespace {
         }
 
         u16* vram = (u16*)VRAM;
-        const uint8_t* src = splash_img_bin;
+        const uint8_t* src = skin_img;
         for (int y = 0; y < 160; ++y) {
             u16* dst = vram + (y * 120);
             for (int x = 0; x < 240; x += 2) {
@@ -502,7 +519,7 @@ void GbaHost::initVideo() {
 #if REAL8_GBA_TILEMODE
     initPackLut();
     resetTileCache();
-    tileModeActive = false; // If true potential performance win
+    tileModeActive = false;
     splashBackdropActive = false;
     paletteValid = false;
     tilesPending = false;

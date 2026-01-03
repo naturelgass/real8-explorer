@@ -26,6 +26,10 @@ namespace {
     #define REAL8_GBA_FB_SECTION EWRAM_DATA
     #define REAL8_GBA_STATE_SECTION EWRAM_DATA
 
+#ifndef REAL8_GBA_DEFAULT_SKIN_ON
+#define REAL8_GBA_DEFAULT_SKIN_ON 1
+#endif
+
     EWRAM_DATA alignas(4) uint8_t gba_ram[0x8000];
     REAL8_GBA_FB_SECTION alignas(4) uint8_t gba_fb[128][128];
 
@@ -131,12 +135,11 @@ namespace {
         size_t lua_size = header.raw_size - kCartFixedBytes;
         const uint8_t* src = payload;
 
-        memcpy(game.gfx, src, 0x2000); src += 0x2000;
-        memcpy(game.map, src, 0x1000); src += 0x1000;
-        memcpy(game.sprite_flags, src, 0x100); src += 0x100;
-        memcpy(game.music, src, 0x100); src += 0x100;
-        memcpy(game.sfx, src, 0x1100); src += 0x1100;
-        game.lua_code.clear();
+        game.gfx = src; src += 0x2000;
+        game.map = src; src += 0x1000;
+        game.sprite_flags = src; src += 0x100;
+        game.music = src; src += 0x100;
+        game.sfx = src; src += 0x1100;
         game.lua_code_ptr = reinterpret_cast<const char*>(src);
         game.lua_code_size = lua_size;
         game.cart_id = "game.p8.png";
@@ -196,7 +199,7 @@ namespace {
         int selection = 0;
         Real8Gfx::GfxState gfx_backup{};
         bool showingCredits = false;
-        bool showSkin = true;
+        bool showSkin = (REAL8_GBA_DEFAULT_SKIN_ON != 0);
         uint32_t inputMask = 0;
         uint32_t prevInputMask = 0;
 
@@ -454,10 +457,14 @@ int main(void) {
     host.renderDebugOverlay();
 
     GameData& game = g_game;
-    game.lua_code.clear();
+    game.gfx = nullptr;
+    game.map = nullptr;
+    game.sprite_flags = nullptr;
+    game.music = nullptr;
+    game.sfx = nullptr;
     game.lua_code_ptr = nullptr;
     game.lua_code_size = 0;
-    game.cart_id.clear();
+    game.cart_id = nullptr;
     host.log("[BOOT] load blob");
     host.renderDebugOverlay();
     const uint8_t* rom_view = nullptr;
@@ -469,7 +476,7 @@ int main(void) {
         while (true) host.waitForVBlank();
     }
     vm.setRomView(rom_view, rom_size, true);
-    const bool hasLua = (game.lua_code_ptr && game.lua_code_size > 0) || !game.lua_code.empty();
+    const bool hasLua = (game.lua_code_ptr && game.lua_code_size > 0);
     if (!hasLua) {
         host.log("[BOOT] lua missing");
         showSolid(RGB5(31, 0, 0));
@@ -492,6 +499,7 @@ int main(void) {
     host.clearBorders();
 
     GbaInGameMenu menu;
+    host.setSplashBackdrop(menu.showSkin);
 
         while (true) {
         REAL8_PROFILE_FRAME_BEGIN(&vm);
