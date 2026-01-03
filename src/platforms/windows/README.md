@@ -4,8 +4,6 @@ REAL-8 Explorer for Windows is the desktop host for the Real8 VM + Shell. It pro
 
 > Not affiliated with Lexaloffle Games or PICO-8.
 
-![REAL-8 Windows Shell](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/WindowsShellMenu.png)
-
 ## Table of contents
 
 - [Overview](#overview)
