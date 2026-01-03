@@ -14,7 +14,7 @@ It focuses on speed and memory, so it is optimized to run on a real GBA hardware
 - [Build steps](#build-steps)
 - [Pico2GBA GUI (Windows)](#pico2gba-gui-windows)
 
-### Nintendo GBA
+### PICO-8 on GAME BOY Advance
 ![REAL-8 on GBA](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8-Pico2GBA-Rom.png)
 
 ## How it works
@@ -134,4 +134,4 @@ Outputs:
 - Last-used paths are cached in `build/pico2gba.ini`.
 
 ### Nintendo GBA
-![REAL-8 - Pico2GBA](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8-Pico2GBA.png)
+![REAL-8 - Pico2GBA](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8-Pico2GBA-GUI.png)
