@@ -39,7 +39,7 @@ A PICO-8 explorer + emulator front-end for multiple platforms.
 
 ---
 
-## GBA implementation (short)
+## GBA implementation
 
 The GBA target packages a single `.p8.png` cart into a standalone ROM and boots it directly (no shell).
 It renders a 128x128 framebuffer centered in Mode 4 and leans on IWRAM/EWRAM optimizations to hit speed.
