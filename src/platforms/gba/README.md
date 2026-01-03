@@ -1,7 +1,7 @@
 # GBA Host (PICO-8 to GBA)
 
 This port packages a single PICO-8 cart into a standalone GBA ROM and runs it on the Real8 VM.
-It focuses on speed and memory, so some host features are trimmed.
+It focuses on speed and memory, so it is optimized to run on a real GBA hardware.
 
 ## Table of contents
 
@@ -19,7 +19,6 @@ It focuses on speed and memory, so some host features are trimmed.
 | Stage | Tooling | Output |
 | --- | --- | --- |
 | Pack cart | `cart_packer` or `pico2gba` GUI | `cart_blob.bin` |
-| Convert splash | `grit` | `splash_img.bin`, `splash_pal.bin` |
 | Build ROM | `make` + devkitARM | `REAL8_GBA.gba` |
 
 Runtime flow:
@@ -45,7 +44,6 @@ Tip: the linker runs with `--print-memory-usage` so builds report ROM/IWRAM/EWRA
 | CPU | ARM7TDMI ~16.78 MHz, no FPU | avoid heavy per-pixel loops and float math |
 | RAM | 32 KB IWRAM + 256 KB EWRAM | big Lua tables and buffers can stall |
 | Video | Mode 4 (240x160, 8bpp) | 128x128 framebuffer is centered with borders |
-| Host features | no filesystem, networking, overlays, screenshots, save states | cart must be self-contained |
 | Audio | disabled by default (`REAL8_GBA_ENABLE_AUDIO=0`) | enable only if needed; costs CPU |
 
 ## Optimizations in this port
@@ -92,8 +90,7 @@ DEVKITARM=$DEVKITPRO/devkitARM
 2. Ensure a host compiler (`g++`) and `make` are in your PATH.
 3. `cd src/platforms/gba`
 4. Put your cart image next to the Makefile as `game.p8.png`.
-5. Optional: replace `splash.png` with your own splash.
-6. Build tools and ROM:
+5. Build tools and ROM:
 
 ```sh
 make clean

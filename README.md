@@ -13,7 +13,7 @@ A PICO-8 explorer + emulator front-end for multiple platforms.
 ## Table of contents
 
 - [Platforms](#platforms)
-- [GBA implementation](#gba-implementation-short)
+- [GBA implementation](#gba-implementation)
 - [Features](#features)
 - [Supported cart formats](#supported-cart-formats)
 - [Usage](#usage)
