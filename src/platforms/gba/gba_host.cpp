@@ -19,6 +19,14 @@ namespace {
     GbaHost* g_gbaHost = nullptr;
     bool g_timerInit = false;
 
+#ifndef IWRAM_DATA
+#define IWRAM_DATA __attribute__((section(".iwram")))
+#endif
+
+#ifndef REAL8_ALWAYS_INLINE
+#define REAL8_ALWAYS_INLINE __attribute__((always_inline)) inline
+#endif
+
 #ifndef REAL8_GBA_TILEMODE
 #define REAL8_GBA_TILEMODE 1
 #endif
@@ -39,7 +47,7 @@ namespace {
     constexpr int kFirstScreenTile = 1;
     constexpr int kCharBlock = 3;
     constexpr int kScreenBlock = 31;
-    static EWRAM_DATA OBJATTR g_oamShadow[128];
+    static IWRAM_DATA OBJATTR g_oamShadow[128];
 #endif
     constexpr int kSplashPaletteOffset = 16;
 
@@ -235,7 +243,7 @@ namespace {
 #define WINOUT_OBJ (1u << 12)
 #endif
 
-    static inline void dma3Copy32(const void* src, void* dst, u32 count) {
+    static REAL8_ALWAYS_INLINE void dma3Copy32(const void* src, void* dst, u32 count) {
         REG_DMA3SAD = (u32)src;
         REG_DMA3DAD = (u32)dst;
         REG_DMA3CNT = count | DMA_32 | DMA_SRC_INC | DMA_DST_INC | DMA_START_NOW | DMA_ENABLE;
@@ -247,7 +255,7 @@ namespace {
         }
     }
 
-    static inline void dma3Copy16(const void* src, void* dst, u32 count) {
+    static REAL8_ALWAYS_INLINE void dma3Copy16(const void* src, void* dst, u32 count) {
         REG_DMA3SAD = (u32)src;
         REG_DMA3DAD = (u32)dst;
         REG_DMA3CNT = count | DMA_16 | DMA_SRC_INC | DMA_DST_INC | DMA_START_NOW | DMA_ENABLE;
@@ -327,7 +335,7 @@ namespace {
         }
     }
 
-    static inline void blitPixel(u16* vram, int stride, int x, int y, uint8_t color) {
+    static REAL8_ALWAYS_INLINE void blitPixel(u16* vram, int stride, int x, int y, uint8_t color) {
         u16* dst = vram + (y * stride + (x >> 1));
         u16 val = *dst;
         if (x & 1) val = (u16)((val & 0x00FF) | (color << 8));
@@ -346,9 +354,79 @@ namespace {
     }
 
 #if REAL8_GBA_TILEMODE
-    static EWRAM_DATA uint8_t g_packLow[256];
-    static EWRAM_DATA uint8_t g_packHigh[256];
+    static IWRAM_DATA uint8_t g_packLow[256];
+    static IWRAM_DATA uint8_t g_packHigh[256];
     static bool g_packLutInit = false;
+
+    constexpr int kTileCount = kScreenTiles * kScreenTiles;
+    constexpr int kTileDirtyWords = (kTileCount + 31) / 32;
+    static IWRAM_DATA u32 g_tileHash[kTileCount];
+    static IWRAM_DATA u32 g_tileDirty[kTileDirtyWords];
+    static IWRAM_DATA u32 g_tileHashValid[kTileDirtyWords];
+
+    static REAL8_ALWAYS_INLINE void markTileDirty(int idx) {
+        g_tileDirty[idx >> 5] |= (1u << (idx & 31));
+    }
+
+    static REAL8_ALWAYS_INLINE bool isTileDirty(int idx) {
+        return (g_tileDirty[idx >> 5] & (1u << (idx & 31))) != 0;
+    }
+
+    static REAL8_ALWAYS_INLINE void clearTileDirty(int idx) {
+        g_tileDirty[idx >> 5] &= ~(1u << (idx & 31));
+    }
+
+    static REAL8_ALWAYS_INLINE bool isTileHashValid(int idx) {
+        return (g_tileHashValid[idx >> 5] & (1u << (idx & 31))) != 0;
+    }
+
+    static REAL8_ALWAYS_INLINE void setTileHashValid(int idx) {
+        g_tileHashValid[idx >> 5] |= (1u << (idx & 31));
+    }
+
+    static void resetTileCache() {
+        for (int i = 0; i < kTileCount; ++i) {
+            g_tileHash[i] = 0;
+        }
+        for (int i = 0; i < kTileDirtyWords; ++i) {
+            g_tileDirty[i] = 0;
+            g_tileHashValid[i] = 0;
+        }
+    }
+
+    static void IWRAM_CODE markTilesDirtyRect(int x0, int y0, int x1, int y1) {
+        if (x1 < 0 || y1 < 0 || x0 > 127 || y0 > 127) {
+            return;
+        }
+
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > 127) x1 = 127;
+        if (y1 > 127) y1 = 127;
+
+        const int tx0 = x0 >> 3;
+        const int ty0 = y0 >> 3;
+        const int tx1 = x1 >> 3;
+        const int ty1 = y1 >> 3;
+        for (int ty = ty0; ty <= ty1; ++ty) {
+            const int base = ty * kScreenTiles;
+            for (int tx = tx0; tx <= tx1; ++tx) {
+                markTileDirty(base + tx);
+            }
+        }
+    }
+
+    static REAL8_ALWAYS_INLINE u32 hashTile(const uint8_t (*framebuffer)[128], int px, int py) {
+        u32 hash = 2166136261u;
+        for (int row = 0; row < kTileSize; ++row) {
+            const uint8_t* src = &framebuffer[py + row][px];
+            for (int col = 0; col < kTileSize; ++col) {
+                hash ^= src[col];
+                hash *= 16777619u;
+            }
+        }
+        return hash;
+    }
 
     static void initPackLut() {
         if (g_packLutInit) return;
@@ -395,7 +473,7 @@ namespace {
         return true;
     }
 
-    static uint32_t mapPicoButtons(uint16_t keys) {
+    static REAL8_ALWAYS_INLINE uint32_t mapPicoButtons(uint16_t keys) {
         uint32_t mask = 0;
         if (keys & KEY_LEFT) mask |= (1u << 0);
         if (keys & KEY_RIGHT) mask |= (1u << 1);
@@ -423,13 +501,15 @@ void GbaHost::resetVideo() {
 void GbaHost::initVideo() {
 #if REAL8_GBA_TILEMODE
     initPackLut();
-    tileModeActive = false;
+    resetTileCache();
+    tileModeActive = false; // If true potential performance win
     splashBackdropActive = false;
     paletteValid = false;
     tilesPending = false;
     tilesFb = nullptr;
     objCount = 0;
     objSpriteSheet = nullptr;
+    lastObjSpriteSheet = nullptr;
     objPending = false;
     REG_DISPCNT = MODE_4 | BG2_ON;
     BG_PALETTE[0] = RGB5(0, 0, 0);
@@ -624,7 +704,7 @@ bool IWRAM_OBJBATCH_CODE GbaHost::queueSprite(const uint8_t* spriteSheet, int n,
 #endif
 }
 
-void GbaHost::cancelSpriteBatch() {
+void IWRAM_OBJBATCH_CODE GbaHost::cancelSpriteBatch() {
 #if REAL8_GBA_TILEMODE
     if (!tileModeActive) return;
     for (int i = 0; i < 128; ++i) {
@@ -638,11 +718,12 @@ void GbaHost::cancelSpriteBatch() {
 #endif
 }
 
-void GbaHost::flushSpriteBatch() {
+void IWRAM_OBJBATCH_CODE GbaHost::flushSpriteBatch() {
 #if REAL8_GBA_TILEMODE
     if (!objPending) return;
-    if (objSpriteSheet) {
+    if (objSpriteSheet && objSpriteSheet != lastObjSpriteSheet) {
         dma3Copy32Wait(objSpriteSheet, OBJ_VRAM, 0x2000 / 4);
+        lastObjSpriteSheet = objSpriteSheet;
     }
     dma3Copy32Wait(g_oamShadow, OAM, sizeof(g_oamShadow) / 4);
     objPending = false;
@@ -674,9 +755,20 @@ void IWRAM_CODE GbaHost::blitFrameTiles(const uint8_t (*framebuffer)[128], int x
     u16* tileBase = reinterpret_cast<u16*>(CHAR_BASE_BLOCK(kCharBlock));
     for (int ty = ty0; ty <= ty1; ++ty) {
         const int py = ty * kTileSize;
+        const int cacheRow = ty * kScreenTiles;
         for (int tx = tx0; tx <= tx1; ++tx) {
+            const int cacheIndex = cacheRow + tx;
+            if (!isTileDirty(cacheIndex)) {
+                continue;
+            }
             const int px = tx * kTileSize;
-            const int tileIndex = kFirstScreenTile + (ty * kScreenTiles) + tx;
+            const u32 hash = hashTile(framebuffer, px, py);
+            if (isTileHashValid(cacheIndex) && g_tileHash[cacheIndex] == hash) {
+                clearTileDirty(cacheIndex);
+                continue;
+            }
+
+            const int tileIndex = kFirstScreenTile + cacheIndex;
             u16* tile = tileBase + (tileIndex * 16);
             alignas(4) u16 packed16[16];
             for (int row = 0; row < kTileSize; ++row) {
@@ -689,6 +781,10 @@ void IWRAM_CODE GbaHost::blitFrameTiles(const uint8_t (*framebuffer)[128], int x
                 packed16[row * 2 + 1] = (uint16_t)(b2 | (b3 << 8));
             }
             dma3Copy32Wait(packed16, tile, 8);
+
+            g_tileHash[cacheIndex] = hash;
+            setTileHashValid(cacheIndex);
+            clearTileDirty(cacheIndex);
         }
     }
 #else
@@ -773,6 +869,8 @@ void IWRAM_FLIP_DIRTY_CODE GbaHost::flipScreenDirty(uint8_t (*framebuffer)[128],
             if (x1 > tilesX1) tilesX1 = x1;
             if (y1 > tilesY1) tilesY1 = y1;
         }
+
+        markTilesDirtyRect(x0, y0, x1, y1);
 
         if (debugDirty) drawDebugOverlay();
         return;

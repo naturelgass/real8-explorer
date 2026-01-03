@@ -26,8 +26,31 @@ static int16_t g_vibSinLut[kVibLutSize];
 static float g_vibPhaseStep = 0.0f;
 static bool g_audioLutReady = false;
 
+#if defined(__GBA__)
+static inline float fast_sin_gba(float x) {
+    if (x > PI) x -= TWO_PI;
+    const float B = 4.0f / PI;
+    const float C = -4.0f / (PI * PI);
+    float y = B * x + C * x * ((x < 0.0f) ? -x : x);
+    const float P = 0.225f;
+    return P * (y * ((y < 0.0f) ? -y : y) - y) + y;
+}
+#endif
+
 static void initAudioLuts() {
     if (g_audioLutReady) return;
+#if defined(__GBA__)
+    constexpr float kSemitoneRatio = 1.05946309436f;
+    float freq = kC2Freq;
+    for (int i = 0; i <= 64; ++i) {
+        g_noteFreqLut[i] = freq;
+        freq *= kSemitoneRatio;
+    }
+    for (int i = 0; i < kVibLutSize; ++i) {
+        float angle = (TWO_PI * (float)i) / (float)kVibLutSize;
+        g_vibSinLut[i] = (int16_t)(fast_sin_gba(angle) * 32767.0f);
+    }
+#else
     for (int i = 0; i <= 64; ++i) {
         g_noteFreqLut[i] = kC2Freq * powf(2.0f, (float)i / 12.0f);
     }
@@ -35,6 +58,7 @@ static void initAudioLuts() {
         float angle = (TWO_PI * (float)i) / (float)kVibLutSize;
         g_vibSinLut[i] = (int16_t)(sinf(angle) * 32767.0f);
     }
+#endif
     g_vibPhaseStep = kVibFreq * kInvSampleRate;
     g_audioLutReady = true;
 }

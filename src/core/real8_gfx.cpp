@@ -6,9 +6,11 @@
 
 #if defined(__GBA__)
 #define IWRAM_CODE __attribute__((section(".iwram"), long_call))
+#define IWRAM_DATA __attribute__((section(".iwram_data")))
 #define EWRAM_DATA __attribute__((section(".ewram")))
 #else
 #define IWRAM_CODE
+#define IWRAM_DATA
 #define EWRAM_DATA
 #endif
 
@@ -173,7 +175,7 @@ struct SpriteChunkLut {
     bool valid = false;
 };
 
-static EWRAM_DATA SpriteChunkLut g_spriteChunkLut;
+static IWRAM_DATA SpriteChunkLut g_spriteChunkLut;
 
 static inline void IWRAM_SPR_HELP_CODE updateSpriteChunkLut(const uint8_t* palette_map, const bool* palt_map) {
     bool same = g_spriteChunkLut.valid;

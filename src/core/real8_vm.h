@@ -159,7 +159,7 @@ public:
   size_t getStateSize();
   bool serialize(void* data, size_t size);
   bool unserialize(const void* data, size_t size);
-  #if !defined(__GBA__)
+  #if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
   int16_t audio_buffer[4096]; // Fixed size, plenty of headroom
   #endif
 #if REAL8_HAS_LIBRETRO_BUFFERS
@@ -258,7 +258,7 @@ public:
   // --------------------------------------------------------------------------
   // AUDIO & WAVETABLES
   // --------------------------------------------------------------------------
-#if !defined(__GBA__)
+#if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
   float wavetables[8][2048]; 
   void init_wavetables();
   AudioStateSnapshot getAudioState() { return audio.getState(); }

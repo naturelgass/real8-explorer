@@ -138,7 +138,8 @@ namespace {
     private:
         lua_State* L_;
     };
-}
+
+}
 
 static void IWRAM_INPUT_CODE update_gba_input(Real8VM* vm) {
     if (!vm || !vm->host) return;
@@ -229,7 +230,7 @@ static int traceback(lua_State *L) {
 // --------------------------------------------------------------------------
 
 Real8VM::Real8VM(IReal8Host *h) : host(h), gpu(this)
-#if !defined(__GBA__)
+#if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
 , debug(this)
 #endif
 {

@@ -13,6 +13,7 @@ A PICO-8 explorer + emulator front-end for multiple platforms.
 ## Table of contents
 
 - [Platforms](#platforms)
+- [GBA implementation (short)](#gba-implementation-short)
 - [Features](#features)
 - [Supported cart formats](#supported-cart-formats)
 - [Usage](#usage)
@@ -34,9 +35,15 @@ A PICO-8 explorer + emulator front-end for multiple platforms.
 | **Nintendo 3DS** | citro2d / citro3d | ✅ |
 | **Sony PSP** | PSP Software Development Kit | ✅ |
 | **Libretro** | Libretro API core | ✅ |
-| **PICO-8 to GBA** | devkitARM / GBA Sdk | ✅ |
+| **PICO-8 to GBA** | devkitARM / GBA Sdk ([GBA README](src/platforms/gba/README.md)) | ✅ |
 
 ---
+
+## GBA implementation (short)
+
+The GBA target packages a single `.p8.png` cart into a standalone ROM and boots it directly (no shell).
+It renders a 128x128 framebuffer centered in Mode 4 and leans on IWRAM/EWRAM optimizations to hit speed.
+See `src/platforms/gba/README.md` for full build steps, memory layout, and tuning tips.
 
 ## Features
 
@@ -181,3 +188,5 @@ This project is licensed under **GPL-3.0** (see `LICENSE`).
 ---
 
 ***REAL-8” started as a backronym (“Real-Time Emulation Analog Layer”), but it stuck***
+
+

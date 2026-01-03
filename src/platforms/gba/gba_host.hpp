@@ -114,6 +114,7 @@ private:
 #endif
     int objCount = 0;
     const uint8_t* objSpriteSheet = nullptr;
+    const uint8_t* lastObjSpriteSheet = nullptr;
     bool objPending = false;
     Real8VM* profileVm = nullptr;
 };

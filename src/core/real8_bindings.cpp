@@ -2918,7 +2918,8 @@ void Real8VM::init_wavetables()
 
         // 5: Organ (Triangle mixed with 2x Triangle)
         float w0 = wavetables[0][i];
-        float t2 = fmodf(t * 2.0f, 1.0f);
+        float t2 = t + t;
+        if (t2 >= 1.0f) t2 -= 1.0f;
         float w1 = (t2 < 0.5f) ? (4.0f * t2 - 1.0f) : (3.0f - 4.0f * t2);
         wavetables[5][i] = (w0 + w1) * 0.5f;
 
