@@ -1788,7 +1788,7 @@ static int l_peek(lua_State *L)
     int addr = to_int_floor(L, 1); // Use safe cast
 
     // Strict Bounds Check for PICO-8 32k RAM
-    if (!vm->ram || addr < 0 || addr > 0x7FFF)
+    if (!vm || !vm->ram || addr < 0 || addr > 0x7FFF)
     {
         lua_pushinteger(L, 0);
         return 1;
@@ -2024,14 +2024,23 @@ static void write_mapped_byte(Real8VM *vm, uint32_t addr, uint8_t val)
 static int l_poke(lua_State *L)
 {
     auto *vm = get_vm(L);
-    uint32_t addr = (uint32_t)to_int_floor(L, 1);
+    if (!vm || !vm->ram)
+        return 0;
+
+    int addr = to_int_floor(L, 1);
     int argc = lua_gettop(L);
+
+    if (addr < 0 || addr > 0x7FFF)
+        return 0;
 
     for (int i = 2; i <= argc; ++i)
     {
+        if (addr > 0x7FFF)
+            break;
+
         uint8_t val = (uint8_t)to_int_floor(L, i);
 
-        if (vm->watch_addr != -1 && addr == vm->watch_addr) {
+        if (vm->watch_addr != -1 && addr == vm->watch_addr && vm->host) {
             lua_Debug ar;
             lua_getstack(L, 1, &ar);
             lua_getinfo(L, "nSl", &ar);
@@ -2049,7 +2058,7 @@ static int l_poke(lua_State *L)
             val = 0x3F; 
         }
 
-        write_mapped_byte(vm, addr, val);
+        write_mapped_byte(vm, (uint32_t)addr, val);
 
         addr++;
     }
@@ -2059,20 +2068,22 @@ static int l_poke(lua_State *L)
 static int l_memcpy(lua_State *L)
 {
     auto *vm = get_vm(L);
-    uint32_t dest = (uint32_t)to_int_floor(L, 1);
-    uint32_t src = (uint32_t)to_int_floor(L, 2);
+    int dest = to_int_floor(L, 1);
+    int src = to_int_floor(L, 2);
     int len = to_int_floor(L, 3);
 
-    if (len <= 0 || !vm->ram)
+    if (!vm || !vm->ram || len <= 0)
         return 0;
 
     // Bounds check
-    if (dest >= 0x8000 || src >= 0x8000)
+    if (dest < 0 || src < 0 || dest >= 0x8000 || src >= 0x8000)
         return 0;
-    if (dest + len > 0x8000)
+    if (len > 0x8000 - dest)
         len = 0x8000 - dest;
-    if (src + len > 0x8000)
+    if (len > 0x8000 - src)
         len = 0x8000 - src;
+    if (len <= 0)
+        return 0;
 
     const bool mapping_active = (vm->hwState.spriteSheetMemMapping == 0x60 || vm->hwState.screenDataMemMapping == 0);
     const bool src_hits_screen = (src < 0x8000 && (src + len) > 0x6000);
@@ -2080,9 +2091,9 @@ static int l_memcpy(lua_State *L)
     {
         std::vector<uint8_t> temp(len);
         for (int i = 0; i < len; ++i)
-            temp[i] = read_mapped_byte(vm, src + i);
+            temp[i] = read_mapped_byte(vm, (uint32_t)(src + i));
         for (int i = 0; i < len; ++i)
-            write_mapped_byte(vm, dest + i, temp[i]);
+            write_mapped_byte(vm, (uint32_t)(dest + i), temp[i]);
         return 0;
     }
 
@@ -2144,7 +2155,7 @@ static int l_memcpy(lua_State *L)
     // 3. Hardware State Sync
     if (dest < 0x6000)
     {
-        vm_sync_ram(vm, dest, len);
+        vm_sync_ram(vm, (uint32_t)dest, len);
     }
 
     return 0;
@@ -2153,24 +2164,26 @@ static int l_memcpy(lua_State *L)
 static int l_memset(lua_State *L)
 {
     auto *vm = get_vm(L);
-    uint32_t dest = (uint32_t)to_int_floor(L, 1);
+    int dest = to_int_floor(L, 1);
     uint8_t val = (uint8_t)to_int_floor(L, 2);
     int len = to_int_floor(L, 3);
 
-    if (len <= 0 || !vm->ram)
+    if (!vm || !vm->ram || len <= 0)
         return 0;
 
     // Bounds Check and Clamping
-    if (dest >= 0x8000)
+    if (dest < 0 || dest >= 0x8000)
         return 0;
-    if (dest + len > 0x8000)
+    if (len > 0x8000 - dest)
         len = 0x8000 - dest;
+    if (len <= 0)
+        return 0;
 
     bool mapping_active = (vm->hwState.spriteSheetMemMapping == 0x60 || vm->hwState.screenDataMemMapping == 0);
     if (mapping_active)
     {
         for (int i = 0; i < len; ++i)
-            write_mapped_byte(vm, dest + i, val);
+            write_mapped_byte(vm, (uint32_t)(dest + i), val);
         return 0;
     }
 
@@ -2230,7 +2243,7 @@ static int l_memset(lua_State *L)
     // Check if the write touches memory below 0x6000
     if (dest < 0x6000)
     {
-        vm_sync_ram(vm, dest, len);
+        vm_sync_ram(vm, (uint32_t)dest, len);
     }
 
     return 0;
@@ -3051,7 +3064,7 @@ static int l_peek2(lua_State *L)
     auto *vm = get_vm(L);
     int addr = to_int_floor(L, 1);
 
-    if (!vm->ram || addr < 0 || addr > 0x7FFF)
+    if (!vm || !vm->ram || addr < 0 || addr > 0x7FFF)
     {
         lua_pushinteger(L, 0);
         return 1;
@@ -3398,7 +3411,7 @@ static int l_load_p8_file(lua_State *L) {
     return 1; // return chunk
 }
 
-static int internal_tonum(lua_State *L, int idx)
+static int internal_tonum(lua_State *L, int idx, int flags)
 {
     // 1. Handle Number (Identity)
     if (lua_type(L, idx) == LUA_TNUMBER)
@@ -3421,14 +3434,29 @@ static int internal_tonum(lua_State *L, int idx)
         size_t len;
         const char *s_raw = lua_tolstring(L, idx, &len);
 
-        // Skip leading whitespace
-        const char *s = s_raw;
-        while (*s && isspace((unsigned char)*s))
+        if (flags & 2)
         {
-            s++;
+            if (len < 4)
+            {
+                lua_pushnil(L);
+                return 1;
+            }
+            uint32_t raw = (uint8_t)s_raw[0]
+                         | ((uint32_t)(uint8_t)s_raw[1] << 8)
+                         | ((uint32_t)(uint8_t)s_raw[2] << 16)
+                         | ((uint32_t)(uint8_t)s_raw[3] << 24);
+            push_pico_fixed(L, (int32_t)raw);
+            return 1;
         }
 
-        size_t remaining = len - (s - s_raw);
+        // Skip leading whitespace
+        size_t pos = 0;
+        while (pos < len && isspace((unsigned char)s_raw[pos]))
+        {
+            pos++;
+        }
+
+        size_t remaining = len - pos;
 
         // Empty or pure whitespace = nil
         if (remaining == 0)
@@ -3437,33 +3465,79 @@ static int internal_tonum(lua_State *L, int idx)
             return 1;
         }
 
+        const char *s = s_raw + pos;
+        if (memchr(s, '\0', remaining))
+        {
+            lua_pushnil(L);
+            return 1;
+        }
+
+        std::string tmp(s, remaining);
+        const char *cstr = tmp.c_str();
+
         char *end = nullptr;
         double res = 0.0;
+        bool force_hex = (flags & 1) != 0;
 
         // PICO-8 supports "0x..." for both Integers and Fixed Point (0x0.8000 = 0.5)
         // For Mario.p8, we specifically need to catch the integer cases safely.
-        if (remaining > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+        if (force_hex || (remaining > 2 && cstr[0] == '0' && (cstr[1] == 'x' || cstr[1] == 'X')))
         {
-            // Check if there is a '.' in the hex string (Fixed point hex)
-            if (strchr(s, '.'))
-            {
-                // Fallback to strtod for Hex Floats (if supported) or manual parse
-                // For now, let's trust strtod for complex hex-floats
-                res = strtod(s, &end);
+            const char *p = cstr;
+            bool neg = false;
+            if (*p == '+' || *p == '-') {
+                neg = (*p == '-');
+                p++;
             }
-            else
-            {
-                // Standard Integer Hex: Use strtoul base 16
-                // This ensures "0xFF" becomes 255, not 0
-                unsigned long val = strtoul(s, &end, 16);
-                res = (double)val;
+            if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+                p += 2;
             }
+
+            uint32_t int_part = 0;
+            int int_digits = 0;
+            while (*p && isxdigit((unsigned char)*p)) {
+                int_part = (int_part << 4) | (uint32_t)p8_hex_val(*p);
+                p++;
+                int_digits++;
+            }
+
+            uint32_t frac_part = 0;
+            int frac_digits = 0;
+            if (*p == '.') {
+                p++;
+                while (*p && isxdigit((unsigned char)*p)) {
+                    if (frac_digits < 4) {
+                        frac_part = (frac_part << 4) | (uint32_t)p8_hex_val(*p);
+                        frac_digits++;
+                    }
+                    p++;
+                }
+            }
+
+            const char *tail = p;
+            while (*tail && isspace((unsigned char)*tail)) {
+                tail++;
+            }
+
+            if ((int_digits == 0 && frac_digits == 0) || *tail != '\0')
+            {
+                lua_pushnil(L);
+                return 1;
+            }
+
+            uint32_t raw = int_part << 16;
+            if (frac_digits > 0) {
+                raw |= frac_part << (16 - 4 * frac_digits);
+            }
+            int32_t signed_raw = neg ? -(int32_t)raw : (int32_t)raw;
+            push_pico_fixed(L, signed_raw);
+            return 1;
         }
 
         // Binary (0b) Handling
-        else if (remaining > 2 && s[0] == '0' && (s[1] == 'b' || s[1] == 'B'))
+        else if (!force_hex && remaining > 2 && cstr[0] == '0' && (cstr[1] == 'b' || cstr[1] == 'B'))
         {
-            const char *bin = s + 2;
+            const char *bin = cstr + 2;
             long int_part = 0;
             double frac_part = 0.0;
             double div = 2.0;
@@ -3502,7 +3576,7 @@ static int internal_tonum(lua_State *L, int idx)
         else
         {
             // Standard Decimal
-            res = strtod(s, &end);
+            res = strtod(cstr, &end);
         }
 
         // PICO-8 Tolerance: Skip trailing whitespace
@@ -3512,7 +3586,7 @@ static int internal_tonum(lua_State *L, int idx)
         }
 
         // Strictness: Any NON-SPACE trailing garbage = nil
-        if (end == s || *end != '\0')
+        if (end == cstr || *end != '\0')
         {
             lua_pushnil(L);
         }
@@ -3531,13 +3605,26 @@ static int internal_tonum(lua_State *L, int idx)
 static int l_tonum(lua_State *L)
 {
     // Standard Lua call expects arg at index 1
-    return internal_tonum(L, 1);
+    int flags = 0;
+    if (lua_gettop(L) >= 2 && !lua_isnil(L, 2))
+    {
+        if (lua_isboolean(L, 2))
+            flags = lua_toboolean(L, 2) ? 1 : 0;
+        else
+            flags = (int)lua_tonumber(L, 2);
+    }
+    return internal_tonum(L, 1, flags);
 }
 
 // --- Lua Binding: split(str, [sep], [convert]) ---
 static int l_split(lua_State *L)
 {
     size_t len;
+    if (lua_gettop(L) == 0 || lua_isnil(L, 1))
+    {
+        lua_newtable(L);
+        return 1;
+    }
     const char *str = luaL_checklstring(L, 1, &len); // Check Index 1
     const char *sep = ",";
     size_t sep_len = 1;
@@ -3566,13 +3653,12 @@ static int l_split(lua_State *L)
     {
         for (size_t i = 0; i < len; i++)
         {
-            char tmp[2] = {str[i], 0};
-            lua_pushstring(L, tmp); // Push token
+            lua_pushlstring(L, &str[i], 1); // Push token
 
             if (convert_nums && (isdigit((unsigned char)str[i]) || str[i] == '-' || str[i] == '.'))
             {
                 // Try convert token at top of stack (-1)
-                internal_tonum(L, -1);
+                internal_tonum(L, -1, 0);
                 if (!lua_isnil(L, -1))
                 {
                     lua_remove(L, -2); // remove string, keep number
@@ -3594,22 +3680,33 @@ static int l_split(lua_State *L)
     // Loop condition and logic to capture trailing empty strings
     while (ptr < end)
     {
-        const char *found = strstr(ptr, sep);
-        // Ensure found is within bounds (strstr might overshoot if binary data, though unlikely here)
-        if (found && found >= end) found = NULL;
+        const char *found = NULL;
+        if (sep_len <= (size_t)(end - ptr))
+        {
+            const char *scan = ptr;
+            const char *limit = end - sep_len;
+            for (; scan <= limit; ++scan)
+            {
+                if (memcmp(scan, sep, sep_len) == 0)
+                {
+                    found = scan;
+                    break;
+                }
+            }
+        }
 
         const char *token_end = found ? found : end;
+        size_t token_len = (size_t)(token_end - ptr);
 
-        lua_pushlstring(L, ptr, token_end - ptr); // Push token
+        lua_pushlstring(L, ptr, token_len); // Push token
 
         if (convert_nums)
         {
-            const char *s = lua_tostring(L, -1);
             // Simple check to avoid running full parser on obvious text
-            if (s[0] && (isdigit((unsigned char)s[0]) || s[0] == '-' || s[0] == '.'))
+            if (token_len > 0 && (isdigit((unsigned char)ptr[0]) || ptr[0] == '-' || ptr[0] == '.'))
             {
                 // Convert token at top of stack (-1)
-                internal_tonum(L, -1);
+                internal_tonum(L, -1, 0);
                 if (!lua_isnil(L, -1))
                 {
                     lua_remove(L, -2); // remove string, keep number
@@ -3904,28 +4001,34 @@ static int l_tostr(lua_State *L)
     }
 
     // 3. Handle string
-    if (lua_isstring(L, 1))
+    if (lua_type(L, 1) == LUA_TSTRING)
     {
         lua_pushvalue(L, 1);
         return 1;
     }
 
-    // 4. Handle Number with Hex Flag
-    // tostr(val, [hex_flag])
-    bool use_hex = false;
-    if (lua_gettop(L) >= 2)
+    // 4. Handle Number with Flags
+    // tostr(val, [flags])
+    int flags = 0;
+    if (lua_gettop(L) >= 2 && !lua_isnil(L, 2))
     {
         if (lua_isboolean(L, 2))
-            use_hex = lua_toboolean(L, 2);
+            flags = lua_toboolean(L, 2) ? 1 : 0;
         else
-        {
-            // Check generic flag (bit 0x1)
-            int flags = (int)lua_tonumber(L, 2);
-            use_hex = (flags & 1);
-        }
+            flags = (int)lua_tonumber(L, 2);
     }
 
-    if (use_hex)
+    if (flags & 2)
+    {
+        int32_t fixed = to_pico_fixed(L, 1);
+        char buf[4];
+        buf[0] = (char)(fixed & 0xFF);
+        buf[1] = (char)((fixed >> 8) & 0xFF);
+        buf[2] = (char)((fixed >> 16) & 0xFF);
+        buf[3] = (char)((fixed >> 24) & 0xFF);
+        lua_pushlstring(L, buf, 4);
+    }
+    else if (flags & 1)
     {
         double val = lua_tonumber(L, 1);
         // Convert to PICO-8 16.16 fixed point
@@ -3958,6 +4061,198 @@ static int l_type(lua_State *L)
         lua_pushstring(L, lua_typename(L, t));
     }
     return 1;
+}
+
+static int l_getmetatable(lua_State *L)
+{
+    luaL_checkany(L, 1);
+    if (!lua_getmetatable(L, 1))
+    {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    // If __metatable is set, return it instead of the real metatable.
+    lua_pushstring(L, "__metatable");
+    lua_rawget(L, -2);
+    if (!lua_isnil(L, -1))
+    {
+        return 1;
+    }
+
+    // Pop the nil __metatable; leave the real metatable on top.
+    lua_pop(L, 1);
+    return 1;
+}
+
+static int l_setmetatable(lua_State *L)
+{
+    int t = lua_type(L, 2);
+    luaL_checktype(L, 1, LUA_TTABLE);
+    luaL_argcheck(L, t == LUA_TNIL || t == LUA_TTABLE, 2, "nil or table expected");
+    if (luaL_getmetafield(L, 1, "__metatable"))
+    {
+        return luaL_error(L, "cannot change a protected metatable");
+    }
+    lua_settop(L, 2);
+    lua_setmetatable(L, 1);
+    return 1;
+}
+
+static int l_rawequal(lua_State *L)
+{
+    luaL_checkany(L, 1);
+    luaL_checkany(L, 2);
+    lua_pushboolean(L, lua_rawequal(L, 1, 2));
+    return 1;
+}
+
+static int l_rawlen(lua_State *L)
+{
+    int t = lua_type(L, 1);
+    luaL_argcheck(L, t == LUA_TTABLE || t == LUA_TSTRING, 1, "table or string expected");
+    lua_pushinteger(L, lua_rawlen(L, 1));
+    return 1;
+}
+
+static int l_rawget(lua_State *L)
+{
+    luaL_checktype(L, 1, LUA_TTABLE);
+    luaL_checkany(L, 2);
+    lua_settop(L, 2);
+    lua_rawget(L, 1);
+    return 1;
+}
+
+static int l_rawset(lua_State *L)
+{
+    luaL_checktype(L, 1, LUA_TTABLE);
+    luaL_checkany(L, 2);
+    luaL_checkany(L, 3);
+    lua_settop(L, 3);
+    lua_rawset(L, 1);
+    return 1;
+}
+
+static int l_select(lua_State *L)
+{
+    int n = lua_gettop(L);
+    if (lua_type(L, 1) == LUA_TSTRING && *lua_tostring(L, 1) == '#')
+    {
+        lua_pushinteger(L, n - 1);
+        return 1;
+    }
+
+    int i = luaL_checkint(L, 1);
+    if (i < 0)
+        i = n + i;
+    else if (i > n)
+        i = n;
+    luaL_argcheck(L, 1 <= i, 1, "index out of range");
+    return n - i;
+}
+
+static int l_zero_len(lua_State *L)
+{
+    lua_pushinteger(L, 0);
+    return 1;
+}
+
+static int l_string_len(lua_State *L)
+{
+    luaL_checkany(L, 1);
+    lua_len(L, 1);
+    return 1;
+}
+
+static int l_string_index(lua_State *L)
+{
+    if (lua_type(L, 2) == LUA_TNUMBER)
+    {
+        // string.sub(s, k, k)
+        lua_getglobal(L, "string");
+        if (lua_istable(L, -1))
+        {
+            lua_getfield(L, -1, "sub");
+            if (lua_isfunction(L, -1))
+            {
+                lua_pushvalue(L, 1);
+                lua_pushvalue(L, 2);
+                lua_pushvalue(L, 2);
+                lua_call(L, 3, 1);
+
+                size_t clen = 0;
+                const char *c = lua_tolstring(L, -1, &clen);
+                if (c && clen == 1 && c[0] >= '0' && c[0] <= '9')
+                {
+                    lua_pop(L, 2); // pop string table and char
+                    lua_pushinteger(L, (lua_Integer)(c[0] - '0'));
+                    return 1;
+                }
+
+                lua_remove(L, -2); // remove string table, keep char
+                return 1;
+            }
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
+        lua_pushnil(L);
+        return 1;
+    }
+
+    if (lua_type(L, 2) == LUA_TSTRING)
+    {
+        lua_getglobal(L, "string");
+        if (lua_istable(L, -1))
+        {
+            lua_pushvalue(L, 2);
+            lua_rawget(L, -2);
+            if (!lua_isnil(L, -1))
+            {
+                lua_remove(L, -2);
+                return 1;
+            }
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
+
+        const char *k = lua_tostring(L, 2);
+        if (k)
+        {
+            if (strcmp(k, "sub") == 0)
+            {
+                lua_getglobal(L, "string");
+                if (lua_istable(L, -1))
+                {
+                    lua_getfield(L, -1, "sub");
+                    lua_remove(L, -2);
+                    return 1;
+                }
+                lua_pop(L, 1);
+            }
+            else if (strcmp(k, "len") == 0)
+            {
+                lua_pushcfunction(L, l_string_len);
+                return 1;
+            }
+        }
+    }
+
+    lua_pushnil(L);
+    return 1;
+}
+
+static bool push_global_table(lua_State *L, const char *name)
+{
+    lua_getglobal(L, name);
+    if (lua_isnil(L, -1))
+    {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setglobal(L, name);
+    }
+    return lua_istable(L, -1);
 }
 
 static int l_foreach(lua_State *L)
@@ -4189,6 +4484,69 @@ static int l_inext(lua_State *L)
     return 2;
 }
 
+static int l_pairs_empty(lua_State *L)
+{
+    (void)L;
+    return 0;
+}
+
+static int l_pairsmeta(lua_State *L, const char *method, int iszero, lua_CFunction iter)
+{
+    // PICO-8 0.2.0 behavior: pairs(nil) returns an empty function
+    if (lua_isnil(L, 1))
+    {
+        lua_pushcfunction(L, l_pairs_empty);
+        return 1;
+    }
+
+    if (!luaL_getmetafield(L, 1, method))
+    {
+        luaL_checktype(L, 1, LUA_TTABLE);
+        lua_pushcfunction(L, iter);
+        lua_pushvalue(L, 1);
+        if (iszero)
+            lua_pushinteger(L, 0);
+        else
+            lua_pushnil(L);
+    }
+    else
+    {
+        lua_pushvalue(L, 1);
+        lua_call(L, 1, 3);
+    }
+    return 3;
+}
+
+static int l_next(lua_State *L)
+{
+    luaL_checktype(L, 1, LUA_TTABLE);
+    lua_settop(L, 2);
+    if (lua_next(L, 1))
+        return 2;
+    lua_pushnil(L);
+    return 1;
+}
+
+static int l_pairs(lua_State *L)
+{
+    return l_pairsmeta(L, "__pairs", 0, l_next);
+}
+
+static int l_ipairs_aux(lua_State *L)
+{
+    int i = luaL_checkint(L, 2);
+    luaL_checktype(L, 1, LUA_TTABLE);
+    i++;
+    lua_pushinteger(L, i);
+    lua_rawgeti(L, 1, i);
+    return lua_isnil(L, -1) ? 1 : 2;
+}
+
+static int l_ipairs(lua_State *L)
+{
+    return l_pairsmeta(L, "__ipairs", 1, l_ipairs_aux);
+}
+
 // --- SYSTEM STATE HELPERS ---
 static int l_sys_get_state(lua_State* L) {
     // 1. Time
@@ -4338,6 +4696,167 @@ static void register_boolean_ops(lua_State *L)
     lua_pop(L, 1); // pop metatable
 }
 
+static void apply_pico8_shim_bindings(lua_State *L)
+{
+    // Ensure core tables exist
+    push_global_table(L, "math");
+    lua_pop(L, 1);
+    push_global_table(L, "string");
+    lua_pop(L, 1);
+    push_global_table(L, "table");
+    lua_pop(L, 1);
+
+    // Aliases: t(), sub(), len()
+    lua_getglobal(L, "t");
+    bool has_t = !lua_isnil(L, -1);
+    lua_pop(L, 1);
+    if (!has_t) {
+        lua_getglobal(L, "time");
+        if (!lua_isnil(L, -1)) {
+            lua_setglobal(L, "t");
+        } else {
+            lua_pop(L, 1);
+        }
+    }
+
+    lua_getglobal(L, "sub");
+    bool need_sub = lua_isnil(L, -1);
+    lua_pop(L, 1);
+
+    lua_getglobal(L, "len");
+    bool need_len = lua_isnil(L, -1);
+    lua_pop(L, 1);
+
+    if ((need_sub || need_len) && push_global_table(L, "string")) {
+        if (need_sub) {
+            lua_getfield(L, -1, "sub");
+            if (!lua_isnil(L, -1)) {
+                lua_setglobal(L, "sub");
+            } else {
+                lua_pop(L, 1);
+            }
+        }
+
+        if (need_len) {
+            lua_getfield(L, -1, "len");
+            if (!lua_isnil(L, -1)) {
+                lua_setglobal(L, "len");
+            } else {
+                lua_pop(L, 1);
+            }
+        }
+        lua_pop(L, 1);
+    } else if (need_sub || need_len) {
+        lua_pop(L, 1);
+    }
+
+    // math.atan2 alias
+    if (push_global_table(L, "math")) {
+        lua_getfield(L, -1, "atan2");
+        bool has_atan2 = !lua_isnil(L, -1);
+        lua_pop(L, 1);
+        if (!has_atan2) {
+            lua_getglobal(L, "atan2");
+            if (!lua_isnil(L, -1)) {
+                lua_setfield(L, -2, "atan2");
+            } else {
+                lua_pop(L, 1);
+            }
+        }
+        lua_pop(L, 1);
+    } else {
+        lua_pop(L, 1);
+    }
+
+    // loadstring alias
+    lua_getglobal(L, "loadstring");
+    bool has_loadstring = !lua_isnil(L, -1);
+    lua_pop(L, 1);
+    if (!has_loadstring) {
+        lua_getglobal(L, "p8_load");
+        if (!lua_isnil(L, -1)) {
+            lua_setglobal(L, "loadstring");
+        } else {
+            lua_pop(L, 1);
+        }
+    }
+
+    // mapdraw alias
+    lua_getglobal(L, "mapdraw");
+    bool has_mapdraw = !lua_isnil(L, -1);
+    lua_pop(L, 1);
+    if (!has_mapdraw) {
+        lua_getglobal(L, "map");
+        if (!lua_isnil(L, -1)) {
+            lua_setglobal(L, "mapdraw");
+        } else {
+            lua_pop(L, 1);
+        }
+    }
+
+    // Button glyph globals
+    static const unsigned char kBtnGlyph0[] = {0xC3, 0xA2, 0xC2, 0xAC, 0xE2, 0x80, 0xA6, 0xC3, 0xAF, 0xC2, 0xB8, 0xC2, 0x8F};
+    static const unsigned char kBtnGlyph1[] = {0xC3, 0xA2, 0xC5, 0xBE, 0xC2, 0xA1, 0xC3, 0xAF, 0xC2, 0xB8, 0xC2, 0x8F};
+    static const unsigned char kBtnGlyph2[] = {0xC3, 0xA2, 0xC2, 0xAC, 0xE2, 0x80, 0xA0, 0xC3, 0xAF, 0xC2, 0xB8, 0xC2, 0x8F};
+    static const unsigned char kBtnGlyph3[] = {0xC3, 0xA2, 0xC2, 0xAC, 0xE2, 0x80, 0xA1, 0xC3, 0xAF, 0xC2, 0xB8, 0xC2, 0x8F};
+    static const unsigned char kBtnGlyph4[] = {0xC3, 0xB0, 0xC5, 0xB8, 0xE2, 0x80, 0xA6, 0xC2, 0xBE, 0xC3, 0xAF, 0xC2, 0xB8, 0xC2, 0x8F};
+    static const unsigned char kBtnGlyph5[] = {0xC3, 0xA2, 0xC2, 0x9D, 0xC5, 0xBD};
+
+    lua_pushglobaltable(L);
+    lua_pushlstring(L, (const char *)kBtnGlyph0, sizeof(kBtnGlyph0));
+    lua_pushinteger(L, 0);
+    lua_rawset(L, -3);
+    lua_pushlstring(L, (const char *)kBtnGlyph1, sizeof(kBtnGlyph1));
+    lua_pushinteger(L, 1);
+    lua_rawset(L, -3);
+    lua_pushlstring(L, (const char *)kBtnGlyph2, sizeof(kBtnGlyph2));
+    lua_pushinteger(L, 2);
+    lua_rawset(L, -3);
+    lua_pushlstring(L, (const char *)kBtnGlyph3, sizeof(kBtnGlyph3));
+    lua_pushinteger(L, 3);
+    lua_rawset(L, -3);
+    lua_pushlstring(L, (const char *)kBtnGlyph4, sizeof(kBtnGlyph4));
+    lua_pushinteger(L, 4);
+    lua_rawset(L, -3);
+    lua_pushlstring(L, (const char *)kBtnGlyph5, sizeof(kBtnGlyph5));
+    lua_pushinteger(L, 5);
+    lua_rawset(L, -3);
+
+    unsigned char c = 0;
+    c = 139; lua_pushlstring(L, (const char *)&c, 1); lua_pushinteger(L, 0); lua_rawset(L, -3);
+    c = 145; lua_pushlstring(L, (const char *)&c, 1); lua_pushinteger(L, 1); lua_rawset(L, -3);
+    c = 148; lua_pushlstring(L, (const char *)&c, 1); lua_pushinteger(L, 2); lua_rawset(L, -3);
+    c = 131; lua_pushlstring(L, (const char *)&c, 1); lua_pushinteger(L, 3); lua_rawset(L, -3);
+    c = 142; lua_pushlstring(L, (const char *)&c, 1); lua_pushinteger(L, 4); lua_rawset(L, -3);
+    c = 151; lua_pushlstring(L, (const char *)&c, 1); lua_pushinteger(L, 5); lua_rawset(L, -3);
+    lua_pop(L, 1);
+
+    // __len for nil and 0
+    lua_pushinteger(L, 0);
+    lua_newtable(L);
+    lua_pushcfunction(L, l_zero_len);
+    lua_setfield(L, -2, "__len");
+    lua_setmetatable(L, -2);
+    lua_pop(L, 1);
+
+    lua_pushnil(L);
+    lua_newtable(L);
+    lua_pushcfunction(L, l_zero_len);
+    lua_setfield(L, -2, "__len");
+    lua_setmetatable(L, -2);
+    lua_pop(L, 1);
+
+    // String metatable __index override
+    lua_pushliteral(L, "");
+    if (lua_getmetatable(L, -1) == 0) {
+        lua_newtable(L);
+    }
+    lua_pushcfunction(L, l_string_index);
+    lua_setfield(L, -2, "__index");
+    lua_setmetatable(L, -2);
+    lua_pop(L, 1);
+}
+
 void register_pico8_api(lua_State *L)
 {
     lua_getglobal(L, "__pico8_vm_ptr");
@@ -4439,6 +4958,13 @@ void register_pico8_api(lua_State *L)
     reg(L, "sub", l_sub);
     reg(L, "split", l_split);
     reg(L, "type", l_type);
+    reg(L, "getmetatable", l_getmetatable);
+    reg(L, "setmetatable", l_setmetatable);
+    reg(L, "rawequal", l_rawequal);
+    reg(L, "rawlen", l_rawlen);
+    reg(L, "rawget", l_rawget);
+    reg(L, "rawset", l_rawset);
+    reg(L, "select", l_select);
     gbaLog("[BOOT] REG STR OK");
 
     // --- Tables ---
@@ -4449,6 +4975,9 @@ void register_pico8_api(lua_State *L)
     reg(L, "all", l_all);
     reg(L, "all_iter", l_all_iter);
     reg(L, "foreach", l_foreach);
+    reg(L, "pairs", l_pairs);
+    reg(L, "ipairs", l_ipairs);
+    reg(L, "next", l_next);
     gbaLog("[BOOT] REG TABLE OK");
 
     // --- Memory ---
@@ -4525,23 +5054,12 @@ void register_pico8_api(lua_State *L)
     lua_pop(L, 1);
     gbaLog("[BOOT] REG PACK OK");
 
+    apply_pico8_shim_bindings(L);
+
     start_ms = l_millis(L);
 
     const char *shim = R"LUASHIM(
     local _G = _G
-    if not _G.math then _G.math = {} end
-    if not _G.string then _G.string = {} end
-    if not _G.table then _G.table = {} end
-
-    _G.t = time
-    _G.sub = string.sub
-    _G.len = string.len
-    if _G.atan2 and not _G.math.atan2 then _G.math.atan2 = _G.atan2 end
-
-    _G["â¬…ï¸"] = 0; _G["âž¡ï¸"] = 1; _G["â¬†ï¸"] = 2; _G["â¬‡ï¸"] = 3; _G["ðŸ…¾ï¸"] = 4; _G["âŽ"] = 5
-    _G[string.char(139)] = 0; _G[string.char(145)] = 1
-    _G[string.char(148)] = 2; _G[string.char(131)] = 3
-    _G[string.char(142)] = 4; _G[string.char(151)] = 5
 
     local system_libs = {}
     if _G then system_libs[_G] = true end
@@ -4702,25 +5220,7 @@ void register_pico8_api(lua_State *L)
        collectgarbage()
     end
 
-    local dbg = debug
-    if dbg and dbg.setmetatable then
-        dbg.setmetatable(0, { __len=function() return 0 end })
-        dbg.setmetatable(nil, { __len=function() return 0 end })
-    end
-    local smt = getmetatable(""); smt.__index = function(s, k)
-        if type(k)=="number" then 
-            local char = string.sub(s,k,k)
-            -- Attempt conversion. If it's a number ("0"-"9"), return number.
-            -- If it's "," or "a", return string.
-            local n = tonumber(char)
-            if n then return n end 
-            return char 
-        end
-        if string[k] then return string[k] end
-        if k=="sub" then return string.sub end
-        if k=="len" then return function(z) return #z end end
-    end
-    if p8_load then _G.loadstring = p8_load end
+
     )LUASHIM";
  
     const char *shim_src = shim;

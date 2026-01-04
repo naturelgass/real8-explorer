@@ -41,55 +41,74 @@ struct BitReader
 // LEGACY (:c:) DECOMPRESSOR
 // --------------------------------------------------------------------------
 
-// Official PICO-8 Legacy LUT
-// Note: Index 0 ('^') is skipped in logic (used for raw byte mode)
+// Legacy (":c:") literal table and decompression behavior.
+// Matches Lexaloffle's reference implementation (p8_compress.c: decompress_mini).
+//
+//  - Values 0..59 are literals (LITERALS=60)
+//      * 0 is an escape: read next byte as a "rare" literal
+//      * 1..59 map to literal[val]
+//  - Values 60..255 are LZ blocks:
+//      * block_offset = (val - 60) * 16 + (next_byte & 0x0f)
+//      * block_length = (next_byte >> 4) + 2
+//
+// Note: the first '^' is a padding character so that literal[1] == '\n'.
+// (literal[0] is intentionally unused because code 0 is the escape.)
 static const char *legacy_lut = "^\n 0123456789abcdefghijklmnopqrstuvwxyz!#%(){}[]<>+=/*:;.,~_";
 
-// Legacy injected code strings
-#define FUTURE_CODE "if(_update60)_update=function()_update60()_update60()end"
-#define FUTURE_CODE2 "if(_update60)_update=function()_update60()_update_buttons()_update60()end"
+// Removed from end of decompressed if it exists (injected by newer Pico-8 versions)
+// to maintain forwards compatibility with old file versions.
+static const char *FUTURE_CODE  = "if(_update60)_update=function()_update60()_update60()end";
+static const char *FUTURE_CODE2 = "if(_update60)_update=function()_update60()_update_buttons()_update60()end";
 
 static int decompress_legacy(IReal8Host *host, const uint8_t *input, int in_len, char *output, int out_max)
 {
+    (void)host; // keep signature consistent
     const uint8_t *in = input;
     const uint8_t *in_end = input + in_len;
     uint8_t *out_start = (uint8_t *)output;
     uint8_t *out = out_start;
 
-    // 1. Validate Header (:c:\0)
+    // 1. Validate header (:c:\0)
     // Header is 4 bytes.
     if (in_len < 8)
         return -1;
-    // We assume the caller checked the signature, but we skip it here.
+    if (in[0] != ':' || in[1] != 'c' || in[2] != ':' || in[3] != 0)
+        return -1;
     in += 4;
 
-    // 2. Read Uncompressed Length (2 bytes, Big Endian)
-    int val_high = *in++;
-    int val_low = *in++;
-    int target_len = (val_high * 256) + val_low;
-
-    // 3. Read Compressed Length (2 bytes - unused in official decompressor logic)
+    // 2. Read uncompressed length (2 bytes, big-endian)
+    int target_len = (in[0] << 8) | in[1];
     in += 2;
 
-    if (target_len > out_max - 1)
-        target_len = out_max - 1;
+    // 3. Read compressed length (2 bytes) -- present for robust/safe decompression.
+    // The reference implementation currently ignores it.
+    in += 2;
 
-    // Clear output buffer
+    // Reference behavior: if len doesn't fit the output buffer, treat as corrupt.
+    // We keep one extra byte available for a trailing '\0' left by the memset.
+    if (target_len > out_max - 1)
+        return -1;
+
+    // Reference behavior: clear whole output buffer first.
     memset(output, 0, out_max);
 
-    // 4. Decompression Loop
-    while (out < out_start + target_len && in < in_end)
+    uint8_t *out_end = out_start + target_len;
+
+    // 4. Decompression loop
+    while (out < out_end)
     {
+        if (in >= in_end)
+            return -1; // truncated/corrupt input
+
         uint8_t val = *in++;
 
-        // Literal Mode (< 60)
-        if (val < 60)
+        // literal
+        if (val < 0x3c)
         {
             if (val == 0)
             {
-                // Rare literal: Read next byte raw
                 if (in >= in_end)
-                    break; // Existing check is good
+                    return -1;
                 *out++ = *in++;
             }
             else
@@ -97,72 +116,52 @@ static int decompress_legacy(IReal8Host *host, const uint8_t *input, int in_len,
                 *out++ = (uint8_t)legacy_lut[val];
             }
         }
-        // Block Copy Mode (LZ)
         else
         {
-            // SAFETY Check if we have the 2nd byte available
+            // block
             if (in >= in_end)
-                break;
+                return -1;
 
+            int block_offset = (val - 0x3c) * 16;
             uint8_t val2 = *in++;
-
-            // Calculate Offset and Length
-            int block_offset = (val - 60) * 16 + (val2 & 0x0F);
+            block_offset += (val2 & 0x0f);
             int block_length = (val2 >> 4) + 2;
 
-            uint8_t *src = out - block_offset;
+            // Corrupt input: offset points before the beginning of the output stream.
+            if (block_offset <= 0 || out - block_offset < out_start)
+                return -1;
 
-            // Safety Check
-            if (src < out_start)
+            // Important: use forward copy semantics (LZ/RLE), not memmove.
+            for (int i = 0; i < block_length && out < out_end; i++)
             {
-                // In corrupted carts, this might happen. Treat as 0 or bail.
-                // We fill with 0 to match safe behavior.
-                for (int i = 0; i < block_length; ++i)
-                {
-                    if (out >= out_start + out_max)
-                        break;
-                    *out++ = 0;
-                }
-            }
-            else
-            {
-                // Copy loop (Must be byte-by-byte for RLE overlaps)
-                for (int i = 0; i < block_length; ++i)
-                {
-                    if (out >= out_start + out_max)
-                        break;
-                    *out++ = *src++;
-                }
+                *out = *(out - block_offset);
+                out++;
             }
         }
     }
 
-    // 5. Strip Future Code
-    // PICO-8 0.1.8+ injects code at the end for 60fps support on older versions.
-    // The decompressor must remove this to restore the original code exactly.
     int current_len = (int)(out - out_start);
 
-    auto check_and_strip = [&](const char *code_str)
-    {
-        int code_len = strlen(code_str);
-        if (current_len >= code_len)
+    // 5. Remove injected compatibility code if it exists at the end.
+    // This mirrors the reference implementation.
+    auto strip_tail = [&](const char *tail) {
+        char *p = strstr(output, tail);
+        if (!p)
+            return;
+        size_t out_len = strnlen(output, (size_t)out_max);
+        size_t tail_len = strlen(tail);
+        if ((size_t)(p - output) + tail_len == out_len)
         {
-            char *end_ptr = (char *)out_start + current_len - code_len;
-            if (memcmp(end_ptr, code_str, code_len) == 0)
-            {
-                *end_ptr = 0; // Truncate
-                current_len -= code_len;
-                out -= code_len;
-            }
+            out = out_start + (p - output);
+            *out = 0;
         }
     };
+    strip_tail(FUTURE_CODE);
+    strip_tail(FUTURE_CODE2);
 
-    check_and_strip(FUTURE_CODE);
-    check_and_strip(FUTURE_CODE2);
+    current_len = (int)(out - out_start);
 
-    // Null terminate
-    if (current_len < out_max)
-        out_start[current_len] = 0;
+    // Buffer was memset to 0, so it's already null-terminated at [target_len].
 
     // Log preview
     /*
