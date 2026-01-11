@@ -288,8 +288,12 @@ Real8VM::~Real8VM()
     if (L) { lua_close(L); L = nullptr; }
 #if defined(__GBA__)
     fb = nullptr;
+    depth_fb = nullptr;
+    stereo_layers = nullptr;
 #else
     if (fb) { P8_FREE(fb); fb = nullptr; }
+    if (depth_fb) { P8_FREE(depth_fb); depth_fb = nullptr; }
+    if (stereo_layers) { P8_FREE(stereo_layers); stereo_layers = nullptr; }
 #endif
     if (ram) { P8_FREE(ram); ram = nullptr; }
     if (rom && rom_owned) { P8_FREE(rom); }
@@ -365,9 +369,51 @@ bool Real8VM::initMemory()
         if (!fb) return false;
     }
 
+
+#if !defined(__GBA__)
+    // 3b. Stereo depth buffer (one byte per pixel; stores layer index 0..14 for -7..+7)
+    if (!depth_fb) {
+        depth_fb = (uint8_t (*)[RAW_WIDTH])calloc(RAW_WIDTH * HEIGHT, 1);
+        if (!depth_fb) return false;
+    }
+
+    // 3c. Optional stereo layers (-7..+7 buckets). Each layer stores color indices (0..15),
+    // with 0xFF meaning "unset" for that layer. The screen-plane layer (bucket 0) is initialized to the current
+    // framebuffer clear (default 0).
+    if (!stereo_layers) {
+        const size_t layer_rows = (size_t)HEIGHT * (size_t)STEREO_LAYER_COUNT;
+        stereo_layers = (uint8_t (*)[RAW_WIDTH])calloc(layer_rows * RAW_WIDTH, 1);
+        if (!stereo_layers) return false;
+        // Mark all layers "unset" and provide a sane default background in layer 0.
+        std::memset(&stereo_layers[0][0], 0xFF, layer_rows * RAW_WIDTH);
+        for (int y = 0; y < HEIGHT; ++y) {
+            std::memset(stereo_layers[STEREO_BUCKET_BIAS * HEIGHT + y], 0, (size_t)RAW_WIDTH);
+        }
+    }
+#else
+    // Stereoscopic depth/layers disabled on GBA build.
+    depth_fb = nullptr;
+    stereo_layers = nullptr;
+#endif
+
     dirty_x0 = 0; dirty_y0 = 0;
     dirty_x1 = 127; dirty_y1 = 127;
     return true;
+}
+
+
+void Real8VM::clearDepthBuffer(uint8_t bucket)
+{
+#if !defined(__GBA__)
+    if (!depth_fb) return;
+    int8_t b = (int8_t)bucket;
+    if (b < STEREO_BUCKET_MIN) b = STEREO_BUCKET_MIN;
+    if (b > STEREO_BUCKET_MAX) b = STEREO_BUCKET_MAX;
+    const uint8_t layer_idx = (uint8_t)(b + STEREO_BUCKET_BIAS);
+    std::memset(&depth_fb[0][0], layer_idx, (size_t)RAW_WIDTH * HEIGHT);
+#else
+    (void)bucket;
+#endif
 }
 
 void Real8VM::rebootVM()
@@ -967,6 +1013,20 @@ bool Real8VM::loadGame(const GameData& game)
                 return false;
             }
             if (useGbaInitWatchdog && host) host->log("[BOOT] _init ok");
+
+            // ------------------------------------------------------------------
+#if !defined(__GBA__)
+            // Stereo handshake (GPIO 0x5FF0): if cart pokes 0xA0 during _init,
+            // automatically enable stereoscopic output.
+            // ------------------------------------------------------------------
+            if (!stereoscopic && ram) {
+                const uint8_t v = ram[STEREO_GPIO_ADDR];
+                if ((v & 0xF0) == 0xA0) {
+                    stereoscopic = true;
+                    if (host) host->log("[VM] Stereo handshake detected (0x%02X @ 0x%04X). Enabling stereoscopic.", v, (unsigned)STEREO_GPIO_ADDR);
+                }
+            }
+#endif
         }
         cacheLuaRefs();
     } else {
@@ -1156,19 +1216,88 @@ void Real8VM::show_frame()
             }
         }
 
-        // 2. Fast Blit (8-bit FB -> 32-bit XRGB)
-        uint32_t* dest = screen_buffer;
         
-        for (int y = 0; y < 128; y++) {
-            const uint8_t* src_row = fb[y];
-            
-            // Unrolling this loop helps slightly, but compiler usually handles it.
-            // We map: Pixel(0-15) -> DrawMap -> PaletteLUT(RGBA)
-            for (int x = 0; x < 128; x++) {
-                *dest++ = palette_lut[draw_map[src_row[x] & 0x0F]];
+#if !defined(__GBA__)
+// 2. Convert FB -> 32-bit XRGB (or stereo anaglyph when enabled)
+const bool stereo_active = (stereoscopic && !isShellUI && stereo_layers != nullptr);
+if (!stereo_active) {
+    uint32_t* dest = screen_buffer;
+    for (int y = 0; y < 128; y++) {
+        const uint8_t* src_row = fb[y];
+        for (int x = 0; x < 128; x++) {
+            *dest++ = palette_lut[draw_map[src_row[x] & 0x0F]];
+        }
+    }
+    return; // Libretro frontend handles the actual flip
+}
+
+// Stereo: forward-map each depth bucket layer into left/right eye destinations.
+// This avoids "black hole" artifacts caused by disocclusion when shifting a single flattened framebuffer.
+// Left eye -> RED, Right eye -> CYAN (G+B).
+// Bucket-to-pixel mapping: each depth bucket step = 1 pixel of disparity (bucket 7 -> 7px).
+static uint8_t z_left[128 * 128];
+static uint8_t z_right[128 * 128];
+std::memset(screen_buffer, 0, 128u * 128u * sizeof(uint32_t));
+std::memset(z_left, 0, sizeof(z_left));
+std::memset(z_right, 0, sizeof(z_right));
+
+// NOTE: With signed buckets (-7..+7), we want both negative and positive buckets
+// to be visible and participate in occlusion. Using the raw layer index as a Z
+// value would cause bucket 0 (layer bias) to overwrite all negative buckets.
+// Instead, use |bucket| as the per-pixel Z, so bucket 0 is the far background
+// plane and increasing magnitude (regardless of sign) comes closer.
+for (int li = 0; li < STEREO_LAYER_COUNT; ++li) {
+    const int bucket = li - STEREO_BUCKET_BIAS;
+    const int shift = bucket; // 1px per bucket step (signed)
+    const uint8_t zval = (uint8_t)(bucket < 0 ? -bucket : bucket); // |bucket| in 0..7
+    for (int y = 0; y < 128; ++y) {
+        const uint8_t* src_row = stereo_layers[li * 128 + y];
+        for (int x = 0; x < 128; ++x) {
+            const uint8_t src_idx = src_row[x];
+            if (src_idx == 0xFF) continue;
+            const uint32_t rgb = palette_lut[draw_map[src_idx & 0x0F]];
+            const uint8_t r = (rgb >> 16) & 0xFF;
+            const uint8_t g = (rgb >> 8) & 0xFF;
+            const uint8_t bb = rgb & 0xFF;
+            const uint8_t ylum = (uint8_t)((77u * r + 150u * g + 29u * bb) >> 8);
+
+            const int lx = x + shift;
+            if ((unsigned)lx < 128u) {
+                const int i = y * 128 + lx;
+                if (zval >= z_left[i]) {
+                    z_left[i] = zval;
+                    const uint32_t cur = screen_buffer[i];
+                    screen_buffer[i] = (cur & 0x0000FFFFu) | ((uint32_t)ylum << 16);
+                }
+            }
+
+            const int rx = x - shift;
+            if ((unsigned)rx < 128u) {
+                const int i = y * 128 + rx;
+                if (zval >= z_right[i]) {
+                    z_right[i] = zval;
+                    const uint32_t cur = screen_buffer[i];
+                    screen_buffer[i] = (cur & 0x00FF0000u) | ((uint32_t)ylum << 8) | (uint32_t)ylum;
+                }
             }
         }
-        return; // Libretro frontend handles the actual flip
+    }
+}
+
+return; // Libretro frontend handles the actual flip
+#else
+// 2. Convert FB -> 32-bit XRGB (stereo disabled on GBA)
+    uint32_t* dest = screen_buffer;
+    for (int y = 0; y < 128; y++) {
+        const uint8_t* src_row = fb[y];
+        for (int x = 0; x < 128; x++) {
+            *dest++ = palette_lut[draw_map[src_row[x] & 0x0F]];
+        }
+    }
+    return; // Libretro frontend handles the actual flip
+
+#endif
+
     }
 #endif
 
@@ -1192,12 +1321,154 @@ void Real8VM::show_frame()
         palette_map = final_palette;
     }
 
+    
+#if !defined(__GBA__)
+    const bool stereo_active = (stereoscopic && !isShellUI && stereo_layers != nullptr);
+
+    // 3DS host supports native stereoscopic output (separate left/right views).
+    // When running on 3DS, let the host present from vm->stereo_layers directly
+    // instead of building an anaglyph image here.
+    if (stereo_active && host && std::strcmp(host->getPlatform(), "3DS") == 0) {
+        constexpr int kStereoMaxShift = 7;
+        int sx0 = dirty_x0 - kStereoMaxShift; if (sx0 < 0) sx0 = 0;
+        int sy0 = dirty_y0; if (sy0 < 0) sy0 = 0;
+        int sx1 = dirty_x1 + kStereoMaxShift; if (sx1 > 127) sx1 = 127;
+        int sy1 = dirty_y1; if (sy1 > 127) sy1 = 127;
+
+        if (alt_fb) {
+            host->flipScreens(alt_fb, fb, palette_map);
+        } else {
+            host->flipScreenDirty(fb, palette_map, sx0, sy0, sx1, sy1);
+        }
+
+        dirty_x0 = WIDTH; dirty_y0 = HEIGHT; dirty_x1 = -1; dirty_y1 = -1;
+        return;
+    }
+
+    if (!stereo_active) {
+        if (alt_fb) {
+            host->flipScreens(alt_fb, fb, palette_map);
+        } else {
+            host->flipScreenDirty(fb, palette_map, dirty_x0, dirty_y0, dirty_x1, dirty_y1);
+        }
+    } else {
+        // Build a true-color anaglyph frame (0x00RRGGBB per pixel).
+        // Bucket-to-pixel mapping: each depth bucket step = 1 pixel of disparity.
+        constexpr int kStereoMaxShift = 7;
+        static uint32_t stereo_xrgb[128 * 128];
+        static uint8_t z_left[128 * 128];
+        static uint8_t z_right[128 * 128];
+        std::memset(stereo_xrgb, 0, sizeof(stereo_xrgb));
+        std::memset(z_left, 0, sizeof(z_left));
+        std::memset(z_right, 0, sizeof(z_right));
+
+        // Build draw_map from screen palette (0x5F10) for 0..15 -> 0..31.
+        uint8_t draw_map[16];
+        for (int i = 0; i < 16; ++i) {
+            uint8_t col = palette_map[i];
+            if (col >= 128 && col <= 143) draw_map[i] = 16 + (col - 128);
+            else draw_map[i] = col & 0x1F;
+        }
+
+        // Use |bucket| as Z for occlusion so negative buckets are not overwritten by bucket 0.
+        for (int li = 0; li < STEREO_LAYER_COUNT; ++li) {
+            const int bucket = li - STEREO_BUCKET_BIAS;
+            const int shift = bucket; // 1px per bucket step (signed)
+            const uint8_t zval = (uint8_t)(bucket < 0 ? -bucket : bucket); // |bucket| in 0..7
+            for (int y = 0; y < 128; ++y) {
+                const uint8_t* src_row = stereo_layers[li * 128 + y];
+                for (int x = 0; x < 128; ++x) {
+                    const uint8_t src_idx = src_row[x];
+                    if (src_idx == 0xFF) continue;
+                    const uint8_t pal32 = draw_map[src_idx & 0x0F];
+                    const uint8_t* pc = Real8Gfx::PALETTE_RGB[pal32];
+                    const uint8_t r = pc[0], g = pc[1], bb = pc[2];
+                    const uint8_t ylum = (uint8_t)((77u * r + 150u * g + 29u * bb) >> 8);
+
+                    const int lx = x + shift;
+                    if ((unsigned)lx < 128u) {
+                        const int i = y * 128 + lx;
+                        if (zval >= z_left[i]) {
+                            z_left[i] = zval;
+                            stereo_xrgb[i] = (stereo_xrgb[i] & 0x0000FFFFu) | ((uint32_t)ylum << 16);
+                        }
+                    }
+
+                    const int rx = x - shift;
+                    if ((unsigned)rx < 128u) {
+                        const int i = y * 128 + rx;
+                        if (zval >= z_right[i]) {
+                            z_right[i] = zval;
+                            stereo_xrgb[i] = (stereo_xrgb[i] & 0x00FF0000u) | ((uint32_t)ylum << 8) | (uint32_t)ylum;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Expand dirty rect to include disparity shifts.
+        int sx0 = dirty_x0 - kStereoMaxShift; if (sx0 < 0) sx0 = 0;
+        int sy0 = dirty_y0; if (sy0 < 0) sy0 = 0;
+        int sx1 = dirty_x1 + kStereoMaxShift; if (sx1 > 127) sx1 = 127;
+        int sy1 = dirty_y1; if (sy1 > 127) sy1 = 127;
+
+        // Try true-color host present first (best quality).
+        bool presented = false;
+        presented = host->flipScreenRGBADirty(stereo_xrgb, 128, 128, sx0, sy0, sx1, sy1);
+        if (!presented) {
+            presented = host->flipScreenRGBA(stereo_xrgb, 128, 128);
+        }
+
+        if (!presented) {
+            // Fallback: quantize into a 16-color palette so stereo still works on hosts without true-color support.
+            static uint8_t stereo_fb[128][128];
+            static uint8_t stereo_palmap[16];
+
+            // Fixed 16-entry palette (indices into the 32-color pico palette) biased toward red/cyan + neutrals.
+            const uint8_t fixed32[16] = {
+                0, 2, 8, 14, 9, 10,  // blacks/reds/orange/yellow
+                1, 12, 11, 13,       // blues/greens/light blue
+                5, 6, 7, 15, 3, 4    // grays/white/pink/green/brown
+            };
+            for (int i = 0; i < 16; ++i) stereo_palmap[i] = fixed32[i];
+
+            // Precompute palette RGB for distance match.
+            uint8_t pr[16], pg[16], pb2[16];
+            for (int i = 0; i < 16; ++i) {
+                const uint8_t* c = Real8Gfx::PALETTE_RGB[fixed32[i] & 31];
+                pr[i] = c[0]; pg[i] = c[1]; pb2[i] = c[2];
+            }
+
+            for (int y = 0; y < 128; ++y) {
+                for (int x = 0; x < 128; ++x) {
+                    const uint32_t rgb = stereo_xrgb[y * 128 + x];
+                    const int r = (rgb >> 16) & 0xFF;
+                    const int g = (rgb >> 8) & 0xFF;
+                    const int b = rgb & 0xFF;
+                    int best = 0;
+                    int bestd = 1 << 30;
+                    for (int i = 0; i < 16; ++i) {
+                        int dr = r - pr[i];
+                        int dg = g - pg[i];
+                        int db = b - pb2[i];
+                        int d = dr*dr + dg*dg + db*db;
+                        if (d < bestd) { bestd = d; best = i; }
+                    }
+                    stereo_fb[y][x] = (uint8_t)best;
+                }
+            }
+
+            host->flipScreenDirty(stereo_fb, stereo_palmap, sx0, sy0, sx1, sy1);
+        }
+    }
+#else
+    // GBA build: stereoscopic output disabled to save IWRAM.
     if (alt_fb) {
         host->flipScreens(alt_fb, fb, palette_map);
     } else {
         host->flipScreenDirty(fb, palette_map, dirty_x0, dirty_y0, dirty_x1, dirty_y1);
     }
-
+#endif
     dirty_x0 = WIDTH; dirty_y0 = HEIGHT; dirty_x1 = -1; dirty_y1 = -1;
 
 }

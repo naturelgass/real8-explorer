@@ -10,7 +10,9 @@
 #include <string.h>
 
 #define lvm_c
-#define LUA_CORE
+#if defined(__GBA__) || defined(__3DS__)
+  #define LUA_CORE
+#endif
 
 #include "lua.h"
 
@@ -959,7 +961,7 @@ void luaV_execute (lua_State *L) {
 }
 
 #if LUA_GBA_BASELINE_JIT && defined(__GNUC__)
-#if defined(__GBA__) && defined(LUA_GBA_JIT_IWRAM)
+#if defined(__GBA__) || defined(__3DS__) && defined(LUA_GBA_JIT_IWRAM)
 #define LUA_GBA_IWRAM_CODE __attribute__((section(".iwram"), long_call))
 #else
 #define LUA_GBA_IWRAM_CODE

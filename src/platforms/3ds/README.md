@@ -47,7 +47,7 @@ REAL-8 Explorer for Nintendo 3DS is the citro2d/citro3d host for the Real8 VM + 
 | --- | --- |
 | Storage | Auto-creates `real8`, `config`, `saves`, `mods`, and `screenshots` folders on the SD card |
 | Config seeding | Copies `wallpaper.png` and `gamesrepo.txt` from RomFS if missing |
-| Repo downloads | HTTP/HTTPS downloads via HTTPC with redirect handling |
+| Repo downloads | HTTP/HTTPS downloads via 3ds-curl (libcurl) |
 | Logging | Console logs plus `sdmc:/real8/log.txt` for important errors |
 
 ## Supported cart formats
@@ -74,27 +74,33 @@ REAL-8 Explorer for Nintendo 3DS is the citro2d/citro3d host for the Real8 VM + 
 | --- | --- |
 | devkitPro + devkitARM | 3DS toolchain and libctru |
 | 3ds-dev | citro2d/citro3d + 3DS libraries |
+| 3ds-curl | libcurl for HTTPS support |
 | 3dstools | `3dstool`, `tex3ds` |
 | bannertool + makerom | Required for CIA builds |
 
 ## Toolchain setup (devkitPro)
 
-1) Install devkitPro (includes MSYS2):
+1) Install devkitPro (includes MINGW64):
    https://devkitpro.org/wiki/Getting_Started
 
-2) Open the devkitPro MSYS2 shell:
-   `C:\msys64\msys2.exe`
+2) Install official MSYS2:
+   https://www.msys2.org/
 
-3) Update and install the 3DS packages:
+3) Open the devkitPro MINGW64 shell:
+   `C:\msys64\mingw64.exe`
+
+4) Update and install the 3DS packages:
 
 ```sh
 pacman -Syu
-pacman -S --needed 3ds-dev 3dstools bannertool makerom
+pacman -S --needed 3ds-dev 3ds-curl 3dstools bannertool devkitarm-rules makerom
 ```
 
-4) Ensure your environment has `DEVKITARM` set:
+5) Ensure your environment has `DEVKITARM` set:
 
 ```sh
+DEVKITPRO=c:/devkitPro
+DEVKITARM=$DEVKITPRO/devkitARM
 echo $DEVKITARM
 ```
 

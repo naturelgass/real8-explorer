@@ -38,6 +38,19 @@ CUSTOM_SKIN_IMG := custom_skin_img.bin
 CUSTOM_SKIN_PAL := custom_skin_pal.bin
 
 #---------------------------------------------------------------------------------
+# Template ROM build (for standalone Pico2GBA patcher)
+#
+# The template ROM embeds a placeholder cart_blob.bin where CartBlobHeader::comp_size
+# is used as a *payload slot capacity*. Pico2GBA can then patch carts into the ROM
+# without requiring devkitARM/make at runtime.
+#
+# Override this if you need a larger slot:
+#   make template CART_TEMPLATE_CAPACITY=524288
+#---------------------------------------------------------------------------------
+CART_TEMPLATE_CAPACITY ?= 262144
+TEMPLATE_GBA := $(TARGET)_template.gba
+
+#---------------------------------------------------------------------------------
 # Host cart packer
 #---------------------------------------------------------------------------------
 ifeq ($(OS),Windows_NT)
@@ -48,6 +61,15 @@ ifeq ($(OS),Windows_NT)
   CART_PACKER_GUI_RC := cart_packer_gui.rc
   CART_PACKER_GUI_RES := $(BUILD)/cart_packer_gui_res.o
   HOSTGUI_LDFLAGS := -mwindows -lcomdlg32 -lshell32 -lole32
+
+  # Embed the template ROM into pico2gba.exe as a Windows RCDATA resource (default ON)
+  EMBED_TEMPLATE ?= 1
+  TEMPLATE_RCDATA_ID ?= 201
+  TEMPLATE_EMBED_RC := $(BUILD)/template_embed.rc
+  TEMPLATE_EMBED_RES := $(BUILD)/template_embed_res.o
+  TEMPLATE_GBA_ABS := $(abspath $(TEMPLATE_GBA))
+  # windres is native Windows and cannot open MSYS /d/... paths; convert to D:/... when possible
+  # TEMPLATE_GBA_RC_PATH is computed in the recipe for $(TEMPLATE_EMBED_RC) to avoid shell quoting issues.
 else
   EXEEXT :=
 endif
@@ -69,6 +91,9 @@ endef
 define MV_F
 @if exist "$(1)" move /Y "$(1)" "$(2)" >nul
 endef
+define CP_F
+@copy /Y "$(1)" "$(2)" >nul
+endef
 export PATH := $(DEVKITPRO)/tools/bin;$(DEVKITARM)/bin;$(PATH)
 BIN2S := $(DEVKITPRO)/tools/bin/bin2s
 define bin2o
@@ -89,6 +114,9 @@ endef
 define MV_F
 @mv -f "$(1)" "$(2)"
 endef
+define CP_F
+@cp -f "$(1)" "$(2)"
+endef
 endif
 
 HOSTCC ?= g++
@@ -97,6 +125,17 @@ CART_PACKER := $(BUILD)/cart_packer$(EXEEXT)
 CART_PACKER_SRCS := cart_packer.cpp ../../core/real8_cart.cpp ../../core/real8_compression.cpp ../../../lib/lodePNG/lodePNG.cpp
 CART_PACKER_GUI := $(BUILD)/pico2gba$(EXEEXT)
 CART_PACKER_GUI_SRCS := cart_packer_gui.cpp ../../core/real8_cart.cpp ../../core/real8_compression.cpp ../../../lib/lodePNG/lodePNG.cpp
+
+# Choose which .rc file to feed into windres for pico2gba.exe
+CART_PACKER_GUI_RC_INPUT := $(CART_PACKER_GUI_RC)
+
+# Extra resources to link into pico2gba.exe
+CART_PACKER_GUI_EXTRA_RES :=
+ifeq ($(OS),Windows_NT)
+ifeq ($(EMBED_TEMPLATE),1)
+  CART_PACKER_GUI_EXTRA_RES := $(TEMPLATE_EMBED_RES)
+endif
+endif
 
 #---------------------------------------------------------------------------------
 # Toolchain flags
@@ -228,13 +267,26 @@ export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 export CFLAGS   := $(CFLAGS_BASE) $(INCLUDE)
 export CXXFLAGS := $(CXXFLAGS_BASE) $(INCLUDE)
 
-.PHONY: all clean rom tools
+.PHONY: all clean rom tools template
 
 rom: $(BUILD) $(BINFILES)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
+# Build a ROM template (REAL8_GBA_template.gba) with a placeholder cart blob slot.
+template: $(TEMPLATE_GBA)
+
+$(TEMPLATE_GBA): $(CART_PACKER)
+	$(call RM_F,$(CART_BLOB))
+	@$(MAKE) --no-print-directory REAL8_TEMPLATE=1 rom
+	$(call CP_F,$(TARGET).gba,$@)
+	@echo Wrote template: $@
+
 ifeq ($(OS),Windows_NT)
+ifeq ($(EMBED_TEMPLATE),1)
+tools: $(CART_PACKER) $(TEMPLATE_GBA) $(CART_PACKER_GUI)
+else
 tools: $(CART_PACKER) $(CART_PACKER_GUI)
+endif
 else
 tools: $(CART_PACKER)
 endif
@@ -251,22 +303,37 @@ $(CART_PACKER): $(CART_PACKER_SRCS) $(CART_PACKER_RES)
 	$(call MKDIR_P,$(BUILD))
 	$(HOSTCC) $(HOSTCXXFLAGS) -o $@ $^
 
-$(CART_PACKER_GUI): $(CART_PACKER_GUI_SRCS) $(CART_PACKER_GUI_RES)
+$(CART_PACKER_GUI): $(CART_PACKER_GUI_SRCS) $(CART_PACKER_GUI_RES) $(CART_PACKER_GUI_EXTRA_RES)
 	$(call MKDIR_P,$(BUILD))
 	$(HOSTCC) $(HOSTCXXFLAGS) -o $@ $^ $(HOSTGUI_LDFLAGS)
 
 ifeq ($(OS),Windows_NT)
 $(CART_PACKER_RES): $(CART_PACKER_RC) icon.ico
 	$(call MKDIR_P,$(BUILD))
-	$(WINDRES) -i $< -o $@
-
-$(CART_PACKER_GUI_RES): $(CART_PACKER_GUI_RC) icon.ico
+	$(WINDRES) -I. -i $< -O coff -o $@
+$(TEMPLATE_EMBED_RC): $(TEMPLATE_GBA)
 	$(call MKDIR_P,$(BUILD))
-	$(WINDRES) -i $< -o $@
+	@TEMPLATE_RC_PATH="$$(cygpath -m "$(TEMPLATE_GBA_ABS)" 2>/dev/null || echo "$(TEMPLATE_GBA_ABS)")"; \
+	  TEMPLATE_RC_PATH="$${TEMPLATE_RC_PATH//\\//}"; \
+	  printf "%s\n" "$(TEMPLATE_RCDATA_ID) RCDATA \"$$TEMPLATE_RC_PATH\"" > $@
+
+$(TEMPLATE_EMBED_RES): $(TEMPLATE_EMBED_RC)
+	$(call MKDIR_P,$(BUILD))
+	$(WINDRES) -I. -i $< -O coff -o $@
+
+
+$(CART_PACKER_GUI_RES): $(CART_PACKER_GUI_RC_INPUT) icon.ico
+	$(call MKDIR_P,$(BUILD))
+	$(WINDRES) -I. -i $< -O coff -o $@
 endif
 
+ifeq ($(REAL8_TEMPLATE),1)
+$(CART_BLOB): $(CART_PACKER)
+	@$(CART_PACKER) --template $(CART_BLOB) $(CART_TEMPLATE_CAPACITY)
+else
 $(CART_BLOB): $(CART_PNG) $(CART_PACKER)
 	@$(CART_PACKER) $(CART_PNG) $(CART_BLOB)
+endif
 
 $(SPLASH_IMG) $(SPLASH_PAL): $(SPLASH_PNG)
 	@$(GRIT) $(SPLASH_PNG) -gb -gB8 -m! -p -ftb -o splash

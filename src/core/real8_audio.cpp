@@ -184,6 +184,33 @@ void AudioEngine::init(Real8VM *parent) {
     }
 }
 
+// --------------------------------------------------------------------------
+// AUTO-MUTE (MUSIC==0 && SFX==0)
+// --------------------------------------------------------------------------
+
+void AudioEngine::flushOutputQueues() {
+    // Drop any already-generated samples so mute is immediate.
+    fifo_r = fifo_w = fifo_count = 0;
+    out_block_idx = 0;
+    samples_accumulator = 0.0f;
+    last_mixed_sample = 0.0f;
+    // Do NOT reset sequencer/channel state here; we want playback to resume
+    // where it left off when unmuted.
+}
+
+void AudioEngine::updateVolumeMute() {
+    // Automatic hard gate: when both master volumes are 0, stop all audio work.
+    bool want = false;
+    if (vm) {
+        want = (vm->volume_music <= 0) && (vm->volume_sfx <= 0);
+    }
+
+    if (want != volume_mute) {
+        volume_mute = want;
+        flushOutputQueues();
+    }
+}
+
 float AudioEngine::note_to_freq(float note) {
     return note_to_freq_fast(note);
 }
@@ -207,7 +234,15 @@ float AudioEngine::get_waveform_sample(int waveform, float phi, ChannelState &st
 }
 
 void AudioEngine::play_sfx(int idx, int ch, int offset, int length) {
+    // Keep the auto-mute gate in sync with the VM's master volume sliders.
+    updateVolumeMute();
+
+    // If explicitly muted, ignore all requests.
     if (muted) return;
+
+    // If auto-muted (both MUSIC and SFX == 0), ignore *starting* new sounds
+    // but still allow stop/loop-control commands so games can clean up.
+    if (volume_mute && idx >= 0) return;
     if (idx < -2 || idx > 63) return;
     if (ch < -2 || ch >= CHANNELS) return;
 
@@ -290,6 +325,16 @@ void AudioEngine::play_sfx(int idx, int ch, int offset, int length) {
 
 void AudioEngine::play_music(int pattern, int fade_len, int mask) {
     (void)fade_len;
+
+    // Sync auto-mute with VM volumes.
+    updateVolumeMute();
+
+    // If auto-muted (both MUSIC and SFX == 0), ignore *starting* music
+    // but still allow stopping (pattern < 0).
+    if (volume_mute && pattern >= 0) {
+        return;
+    }
+
     music_patterns_played = 0;
     music_ticks_on_pattern = 0;
     if (pattern < 0) {
@@ -457,7 +502,11 @@ void AudioEngine::run_tick() {
 // --------------------------------------------------------------------------
 
 void AudioEngine::generateSamples(int16_t* out_buffer, int count) {
-    if (muted) {
+    // Keep the auto-mute gate in sync even when generateSamples() is called
+    // directly (e.g. libretro path).
+    updateVolumeMute();
+
+    if (isMuted()) {
         memset(out_buffer, 0, count * sizeof(int16_t));
         return;
     }

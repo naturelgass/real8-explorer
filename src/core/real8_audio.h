@@ -62,7 +62,11 @@ struct Channel : public ChannelState
 
 struct AudioEngine
 {
+    // "muted" is reserved for an explicit/host-driven mute (if any).
+    // "volume_mute" is an automatic hard gate used when BOTH MUSIC and SFX
+    // master volumes are set to 0 in the in-game menu.
     bool muted = false;
+    bool volume_mute = false;
     static const int CHANNELS = 4;
     static const int SAMPLE_RATE = 22050;
     static constexpr int SNAP_COUNT = 256;
@@ -104,6 +108,15 @@ struct AudioEngine
     MixerTickSnap snaps[SNAP_COUNT];
     int snap_w = 0;
     bool snaps_ready = false;
+
+    // Returns true if audio is hard-gated (either explicitly muted or auto-muted).
+    inline bool isMuted() const { return muted || volume_mute; }
+
+    // Auto-mute gate: when BOTH master volumes are 0, stop all audio work.
+    // This prevents the audio engine from reading SFX/MUSIC data or advancing
+    // sequencer state until at least one master volume is > 0 again.
+    void updateVolumeMute();
+    void flushOutputQueues();
 
     void init(Real8VM *parent);
     void play_sfx(int idx, int ch, int offset = 0, int length = -1);

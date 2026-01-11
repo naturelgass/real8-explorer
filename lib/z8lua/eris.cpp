@@ -37,7 +37,9 @@ typedef int bool;
 
 /* Mark us as part of the Lua core to get access to what we need. */
 #define eris_c
-#define LUA_CORE
+#if defined(__GBA__) || defined(__3DS__)
+  #define LUA_CORE
+#endif
 
 /* Public Lua headers. */
 #include "lua.h"

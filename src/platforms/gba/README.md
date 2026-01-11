@@ -84,9 +84,9 @@ Tip: the linker runs with `--print-memory-usage` so builds report ROM/IWRAM/EWRA
 ## Build steps
 
 1. Install devkitPro with devkitARM + libgba, then set environment variables:
-
+You will need to install the official msys64 as well - and use "mingw64.exe" for terminal 
 ```sh
-DEVKITPRO=/path/to/devkitPro
+DEVKITPRO=c:/devkitPro
 DEVKITARM=$DEVKITPRO/devkitARM
 ```
 
@@ -115,6 +115,19 @@ The GUI wraps the Makefile build and drops the ROM next to your cart.
 1. Build the GUI (once):
 
 ```sh
+make template
+# outputs: REAL8_GBA_template.gba
+```
+
+```sh
+make template CART_TEMPLATE_CAPACITY=524288
+# (Optional) To increase the cart slot size
+```
+
+Place REAL8_GBA_template.gba next to pico2gba.exe (or browse to it in Step 1), select a .p8.png, hit Generate → it outputs a .gba.
+
+
+```sh
 cd src/platforms/gba
 make tools
 ```
@@ -135,3 +148,4 @@ Outputs:
 
 ### Pico2GBA GUI Dialog
 ![REAL-8 - Pico2GBA](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8-Pico2GBA-GUI.png)
+

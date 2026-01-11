@@ -21,7 +21,9 @@
 #include <string.h>
 
 #define ltable_c
-#define LUA_CORE
+#if defined(__GBA__) || defined(__3DS__)
+  #define LUA_CORE
+#endif
 
 #include "lua.h"
 

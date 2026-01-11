@@ -114,6 +114,9 @@ public:
   void clearAltFramebuffer() { alt_fb = nullptr; }
   bool hasAltFramebuffer() const { return alt_fb != nullptr; }
 
+  // Stereoscopic depth buffer (optional)
+  void clearDepthBuffer(uint8_t bucket = 0);
+
   // --------------------------------------------------------------------------
   // STATE & CONFIG
   // --------------------------------------------------------------------------
@@ -122,6 +125,9 @@ public:
   bool skipDirtyRect = false;
   bool isLibretroPlatform = false;
   bool isGbaPlatform = false;
+
+  // True when the shell UI (menus) is active; used to disable certain effects.
+  bool isShellUI = false;
 
   bool reset_requested = false;
   bool exit_requested = false;
@@ -140,9 +146,58 @@ public:
 
   bool showStats = false;
   bool crt_filter = false;
+  bool stereoscopic = false;
+  
+#if !defined(__GBA__)
+  // --------------------------------------------------------------------------
+  // STEREOSCOPIC DEPTH (GPIO 0x5FF0)
+  // --------------------------------------------------------------------------
+  // Depth bucket is encoded in the low nibble of GPIO byte 0x5FF0 as signed 4-bit
+  // two's-complement and clamped to -7..+7.
+  //  - 0..7    => 0..7  (backwards compatible with older carts)
+  //  - 0xF..0x9 => -1..-7
+  // Bucket 0 corresponds to the "screen plane". Positive buckets shift one way,
+  // negative buckets shift the opposite way.
+  static constexpr int STEREO_BUCKET_MIN = -7;
+  static constexpr int STEREO_BUCKET_MAX = 7;
+  static constexpr int STEREO_BUCKET_BIAS = 7;     // bucket 0 -> layer index 7
+  static constexpr int STEREO_LAYER_COUNT = 15;    // -7..+7 inclusive
+  static constexpr uint16_t STEREO_GPIO_ADDR = 0x5FF0;
+
+  static inline int8_t decodeStereoBucket(uint8_t raw) {
+    int8_t b = (int8_t)(raw & 0x0F);
+    if (b & 0x08) b = (int8_t)(b - 0x10); // -8..-1
+    if (b < STEREO_BUCKET_MIN) b = STEREO_BUCKET_MIN;
+    if (b > STEREO_BUCKET_MAX) b = STEREO_BUCKET_MAX;
+    return b;
+  }
+
+  static inline uint8_t stereoLayerIndexFromRaw(uint8_t raw) {
+    return (uint8_t)(decodeStereoBucket(raw) + STEREO_BUCKET_BIAS);
+  }
+
+  inline int8_t getStereoBucket() const {
+    return ram ? decodeStereoBucket(ram[STEREO_GPIO_ADDR]) : 0;
+  }
+
+  inline uint8_t getStereoLayerIndex() const {
+    return ram ? stereoLayerIndexFromRaw(ram[STEREO_GPIO_ADDR]) : (uint8_t)STEREO_BUCKET_BIAS;
+  }
+
+#else
+  // --------------------------------------------------------------------------
+  // STEREOSCOPIC DEPTH (disabled on GBA build to save IWRAM)
+  // --------------------------------------------------------------------------
+  static constexpr int STEREO_BUCKET_BIAS = 7;
+  inline int8_t getStereoBucket() const { return 0; }
+  inline uint8_t getStereoLayerIndex() const { return (uint8_t)STEREO_BUCKET_BIAS; }
+
+#endif
+
   bool showRepoSnap = true;
   bool showSkin = false;
   bool showRepoGames = false;
+  bool swapScreens = false;
   bool stretchScreen = false;
   bool interpolation = false;
   int volume_music = 7;
@@ -181,6 +236,13 @@ public:
   bool rom_owned = false;
   uint8_t (*fb)[RAW_WIDTH] = nullptr; 
   uint8_t (*alt_fb)[RAW_WIDTH] = nullptr;
+  // Per-pixel depth bucket buffer for stereoscopic/anaglyph output (one byte per pixel).
+  uint8_t (*depth_fb)[RAW_WIDTH] = nullptr;
+
+  // Optional: per-depth-layer color buffers for stereoscopic/anaglyph rendering.
+  // Layout: 15 layers (-7..+7) * 128 rows. Row index = (layer_index * HEIGHT + y), where layer_index = bucket + STEREO_BUCKET_BIAS.
+  // Pixel value is 0..15; 0xFF means "unset" for that layer.
+  uint8_t (*stereo_layers)[RAW_WIDTH] = nullptr;
 
   void setRomView(const uint8_t* data, size_t size, bool readOnly);
   bool ensureWritableRom();

@@ -54,34 +54,34 @@ private:
     Real8VM* vm; 
     ShellState sysState = STATE_BOOT;
     bool isSwitchPlatform = false;
+    bool pendingInitialRefresh = true;
 
     Real8Gfx::GfxState menu_gfx_backup;
     
-    // --- State Logic (Added missing declarations) ---
+    // --- State Logic ---
     void updateBrowser();
     void updateOptionsMenu();
-    void updateSettingsMenu(); // Added
-    void updateLoading();      // Added
-    void updateInGameMenu();   // Added
-    void buildInGameMenu();    // Added
-    void buildContextMenu();   // Added
+    void updateSettingsMenu();
+    void updateLoading();
+    void updateInGameMenu();
+    void buildInGameMenu();
+    void buildContextMenu();
 
     // --- Rendering ---
-    void renderFileList();
+    void renderFileList(bool drawTopPreview = true);
     void renderOptionsMenu();
     void renderSettingsMenu();
     void renderInGameMenu();
-    void renderStorageView();
     void renderCredits();
     void renderMessage(const char *header, std::string msg, int color);
-    void drawWifiScreen(const std::string &ssid, const std::string &ip, const std::string &status, float progress);
     
-    // Added Graphics/Preview helpers
+    // --- Graphics/Preview helpers ---
     void drawStarfield();
+    static void drawStarfieldHook(void* user, Real8VM* vm);
     void loadPreview(const uint8_t *data, size_t size);
     void clearPreview();
     void drawPreview(int x, int y, bool dim);
-    void renderTopPreview3ds();
+    void renderTopPreview3ds(const char *statusText = nullptr);
 
     // --- Data Management ---
     std::string current_vfs_path = "";
@@ -91,12 +91,12 @@ private:
     std::map<std::string, std::vector<uint8_t>> previewCache;
     GameEntry targetGame;
     
-    // Added Preview RAM
+    // --- Preview RAM ---
     uint8_t preview_ram[128][128];
     bool has_preview = false;
     uint8_t top_screen_fb[128][128];
 
-    // Selection State
+    // --- Selection State ---
     int fileSelection = 0;
     int lastFileSelection = -1;
     int menuSelection = 0;
@@ -104,7 +104,7 @@ private:
     int inGameMenuSelection = 0;
     std::string lastPreviewPath;
     
-    // Added missing containers
+    // --- Containers ---
     std::vector<std::string> contextOptions;
     std::vector<std::string> inGameOptions;
 

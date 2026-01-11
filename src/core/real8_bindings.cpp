@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <sstream>
 #include <vector>
+#include <unordered_map>
 
 #include "../../lib/z8lua/trigtables.h"
 
@@ -1237,6 +1238,123 @@ static int l_rrect(lua_State *L)
 
 // --- P8SCII HELPERS ---
 
+// --- UTF-8 -> P8SCII conversion ---
+// PICO-8 source code is UTF-8 and can include icon glyphs such as the PICO-8 O / X button glyphs.
+// Internally, the PICO-8 font expects single-byte P8SCII codes (0..255).
+// This helper converts any recognised UTF-8 PICO-8 glyph sequences into
+// their corresponding single-byte P8SCII value before the print() parser
+// runs. Inspired by Zepto-8's emojiconversion.cpp, but implemented without
+// <regex> / <codecvt> to stay lightweight (and GBA-friendly).
+
+static inline int p8_utf8_cp_len(uint8_t lead)
+{
+    if ((lead & 0x80u) == 0) return 1;
+    if ((lead & 0xE0u) == 0xC0u) return 2;
+    if ((lead & 0xF0u) == 0xE0u) return 3;
+    if ((lead & 0xF8u) == 0xF0u) return 4;
+    return 1;
+}
+
+static const std::unordered_map<std::string, uint8_t> &p8_utf8_to_code_map()
+{
+    static std::unordered_map<std::string, uint8_t> m;
+    static bool inited = false;
+
+    if (!inited)
+    {
+        // The complete PICO-8 UTF-8 charmap, from 0 to 255.
+        // NOTE: Some glyphs are a base emoji + U+FE0F variation selector (VS16),
+        // which is encoded as bytes EF B8 8F in UTF-8.
+        static char const utf8_chars[] =
+        "\0¹²³⁴⁵⁶⁷⁸\t\nᵇᶜ\rᵉᶠ▮■□⁙⁘‖◀▶「」¥•、。゛゜"
+        " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNO"
+        "PQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~○"
+        "█▒🐱⬇️░✽●♥☉웃⌂⬅️😐♪🅾️◆…➡️★⧗⬆️ˇ∧❎▤▥あいうえおか"
+        "きくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよ"
+        "らりるれろわをんっゃゅょアイウエオカキクケコサシスセソタチツテト"
+        "ナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲンッャュョ◜◝";
+
+        auto const *bytes = (uint8_t const *)utf8_chars;
+        size_t total = sizeof(utf8_chars) - 1; // includes the leading \0 in the table content
+        size_t pos = 0;
+
+        for (int code = 0; code < 256 && pos < total; ++code)
+        {
+            int l = p8_utf8_cp_len(bytes[pos]);
+            if (l < 1) l = 1;
+
+            // Merge U+FE0F variation selector with previous codepoint, if present
+            if (pos + (size_t)l + 2 < total
+                && bytes[pos + (size_t)l]     == 0xEF
+                && bytes[pos + (size_t)l + 1] == 0xB8
+                && bytes[pos + (size_t)l + 2] == 0x8F)
+            {
+                l += 3;
+            }
+
+            if (l > 1 && pos + (size_t)l <= total)
+            {
+                // Store only multibyte sequences; ASCII is passed through as-is.
+                m.emplace(std::string((char const *)bytes + pos, (size_t)l), (uint8_t)code);
+            }
+
+            pos += (size_t)l;
+        }
+
+        inited = true;
+    }
+
+    return m;
+}
+
+static std::string p8_utf8_to_p8scii(char const *s, size_t len)
+{
+    auto const &map = p8_utf8_to_code_map();
+
+    std::string out;
+    out.reserve(len);
+
+    size_t i = 0;
+    while (i < len)
+    {
+        uint8_t b = (uint8_t)s[i];
+
+        // ASCII and control bytes pass through untouched.
+        if (b < 0x80u)
+        {
+            out.push_back((char)b);
+            ++i;
+            continue;
+        }
+
+        // Try to match one of PICO-8's multibyte UTF-8 glyph sequences.
+        // Longest-first avoids partial matches (e.g. emoji + VS16).
+        bool matched = false;
+        for (int l = 7; l >= 2; --l)
+        {
+            if (i + (size_t)l > len) continue;
+            auto it = map.find(std::string(s + i, (size_t)l));
+            if (it != map.end())
+            {
+                out.push_back((char)it->second);
+                i += (size_t)l;
+                matched = true;
+                break;
+            }
+        }
+
+        // Unknown UTF-8: fall back to raw bytes.
+        if (!matched)
+        {
+            out.push_back((char)b);
+            ++i;
+        }
+    }
+
+    return out;
+}
+
+
 // Helper: Convert PICO-8 Hex char (0-9, a-f) to integer (0-15)
 static int p8_hex_val(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -1275,6 +1393,23 @@ static int l_print(lua_State *L)
     size_t len;
     const char *str = luaL_optlstring(L, 1, "", &len);
 
+
+    // Convert UTF-8 PICO-8 icon glyphs (e.g. O/X button glyphs, arrows) into single-byte P8SCII codes
+    // so the renderer sees the expected character indices.
+    std::string p8scii_converted;
+    {
+        bool has_high = false;
+        for (size_t j = 0; j < len; ++j)
+        {
+            if (((uint8_t)str[j]) & 0x80u) { has_high = true; break; }
+        }
+        if (has_high && len > 0)
+        {
+            p8scii_converted = p8_utf8_to_p8scii(str, len);
+            str = p8scii_converted.c_str();
+            len = p8scii_converted.size();
+        }
+    }
     // 1. Determine Initial State (Cursor, Color)
     int argc = lua_gettop(L);
     int x = vm->gpu.getCursorX();
@@ -2018,8 +2153,6 @@ static void write_mapped_byte(Real8VM *vm, uint32_t addr, uint8_t val)
         vm_sync_ram(vm, mapped.addr, 1);
     }
 }
-
-// [real8_bindings.cpp]
 
 static int l_poke(lua_State *L)
 {

@@ -7,7 +7,7 @@
 #include <memory>
 #include <lodePNG.h>
 #include "real8_cart.h"
-#include "real8_tools.h"
+#include "real8_fonts.h"
 
 // --------------------------------------------------------------------------
 // STATIC HELPERS
@@ -16,14 +16,33 @@
 static const int FONT_WIDTH = 5;
 static const int SCREEN_CENTER_X = 64;
 
-// 3DS: remember the user's skin setting while the in-game menu is open
-static bool s_menuSavedShowSkinValid = false;
-static bool s_menuSavedShowSkin = false;
-
 static int getCenteredX(const char *text)
 {
     int textLenInPixels = (int)strlen(text) * FONT_WIDTH;
     return SCREEN_CENTER_X - (textLenInPixels / 2);
+}
+
+static void drawMenuTextToBuffer(uint8_t (*buffer)[128], const char *text, int x, int y, uint8_t col)
+{
+    if (!buffer || !text || text[0] == '\0') return;
+    std::string p8 = convertUTF8toP8SCII(text);
+    int cx = x;
+    for (unsigned char ch : p8) {
+        const uint8_t *rows = p8_5x6_bits(ch);
+        for (int r = 0; r < 6; r++) {
+            uint8_t bits = rows[r];
+            for (int i = 0; i < 4; i++) {
+                if (bits & (0x80 >> i)) {
+                    int px = cx + i;
+                    int py = y + r;
+                    if ((unsigned)px < 128u && (unsigned)py < 128u) {
+                        buffer[py][px] = col;
+                    }
+                }
+            }
+        }
+        cx += 5;
+    }
 }
 
 static bool isRepoSupportedPlatform(const char *platform)
@@ -122,6 +141,52 @@ static std::string json_extract(const std::string &obj, const std::string &key)
     return obj.substr(quoteStart + 1, quoteEnd - quoteStart - 1);
 }
 
+static std::string trimWhitespace(const std::string &s)
+{
+    size_t start = 0;
+    while (start < s.size() && (s[start] == ' ' || s[start] == '\t' || s[start] == '\r' || s[start] == '\n')) {
+        start++;
+    }
+    size_t end = s.size();
+    while (end > start && (s[end - 1] == ' ' || s[end - 1] == '\t' || s[end - 1] == '\r' || s[end - 1] == '\n')) {
+        end--;
+    }
+    return s.substr(start, end - start);
+}
+
+static std::string toUpperAscii(std::string s)
+{
+    for (size_t i = 0; i < s.size(); i++) {
+        char ch = s[i];
+        if (ch >= 'a' && ch <= 'z') s[i] = static_cast<char>(ch - 'a' + 'A');
+    }
+    return s;
+}
+
+static bool recomAllowsPlatform(const std::string &recom, const char *platform)
+{
+    if (recom.empty() || !platform) return true;
+    std::string platformUpper = toUpperAscii(platform);
+
+    size_t start = 0;
+    while (start < recom.size()) {
+        size_t comma = recom.find(',', start);
+        size_t end = (comma == std::string::npos) ? recom.size() : comma;
+        std::string token = toUpperAscii(trimWhitespace(recom.substr(start, end - start)));
+
+        if (!token.empty()) {
+            if (token == platformUpper) return true;
+            if (platformUpper == "WINDOWS" && (token == "WIN" || token == "WIN32" || token == "WIN64")) return true;
+            if (platformUpper == "SWITCH" && (token == "NSW" || token == "NINTENDO SWITCH")) return true;
+            if (platformUpper == "3DS" && (token == "N3DS" || token == "NINTENDO3DS")) return true;
+        }
+
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    return false;
+}
+
 // Helper to match RGB to PICO-8 Palette
 static uint8_t find_closest_p8_color(uint8_t r, uint8_t g, uint8_t b)
 {
@@ -157,7 +222,6 @@ Real8Shell::Real8Shell(IReal8Host* h, Real8VM* v) : host(h), vm(v)
 {
     isSwitchPlatform = (strcmp(host->getPlatform(), "Switch") == 0);
     initStars();
-    refreshGameList();
     sysState = STATE_BROWSER;
     
     // Clear preview buffer
@@ -178,6 +242,15 @@ void Real8Shell::update()
     // 1. Poll Hardware
     host->pollInput();
     updateAsyncDownloads();
+
+    // Tell the VM whether we are rendering shell/UI (menus) vs gameplay.
+    // Stereo anaglyph should only apply during gameplay.
+    vm->isShellUI = (sysState != STATE_RUNNING);
+
+    if (pendingInitialRefresh) {
+        refreshGameList();
+        pendingInitialRefresh = false;
+    }
 
     if (strcmp(host->getPlatform(), "3DS") == 0) {
 
@@ -276,32 +349,82 @@ void Real8Shell::update()
             const char* platform = host->getPlatform();
             bool RepoSupport = isRepoSupportedPlatform(platform);
             bool normalMenu = RepoSupport;
+            bool is3ds = (strcmp(platform, "3DS") == 0);
+            bool repoPreviewEnabled = RepoSupport && vm->showRepoSnap;
+
+            bool exitPreview = false;
+            if (is3ds && !gameList.empty()) {
+                int prevSelection = fileSelection;
+                if (vm->btnp(2)) { // UP
+                    fileSelection--;
+                    if (fileSelection < 0) fileSelection = (int)gameList.size() - 1;
+                }
+                if (vm->btnp(3)) { // DOWN
+                    fileSelection++;
+                    if (fileSelection >= (int)gameList.size()) fileSelection = 0;
+                }
+                if (fileSelection != prevSelection) {
+                    targetGame = gameList[fileSelection];
+                    lastPreviewPath.clear();
+                    if (!repoPreviewEnabled) {
+                        clearPreview();
+                        lastFileSelection = -1;
+                        sysState = STATE_BROWSER;
+                        exitPreview = true;
+                    }
+                }
+            }
+
+            if (exitPreview) {
+                renderFileList();
+                vm->show_frame();
+                break;
+            }
 
             if (targetGame.path != lastPreviewPath) {
+                if (is3ds) {
+                    bool hasCachedPreview = false;
+                    auto cached = previewCache.find(targetGame.path);
+                    if (cached != previewCache.end() && !cached->second.empty()) hasCachedPreview = true;
+                    if (!hasCachedPreview) {
+                        clearPreview();
+                        renderFileList(false);
+                        renderTopPreview3ds("LOADING PREVIEW");
+                        vm->show_frame();
+                    }
+                }
                 lastPreviewPath = targetGame.path;
-                loadPreviewForEntry(targetGame, normalMenu, true, true);
+                loadPreviewForEntry(targetGame, normalMenu, true, !is3ds);
             }
 
-            vm->gpu.cls(0);
-            vm->gpu.setMenuFont(true);
-
-            bool previewPending = isSwitchPlatform && isPreviewDownloadActiveFor(targetGame.path);
-            if (has_preview) {
-                drawPreview(0, 0, false);
-            } else if (previewPending) {
-                const char *fetching = "FETCHING PREVIEW";
-                vm->gpu.pprint(fetching, strlen(fetching), getCenteredX(fetching), 60, 11);
+            if (is3ds) {
+                renderFileList(false);
+                const char *topStatus = has_preview ? nullptr : "LOADING PREVIEW";
+                renderTopPreview3ds(topStatus);
+                vm->show_frame();
+                vm->gpu.setMenuFont(false);
             } else {
-                const char *noprevMsg = "NO PREVIEW DATA";
-                vm->gpu.pprint(noprevMsg, strlen(noprevMsg), getCenteredX(noprevMsg), 60, 8);
+                vm->gpu.cls(0);
+                vm->gpu.setMenuFont(true);
+
+                bool previewPending = isSwitchPlatform && isPreviewDownloadActiveFor(targetGame.path);
+                if (has_preview) {
+                    drawPreview(0, 0, false);
+                } else if (previewPending) {
+                    const char *fetching = "FETCHING PREVIEW";
+                    vm->gpu.pprint(fetching, strlen(fetching), getCenteredX(fetching), 60, 11);
+                } else {
+                    const char *noprevMsg = "NO PREVIEW DATA";
+                    vm->gpu.pprint(noprevMsg, strlen(noprevMsg), getCenteredX(noprevMsg), 60, 8);
+                }
+
+                vm->gpu.rectfill(0, 118, 128, 128, 1);
+                const char *pressxMsg = isSwitchPlatform ? "PRESS A TO START" : "PRESS X TO START";
+                vm->gpu.pprint(pressxMsg, strlen(pressxMsg), getCenteredX(pressxMsg), 120, 7);    
+                vm->show_frame();
+
+                vm->gpu.setMenuFont(false);
             }
-
-            vm->gpu.rectfill(0, 118, 128, 128, 1);
-            const char *pressxMsg = isSwitchPlatform ? "PRESS A TO START" : "PRESS X TO START";
-            vm->gpu.pprint(pressxMsg, strlen(pressxMsg), getCenteredX(pressxMsg), 120, 7);    
-            vm->show_frame();
-
-            vm->gpu.setMenuFont(false);
 
             if (vm->btnp(5)) {
                 vm->resetInputState();
@@ -321,26 +444,11 @@ void Real8Shell::update()
             vm->show_frame();
             break;
 
-        case STATE_STORAGE_INFO:
-            renderStorageView();
-            vm->show_frame();
-            if (vm->btnp(5) || vm->isMenuPressed()) sysState = STATE_SETTINGS;
-            break;
-
         case STATE_CREDITS:
             renderCredits();
             vm->show_frame();
             if (vm->btnp(5) || vm->btnp(4) || vm->isMenuPressed()) sysState = STATE_SETTINGS;
             break;
-        case STATE_WIFI_INFO:
-        {
-            NetworkInfo net = host->getNetworkInfo();
-            drawWifiScreen(net.connected ? "CONNECTED" : "DISCONNECTED",
-                        net.ip, net.statusMsg, net.transferProgress);
-            vm->show_frame();
-            if (vm->isMenuPressed() || vm->btnp(4)) sysState = STATE_SETTINGS;
-            break;
-        }
 
         case STATE_LOADING:
             updateLoading();
@@ -512,6 +620,7 @@ bool Real8Shell::shouldShowPreviewForEntry(const GameEntry &e) const
     if (e.isFolder) return false;
     const char* platform = host->getPlatform();
     bool RepoSupport = isRepoSupportedPlatform(platform);
+    bool is3ds = (strcmp(platform, "3DS") == 0);
     return e.isRemote ? (RepoSupport && vm->showRepoSnap) : true;
 }
 
@@ -554,6 +663,9 @@ bool Real8Shell::loadPreviewForEntry(GameEntry &e, bool normalMenu, bool allowFe
                 vm->gpu.rectfill(0, 120, 128, 128, 1);
                 std::string fetchMsg = "FETCHING GAME";
                 vm->gpu.pprint(fetchMsg.c_str(), fetchMsg.length(), getCenteredX(fetchMsg.c_str()), 121, 6);
+                if (strcmp(host->getPlatform(), "3DS") == 0) {
+                    renderTopPreview3ds("LOADING PREVIEW");
+                }
                 vm->show_frame();
                 vm->gpu.setMenuFont(false);
             }
@@ -581,6 +693,7 @@ void Real8Shell::updateBrowser()
 {
     const char* platform = host->getPlatform();
     bool RepoSupport = isRepoSupportedPlatform(platform);
+    bool is3ds = (strcmp(platform, "3DS") == 0);
     bool normalMenu = RepoSupport;
 
     bool repoSnapEnabled = RepoSupport && vm->showRepoSnap;
@@ -730,80 +843,6 @@ void Real8Shell::updateOptionsMenu()
     }
 }
 
-void Real8Shell::updateSettingsMenu()
-{   
-    const char* platform = host->getPlatform();
-    bool RepoSupport = isRepoSupportedPlatform(platform);
-    int menuMax = RepoSupport ? 8 : 6;
-
-    if (menuSelection > menuMax) menuSelection = menuMax;
-    if (menuSelection < 0) menuSelection = 0;
-
-    if (vm->btnp(2)) { menuSelection--; if (menuSelection < 0) menuSelection = menuMax; }
-    if (vm->btnp(3)) { menuSelection++; if (menuSelection > menuMax) menuSelection = 0; }
-
-    if (vm->btnp(5)) { // X (Action Button)
-        bool changed = false;
-        bool listRefresh = false;
-
-        // Helper lambda to handle Skin Toggle Logic
-        auto toggleSkin = [&]() {
-            vm->showSkin = !vm->showSkin;
-            if (vm->showSkin) {
-                Real8Tools::LoadSkin(vm, host);
-            } else if (strcmp(platform, "3DS") != 0) {
-                host->clearWallpaper();
-            }
-            changed = true;
-        };
-
-        if (RepoSupport) {
-            switch (menuSelection) {
-            case 0: vm->showRepoSnap = !vm->showRepoSnap; changed = true; break;
-            case 1: toggleSkin(); break; // [FIXED] Now calls load/clear logic
-            case 2: vm->showRepoGames = !vm->showRepoGames; changed = true; listRefresh = true; break;
-            case 3: vm->stretchScreen = !vm->stretchScreen; changed = true; break;
-            case 4:
-                vm->crt_filter = !vm->crt_filter;
-                changed = true;
-                break;
-            case 5:
-                vm->interpolation = !vm->interpolation;
-                changed = true;
-                break;
-            case 6: sysState = STATE_CREDITS; break;
-            case 7: vm->quit_requested = true; break;
-            case 8: sysState = STATE_BROWSER; break;
-            }
-        } else {
-            switch (menuSelection) {
-            case 0: toggleSkin(); break;
-            case 1: vm->stretchScreen = !vm->stretchScreen; changed = true; break;
-            case 2:
-                vm->crt_filter = !vm->crt_filter;
-                changed = true;
-                break;
-            case 3:
-                vm->interpolation = !vm->interpolation;
-                changed = true;
-                break;
-            case 4: sysState = STATE_CREDITS; break;
-            case 5: vm->quit_requested = true; break;
-            case 6: sysState = STATE_BROWSER; break;
-            }
-        }
-        
-        if (changed) {
-            Real8Tools::SaveSettings(vm, host);
-            // Force an update to the Windows Menu UI if running on Windows
-            // so the checkmark stays in sync with the Shell
-        }
-        
-        if (listRefresh) refreshGameList();
-    }
-    if (vm->btnp(4)) sysState = STATE_BROWSER; // O (Back)
-}
-
 void Real8Shell::updateLoading()
 {
     vm->gpu.cls(0);
@@ -925,158 +964,18 @@ void Real8Shell::updateLoading()
     // ---------------------------------------------------------
 }
 
-void Real8Shell::buildInGameMenu()
-{
-    inGameOptions.clear();
-    inGameOptions.push_back("CONTINUE");
-    inGameOptions.push_back("RESET GAME");
-
-    // Add Custom Items
-    for (int i = 1; i <= 5; i++) {
-        if (vm->custom_menu_items[i].active) {
-            inGameOptions.push_back(vm->custom_menu_items[i].label);
-        }
-    }
-
-    if (vm->hasState()) inGameOptions.push_back("LOAD STATE");
-    inGameOptions.push_back("SAVE STATE");
-    inGameOptions.push_back("MUSIC");
-    inGameOptions.push_back("SFX");
-    
-    // [CHANGED] Keep the label simple; we handle the "ON/OFF" visually in render()
-    inGameOptions.push_back("SHOW FPS");
-
-    inGameOptions.push_back("EXIT");
-
-    inGameMenuSelection = 0;
-}
-
-void Real8Shell::updateInGameMenu()
-{
-    if (vm->btnp(2)) { inGameMenuSelection--; if (inGameMenuSelection < 0) inGameMenuSelection = inGameOptions.size() - 1; }
-    if (vm->btnp(3)) { inGameMenuSelection++; if (inGameMenuSelection >= inGameOptions.size()) inGameMenuSelection = 0; }
-
-    // Volume Adjustment
-    if (vm->btnp(0) || vm->btnp(1)) {
-        std::string action = inGameOptions[inGameMenuSelection];
-        int change = vm->btnp(1) ? 1 : -1;
-        if (action == "MUSIC") {
-            vm->volume_music = std::max(0, std::min(10, vm->volume_music + change));
-            Real8Tools::SaveSettings(vm, host);
-        } else if (action == "SFX") {
-            vm->volume_sfx = std::max(0, std::min(10, vm->volume_sfx + change));
-            Real8Tools::SaveSettings(vm, host);
-        }
-    }
-
-    if (vm->btnp(5)) { // Action
-        std::string action = inGameOptions[inGameMenuSelection];
-
-        if (action == "CONTINUE") {
-
-            if (strcmp(host->getPlatform(), "3DS") == 0 && s_menuSavedShowSkinValid) {
-                vm->showSkin = s_menuSavedShowSkin;
-                s_menuSavedShowSkinValid = false;
-            }
-
-            vm->gpu.restoreState(menu_gfx_backup);
-            sysState = STATE_RUNNING;
-        }
-        else if (action == "RESET GAME") {
-            vm->rebootVM();
-
-            if (strcmp(host->getPlatform(), "3DS") == 0 && s_menuSavedShowSkinValid) {
-                vm->showSkin = s_menuSavedShowSkin;
-                s_menuSavedShowSkinValid = false;
-            }
-
-            sysState = STATE_LOADING;
-        }
-        else if (action == "SAVE STATE") {
-            vm->gpu.restoreState(menu_gfx_backup);
-            vm->saveState();
-            vm->gpu.reset();
-            renderMessage("SYSTEM", "STATE SAVED", 11);
-            vm->show_frame();
-            buildInGameMenu();
-        }
-        else if (action == "LOAD STATE") {
-            if (vm->loadState()) {
-                renderMessage("SYSTEM", "STATE LOADED", 12);
-                vm->show_frame();
-                if (strcmp(host->getPlatform(), "3DS") == 0 && s_menuSavedShowSkinValid) {
-                    vm->showSkin = s_menuSavedShowSkin;
-                    s_menuSavedShowSkinValid = false;
-                }
-                sysState = STATE_RUNNING;
-            } else {
-                renderMessage("ERROR", "LOAD FAILED", 8);
-                vm->show_frame();
-            }
-        }
-        else if (action == "MUSIC") { 
-            vm->volume_music = (vm->volume_music > 0) ? 0 : 10;
-            Real8Tools::SaveSettings(vm, host);
-        }
-        else if (action == "SFX") {   
-            vm->volume_sfx = (vm->volume_sfx > 0) ? 0 : 10;
-            Real8Tools::SaveSettings(vm, host);
-        }
-        // Check for substring "SHOW FPS" and refresh menu
-        else if (action.find("SHOW FPS") != std::string::npos) { 
-            vm->showStats = !vm->showStats;
-            Real8Tools::SaveSettings(vm, host);
-            int savedSel = inGameMenuSelection;
-            buildInGameMenu(); 
-            inGameMenuSelection = savedSel;
-        }
-        else if (action == "EXIT") {
-            vm->forceExit();
-            vm->resetInputState();
-            inputLatch = true;
-
-            if (strcmp(host->getPlatform(), "3DS") == 0 && s_menuSavedShowSkinValid) {
-                vm->showSkin = s_menuSavedShowSkin;
-                s_menuSavedShowSkinValid = false;
-            }
-
-            sysState = STATE_BROWSER;
-            refreshGameList();
-        }
-        else {
-             // Custom Items
-             for (int i = 1; i <= 5; i++) {
-                 if (vm->custom_menu_items[i].active && vm->custom_menu_items[i].label == action) {
-                     vm->run_menu_item(i);
-                     sysState = STATE_RUNNING;
-                     break;
-                 }
-             }
-        }
-    }
-
-    if (vm->btnp(4)) {
-
-        if (strcmp(host->getPlatform(), "3DS") == 0 && s_menuSavedShowSkinValid) {
-            vm->showSkin = s_menuSavedShowSkin;
-            s_menuSavedShowSkinValid = false;
-        }
-
-        vm->gpu.restoreState(menu_gfx_backup);
-        sysState = STATE_RUNNING;
-    }
-
-}
-
 // --------------------------------------------------------------------------
 // RENDERING
 // --------------------------------------------------------------------------
 
-void Real8Shell::renderFileList()
+void Real8Shell::renderFileList(bool drawTopPreview)
 {
     bool is3ds = (strcmp(host->getPlatform(), "3DS") == 0);
-    if (is3ds) renderTopPreview3ds();
-    else vm->clearAltFramebuffer();
+    if (is3ds) {
+        if (drawTopPreview) renderTopPreview3ds();
+    } else {
+        vm->clearAltFramebuffer();
+    }
 
     vm->gpu.setMenuFont(true);
     vm->gpu.cls(0);
@@ -1093,6 +992,13 @@ void Real8Shell::renderFileList()
     if (gameList.empty()) {
         const char *notitle = "EMPTY FOLDER";
         vm->gpu.pprint(notitle, strlen(notitle), getCenteredX(notitle), 50, 8);
+        if (repoDownload.active && vm->showRepoGames) {
+            const char *repoTitle = "REAL-8 EXPLORER";
+            const char *repoMsg = "LOADING REPO GAMES";
+            vm->gpu.rectfill(0, 52, 127, 76, 1);
+            vm->gpu.pprint(repoTitle, strlen(repoTitle), getCenteredX(repoTitle), 56, 7);
+            vm->gpu.pprint(repoMsg, strlen(repoMsg), getCenteredX(repoMsg), 66, 7);
+        }
         return;
     }
 
@@ -1130,13 +1036,22 @@ void Real8Shell::renderFileList()
         }
     }
     */
+    if (repoDownload.active && vm->showRepoGames) {
+        const char *repoTitle = "REAL-8 EXPLORER";
+        const char *repoMsg = "LOADING REPO GAMES";
+        vm->gpu.rectfill(0, 52, 127, 76, 1);
+        vm->gpu.pprint(repoTitle, strlen(repoTitle), getCenteredX(repoTitle), 56, 7);
+        vm->gpu.pprint(repoMsg, strlen(repoMsg), getCenteredX(repoMsg), 66, 7);
+    }
     vm->gpu.setMenuFont(false);
 }
 
-void Real8Shell::renderTopPreview3ds()
+void Real8Shell::renderTopPreview3ds(const char *statusText)
 {
     memset(top_screen_fb, 0, sizeof(top_screen_fb));
-    if (has_preview) {
+    if (statusText && statusText[0] != '\0') {
+        drawMenuTextToBuffer(top_screen_fb, statusText, getCenteredX(statusText), 60, 11);
+    } else if (has_preview) {
         for (int y = 0; y < 128; ++y) {
             for (int x = 0; x < 128; ++x) {
                 top_screen_fb[y][x] = preview_ram[y][x] & 0x0F;
@@ -1168,168 +1083,6 @@ void Real8Shell::renderOptionsMenu()
     }
     vm->gpu.setMenuFont(false);
 }
-
-void Real8Shell::renderSettingsMenu()
-{
-    vm->gpu.setMenuFont(true);
-    // Use vm->gpu for graphics calls
-    vm->gpu.cls(0);
-    
-    // drawStarfield is a member of Real8Shell, not gpu
-    drawStarfield();
-
-    // Graphics primitives accessed via vm->gpu
-    vm->gpu.rectfill(10, 5, 117, 110, 0); 
-    vm->gpu.rect(10, 5, 117, 110, 1);
-    vm->gpu.rectfill(10, 5, 117, 14, 1);
-
-    const char *title = "SETTINGS";
-    // pprint accessed via vm->gpu
-    vm->gpu.pprint(title, (int)strlen(title), getCenteredX(title), 7, 6);
-
-    const char* platform = host->getPlatform();
-    bool RepoSupport = isRepoSupportedPlatform(platform);
-
-    static const char *labels_repo[] = {
-        "REPO PREVIEW", "SHOW SKIN", "REPO GAMES", "STRETCH SCREEN",
-        "CRT FILTER", "INTERPOLATION", "CREDITS", "EXIT REAL8", "BACK"};
-    static const char *labels_no_repo[] = {
-        "SHOW SKIN", "STRETCH SCREEN", "CRT FILTER", "INTERPOLATION",
-        "CREDITS", "EXIT REAL8", "BACK"};
-    const char **labels = RepoSupport ? labels_repo : labels_no_repo;
-    const int itemCount = RepoSupport ?
-        (int)(sizeof(labels_repo) / sizeof(labels_repo[0])) :
-        (int)(sizeof(labels_no_repo) / sizeof(labels_no_repo[0]));
-
-    // Settings variables are inside vm structure
-    const char *val_repo_snap = vm->showRepoSnap ? "ON" : "OFF";
-    const char *val_skin = vm->showSkin ? "ON" : "OFF";
-    const char *val_stretch = vm->stretchScreen ? "ON" : "OFF";
-    const char *val_crt = vm->crt_filter ? "ON" : "OFF";
-    const char *val_interp = vm->interpolation ? "ON" : "OFF";
-
-    for (int i = 0; i < itemCount; i++)
-    {
-        int y = 20 + (i * 10);
-        
-        // menuSelection is a member of Real8Shell
-        if (i == menuSelection)
-            vm->gpu.pprint(">", 1, 15, y, 7);
-            
-        vm->gpu.pprint(labels[i], (int)strlen(labels[i]), 22, y, (i == menuSelection) ? 7 : 6);
-
-        // Lambda must capture 'this' or 'vm' to use gpu functions
-        auto drawVal = [&](const char *txt, bool active)
-        {
-            vm->gpu.pprint(txt, (int)strlen(txt), 95, y, active ? 11 : 8);
-        };
-
-        if (RepoSupport) {
-            if (i == 0) drawVal(val_repo_snap, vm->showRepoSnap);
-            if (i == 1) drawVal(val_skin, vm->showSkin);
-            if (i == 2) drawVal(vm->showRepoGames ? "ON" : "OFF", vm->showRepoGames);
-            if (i == 3) drawVal(val_stretch, vm->stretchScreen);
-            if (i == 4) drawVal(val_crt, vm->crt_filter);
-            if (i == 5) drawVal(val_interp, vm->interpolation);
-        } else {
-            if (i == 0) drawVal(val_skin, vm->showSkin);
-            if (i == 1) drawVal(val_stretch, vm->stretchScreen);
-            if (i == 2) drawVal(val_crt, vm->crt_filter);
-            if (i == 3) drawVal(val_interp, vm->interpolation);
-        }
-    }
-    vm->gpu.setMenuFont(false);
-}
-
-void Real8Shell::renderInGameMenu()
-{
-
-    vm->gpu.setMenuFont(true);
-    bool is3ds = (strcmp(host->getPlatform(), "3DS") == 0);
-    if (is3ds) {
-        vm->gpu.cls(0);
-        drawStarfield();
-    } else {
-        // Keep game background on other platforms
-        vm->gpu.fillp(0xA5A5);
-        vm->gpu.rectfill(0, 0, 128, 128, 0);
-        vm->gpu.fillp(0);
-    }
-
-    int mw = 100;
-    int mh = (inGameOptions.size() * 11) + 16;
-    int mx = (128 - mw) / 2;
-    int my = (128 - mh) / 2 - (is3ds ? 8 : 0);
-
-    vm->gpu.rectfill(mx, my, mx + mw, my + mh, 0);
-    vm->gpu.rect(mx, my, mx + mw, my + mh, 1);
-    vm->gpu.rectfill(mx, my, mx + mw, my + 9, 1);
-
-    const char *title = "PAUSED";
-    vm->gpu.pprint(title, strlen(title), getCenteredX(title), my + 2, 6);
-
-    for (int i = 0; i < (int)inGameOptions.size(); i++) {
-        int oy = my + 15 + (i * 11);
-        int ox = mx + 13;
-        int col = (i == inGameMenuSelection) ? 7 : 6;
-
-        if (i == inGameMenuSelection) vm->gpu.pprint(">", 1, ox - 6, oy, 7);
-        vm->gpu.pprint(inGameOptions[i].c_str(), inGameOptions[i].length(), ox, oy, col);
-        
-        // Bars for volume
-        if (inGameOptions[i] == "MUSIC") {
-             for(int b=0; b<10; b++) vm->gpu.pprint("|", 1, mx+mw-45+(b*3), oy, (b < vm->volume_music)?11:5);
-        }
-        else if (inGameOptions[i] == "SFX") {
-             for(int b=0; b<10; b++) vm->gpu.pprint("|", 1, mx+mw-45+(b*3), oy, (b < vm->volume_sfx)?11:5);
-        }
-        // [NEW] Logic for SHOW FPS Status
-        else if (inGameOptions[i] == "SHOW FPS") {
-             const char* status = vm->showStats ? "ON" : "OFF";
-             int statusCol = vm->showStats ? 11 : 8; // 11=Green, 8=Red
-             
-             // Calculate alignment: Right Edge (mx+mw) - Padding(10) - TextWidth(len*5)
-             int txtW = strlen(status) * 5; 
-             int statusX = (mx + mw) - txtW - 10;
-             
-             vm->gpu.pprint(status, strlen(status), statusX, oy, statusCol);
-        }
-    }
-
-    vm->gpu.setMenuFont(false);
-}
-
-void Real8Shell::renderMessage(const char *header, std::string msg, int color)
-{
-    vm->gpu.setMenuFont(true);
-    vm->gpu.cls(0);
-    vm->gpu.rectfill(0, 50, 127, 75, color);
-    vm->gpu.pprint(header, strlen(header), getCenteredX(header), 55, 7);
-    vm->gpu.pprint(msg.c_str(), msg.length(), getCenteredX(msg.c_str()), 65, 7);
-    vm->gpu.setMenuFont(false);
-}
-
-void Real8Shell::drawWifiScreen(const std::string &ssid, const std::string &ip, const std::string &status, float progress)
-{
-    vm->gpu.setMenuFont(true);
-    vm->gpu.camera(0, 0);
-    vm->gpu.clip(0, 0, 128, 128);
-    vm->gpu.cls(0);
-    vm->gpu.rectfill(0, 0, 127, 9, 1);
-    
-    const char *title = "WIFI TRANSFER";
-    vm->gpu.pprint(title, strlen(title), getCenteredX(title), 2, 6);
-    vm->gpu.pprint("IP ADDRESS:", 11, 4, 45, 6);
-    vm->gpu.pprint(ip.c_str(), ip.length(), 4, 53, 12);
-    
-    vm->gpu.rect(10, 80, 118, 90, 6);
-    if (progress > 0) vm->gpu.rectfill(12, 82, 12 + (int)(104 * progress), 88, 8);
-    
-    vm->gpu.pprint(status.c_str(), status.length(), getCenteredX(status.c_str()), 70, 7);
-    vm->gpu.setMenuFont(false);
-}
-
-void Real8Shell::renderStorageView() { /* Implementation identical to previous, using vm-> */ }
 
 // --------------------------------------------------------------------------
 // DATA & HELPERS
@@ -1394,6 +1147,7 @@ void Real8Shell::parseJsonGames()
     vfs.clear();
     const char* platform = host->getPlatform();
     bool RepoSupport = isRepoSupportedPlatform(platform);
+    bool is3ds = (strcmp(platform, "3DS") == 0);
 
     // 1. Local JSON (always load so local lists remain visible)
     std::vector<uint8_t> localData = host->loadFile("/gameslist.json");
@@ -1413,6 +1167,8 @@ void Real8Shell::parseJsonGames()
                 startAsyncDownload(repoDownload, vm->currentRepoUrl, repoPath);
             }
         } else {
+            renderMessage("REAL-8 EXPLORER", "LOADING REPO GAMES", 1);
+            vm->show_frame();
             if (host->downloadFile(vm->currentRepoUrl.c_str(), repoPath)) {
                 std::vector<uint8_t> remoteData = host->loadFile(repoPath);
                 if (!remoteData.empty()) parseJsonToVFS(std::string(remoteData.begin(), remoteData.end()));
@@ -1425,6 +1181,7 @@ void Real8Shell::parseJsonGames()
 void Real8Shell::parseJsonToVFS(const std::string &json)
 {
     // Minimal parser to populate vfs map (Same logic as original code)
+    const char *platform = host->getPlatform();
     size_t pos = 0;
     while(true) {
         size_t objStart = json.find('{', pos);
@@ -1470,8 +1227,9 @@ void Real8Shell::parseJsonToVFS(const std::string &json)
             std::string name = json_extract(gJson, "name");
             //std::string author = json_extract(gJson, "author");
             std::string url = json_extract(gJson, "url");
+            std::string recom = json_extract(gJson, "recom");
             
-            if (!url.empty()) {
+            if (!url.empty() && recomAllowsPlatform(recom, platform)) {
                 GameEntry e;
                 e.displayName = name.empty() ? url : name;
                 //e.author = author;

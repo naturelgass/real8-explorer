@@ -1,9 +1,9 @@
 #pragma once
 
 #include <3ds.h>
-#include <3ds/services/httpc.h>
 #include <3ds/services/soc.h>
 #include <3ds/services/sslc.h>
+#include <curl/curl.h>
 
 #if defined(__has_include)
   #if __has_include(<3ds/services/ac.h>)
@@ -43,12 +43,17 @@
 #include <malloc.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <ctime>
 #include <fstream>
 #include <iostream>
 #include <vector>
 #include <string>
+
+#ifndef REAL8_BOTTOM_NOBACK
+#define REAL8_BOTTOM_NOBACK 0
+#endif
 
 namespace {
     const int kTopWidth = 400;
@@ -77,6 +82,12 @@ namespace {
         #define REAL8_3DS_HAS_PAL8_TLUT 1
     #else
         #define REAL8_3DS_HAS_PAL8_TLUT 0
+    #endif
+
+    // If enabled, keep the game textures CPU-accessible and write them directly in swizzled (tiled) order.
+    // This avoids per-frame GX display transfers, which can stall the CPU on Old3DS.
+    #ifndef REAL8_3DS_DIRECT_TEX_UPDATE
+    #define REAL8_3DS_DIRECT_TEX_UPDATE 1
     #endif
 
 
@@ -113,6 +124,73 @@ namespace {
     uint32_t packAbgr8888(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
         // Match 3DS RGBA8 texture byte order (ABGR in memory).
         return (uint32_t)((r << 24) | (g << 16) | (b << 8) | a);
+    }
+
+    // 3DS textures are stored as 8x8 tiles, with pixels inside each tile in Morton (Z-order) layout.
+    // Addressing: tileIndex = (y>>3)*tilesPerRow + (x>>3) (row-major in tiles)
+    //             within   = morton(x&7, y&7)
+    // See GBATEK's '3DS Video Texture Swizzling'.
+    static inline const u8* mortonLut64() {
+        static u8 lut[64];
+        static bool inited = false;
+        if (!inited) {
+            for (u32 y = 0; y < 8; ++y) {
+                for (u32 x = 0; x < 8; ++x) {
+                    u32 m = 0;
+                    for (u32 i = 0; i < 3; ++i) {
+                        m |= ((x >> i) & 1u) << (2u*i);
+                        m |= ((y >> i) & 1u) << (2u*i + 1u);
+                    }
+                    lut[(y<<3) | x] = (u8)m;
+                }
+            }
+            inited = true;
+        }
+        return lut;
+    }
+
+    static inline void swizzleCopyPal8_128(const u8* srcLinear128, u8* dstTiled, bool maskLowNibble) {
+        const u8* mort = mortonLut64();
+        constexpr int W = kPicoWidth;
+        constexpr int H = kPicoHeight;
+        constexpr int tilesX = W / 8;
+        // 8-bit texel: 64 bytes per 8x8 tile
+        for (int ty = 0; ty < H; ty += 8) {
+            const int tileY = ty >> 3;
+            for (int tx = 0; tx < W; tx += 8) {
+                const int tileX = tx >> 3;
+                u8* dstTile = dstTiled + (tileY * tilesX + tileX) * 64;
+                for (int y = 0; y < 8; ++y) {
+                    const u8* srcRow = srcLinear128 + (ty + y) * W + tx;
+                    for (int x = 0; x < 8; ++x) {
+                        u8 v = srcRow[x];
+                        if (maskLowNibble) v &= 0x0F;
+                        dstTile[mort[(y<<3) | x]] = v;
+                    }
+                }
+            }
+        }
+    }
+    static inline void swizzleCopyRgb565FromIdx_128(const u8* srcLinear128, u16* dstTiled565, const u16* pal565) {
+        const u8* mort = mortonLut64();
+        constexpr int W = kPicoWidth;
+        constexpr int H = kPicoHeight;
+        constexpr int tilesX = W / 8;
+        // 16-bit texel: 64 u16 per 8x8 tile
+        for (int ty = 0; ty < H; ty += 8) {
+            const int tileY = ty >> 3;
+            for (int tx = 0; tx < W; tx += 8) {
+                const int tileX = tx >> 3;
+                u16* dstTile = dstTiled565 + (tileY * tilesX + tileX) * 64;
+                for (int y = 0; y < 8; ++y) {
+                    const u8* srcRow = srcLinear128 + (ty + y) * W + tx;
+                    for (int x = 0; x < 8; ++x) {
+                        u8 c = srcRow[x] & 0x0F;
+                        dstTile[mort[(y<<3) | x]] = pal565[c];
+                    }
+                }
+            }
+        }
     }
 
     void buildGameRect(bool stretch, bool hasWallpaper, int screenW, int screenH,
@@ -155,6 +233,15 @@ namespace {
         outScale = scale;
     }
 
+    bool readConfigFlags2(const std::vector<uint8_t>& data, uint8_t& outFlags2) {
+        if (data.size() < 6) return false;
+        uint32_t inputSize = 0;
+        memcpy(&inputSize, &data[1], 4);
+        size_t offset = 5 + inputSize;
+        if (data.size() <= offset) return false;
+        outFlags2 = data[offset];
+        return true;
+    }
 
     bool writeBmp24(const std::string &path, const uint32_t *pixels) {
         const int width = kPicoWidth;
@@ -204,6 +291,26 @@ namespace {
 
         return true;
     }
+
+    struct CurlWriteState {
+        FILE *file = nullptr;
+        size_t total = 0;
+        bool error = false;
+    };
+
+    size_t curlWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
+        CurlWriteState *state = static_cast<CurlWriteState*>(userdata);
+        if (!state || !state->file) return 0;
+        const size_t bytes = size * nmemb;
+        if (bytes == 0) return 0;
+        const size_t written = fwrite(ptr, 1, bytes, state->file);
+        state->total += written;
+        if (written != bytes) {
+            state->error = true;
+            return 0;
+        }
+        return written;
+    }
 }
 
 class ThreeDSHost : public IReal8Host
@@ -217,10 +324,15 @@ private:
     C3D_Tex *gameTexTop = nullptr;
     Tex3DS_SubTexture *gameSubtexTop = nullptr;
     C2D_Image gameImageTop;
+    // Right-eye top screen texture for stereoscopic 3D
+    C3D_Tex *gameTexTopR = nullptr;
+    Tex3DS_SubTexture *gameSubtexTopR = nullptr;
+    C2D_Image gameImageTopR;
     C3D_Tex *wallpaperTex = nullptr;
     Tex3DS_SubTexture *wallpaperSubtex = nullptr;
     C2D_Image wallpaperImage;
     C3D_RenderTarget *topTarget = nullptr;
+    C3D_RenderTarget *topTargetR = nullptr; // Right-eye target (3D mode)
     C3D_RenderTarget *bottomTarget = nullptr;
 
     // --- Game framebuffer upload path ---
@@ -261,6 +373,7 @@ private:
     bool networkReady = false;
     bool acReady = false;
     bool sslcReady = false;
+    bool curlReady = false;
 
     u32 *socBuffer = nullptr;
     bool socBufferOwned = false;
@@ -268,6 +381,7 @@ private:
 
     u32 m_keysDown = 0;
     u32 m_keysHeld = 0;
+    u64 m_lastInputPollMs = 0;
     int lastTouchX = 0;
     int lastTouchY = 0;
     uint8_t lastTouchBtn = 0;
@@ -344,15 +458,27 @@ private:
         C2D_Init(256);
         C2D_Prepare();
 
+        // 2D-only: disable depth testing once (no need to set it every frame).
+        C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_ALL);
+
         topTarget = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
+        topTargetR = C2D_CreateScreenTarget(GFX_TOP, GFX_RIGHT);
         bottomTarget = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
 
         gameTex = (C3D_Tex*)linearAlloc(sizeof(C3D_Tex));
 #if REAL8_3DS_HAS_PAL8_TLUT
         // 8-bit indexed texture; palette supplied via TLUT (no per-pixel CPU conversion).
+    #if REAL8_3DS_DIRECT_TEX_UPDATE
+        C3D_TexInit(gameTex, kPicoWidth, kPicoHeight, GPU_PAL8);
+    #else
         C3D_TexInitVRAM(gameTex, kPicoWidth, kPicoHeight, GPU_PAL8);
+    #endif
 #else
+    #if REAL8_3DS_DIRECT_TEX_UPDATE
+        C3D_TexInit(gameTex, kPicoWidth, kPicoHeight, GPU_RGB565);
+    #else
         C3D_TexInitVRAM(gameTex, kPicoWidth, kPicoHeight, GPU_RGB565);
+    #endif
 #endif
         C3D_TexSetFilter(gameTex, GPU_NEAREST, GPU_NEAREST);
 
@@ -382,9 +508,17 @@ private:
 
         gameTexTop = (C3D_Tex*)linearAlloc(sizeof(C3D_Tex));
 #if REAL8_3DS_HAS_PAL8_TLUT
+    #if REAL8_3DS_DIRECT_TEX_UPDATE
+        C3D_TexInit(gameTexTop, kPicoWidth, kPicoHeight, GPU_PAL8);
+    #else
         C3D_TexInitVRAM(gameTexTop, kPicoWidth, kPicoHeight, GPU_PAL8);
+    #endif
 #else
+    #if REAL8_3DS_DIRECT_TEX_UPDATE
+        C3D_TexInit(gameTexTop, kPicoWidth, kPicoHeight, GPU_RGB565);
+    #else
         C3D_TexInitVRAM(gameTexTop, kPicoWidth, kPicoHeight, GPU_RGB565);
+    #endif
 #endif
         C3D_TexSetFilter(gameTexTop, GPU_NEAREST, GPU_NEAREST);
 
@@ -398,6 +532,29 @@ private:
 
         gameImageTop.tex = gameTexTop;
         gameImageTop.subtex = gameSubtexTop;
+
+
+        // Right-eye top texture for stereoscopic 3D
+        gameTexTopR = (C3D_Tex*)linearAlloc(sizeof(C3D_Tex));
+#if REAL8_3DS_HAS_PAL8_TLUT
+    #if REAL8_3DS_DIRECT_TEX_UPDATE
+        C3D_TexInit(gameTexTopR, kPicoWidth, kPicoHeight, GPU_PAL8);
+    #else
+        C3D_TexInitVRAM(gameTexTopR, kPicoWidth, kPicoHeight, GPU_PAL8);
+    #endif
+#else
+    #if REAL8_3DS_DIRECT_TEX_UPDATE
+        C3D_TexInit(gameTexTopR, kPicoWidth, kPicoHeight, GPU_RGB565);
+    #else
+        C3D_TexInitVRAM(gameTexTopR, kPicoWidth, kPicoHeight, GPU_RGB565);
+    #endif
+#endif
+        C3D_TexSetFilter(gameTexTopR, GPU_NEAREST, GPU_NEAREST);
+
+        gameSubtexTopR = (Tex3DS_SubTexture*)linearAlloc(sizeof(Tex3DS_SubTexture));
+        *gameSubtexTopR = *gameSubtexTop; // same UVs/dimensions as the left-eye texture
+        gameImageTopR.tex = gameTexTopR;
+        gameImageTopR.subtex = gameSubtexTopR;
 
         // Allocate legacy RGB565 upload buffers (used when GPU palette isn't available, and for safety fallback).
         pixelBufferSize = (size_t)(kPicoWidth * kPicoHeight * sizeof(u16));
@@ -416,16 +573,32 @@ private:
         if (tlutReady) {
             C3D_TlutLoad(&gameTlut, tlutData);
             useGpuPalette = true;
-        } else {
-            // TLUT init failed. Re-initialize textures back to RGB565 so the legacy path stays correct.
+        } else {            // TLUT init failed. Re-initialize textures back to RGB565 so the legacy path stays correct.
             useGpuPalette = false;
+
             C3D_TexDelete(gameTex);
+#if REAL8_3DS_DIRECT_TEX_UPDATE
+            C3D_TexInit(gameTex, kPicoWidth, kPicoHeight, GPU_RGB565);
+#else
             C3D_TexInitVRAM(gameTex, kPicoWidth, kPicoHeight, GPU_RGB565);
+#endif
             C3D_TexSetFilter(gameTex, GPU_NEAREST, GPU_NEAREST);
 
             C3D_TexDelete(gameTexTop);
+#if REAL8_3DS_DIRECT_TEX_UPDATE
+            C3D_TexInit(gameTexTop, kPicoWidth, kPicoHeight, GPU_RGB565);
+#else
             C3D_TexInitVRAM(gameTexTop, kPicoWidth, kPicoHeight, GPU_RGB565);
+#endif
             C3D_TexSetFilter(gameTexTop, GPU_NEAREST, GPU_NEAREST);
+
+            C3D_TexDelete(gameTexTopR);
+#if REAL8_3DS_DIRECT_TEX_UPDATE
+            C3D_TexInit(gameTexTopR, kPicoWidth, kPicoHeight, GPU_RGB565);
+#else
+            C3D_TexInitVRAM(gameTexTopR, kPicoWidth, kPicoHeight, GPU_RGB565);
+#endif
+            C3D_TexSetFilter(gameTexTopR, GPU_NEAREST, GPU_NEAREST);
         }
 #else
         useGpuPalette = false;
@@ -540,6 +713,13 @@ private:
     }
 
 
+    void syncBottomWallpaperFromConfig() {
+        uint8_t flags2 = 0;
+        std::vector<uint8_t> data = loadFile("/config.dat");
+        if (!readConfigFlags2(data, flags2)) return;
+        bottomWallpaperVisible = (flags2 & (1 << 1)) == 0;
+    }
+
     void initFs() {
         ensureDir(rootPath);
         ensureDir(rootPath + "/config");
@@ -548,25 +728,27 @@ private:
         ensureDir(rootPath + "/screenshots");
 
         // Init RomFS once
-        if (R_FAILED(romfsInit())) return;
+        bool romfsReady = R_SUCCEEDED(romfsInit());
+        if (romfsReady) {
+            auto copyFromRomfs = [&](const std::string& romName, const std::string& dstName, bool overwrite) {
+                const std::string dst = rootPath + "/config/" + dstName;
 
-        auto copyIfMissing = [&](const std::string& romName, const std::string& dstName) {
-            const std::string dst = rootPath + "/config/" + dstName;
+                if (!overwrite && access(dst.c_str(), F_OK) == 0) return;
 
-            // Don't overwrite user-edited files
-            if (access(dst.c_str(), F_OK) == 0) return;
+                std::ifstream in(("romfs:/" + romName).c_str(), std::ios::binary);
+                if (!in.is_open()) return;
 
-            std::ifstream in(("romfs:/" + romName).c_str(), std::ios::binary);
-            if (!in.is_open()) return;
+                std::ofstream out(dst.c_str(), std::ios::binary | std::ios::trunc);
+                if (!out.is_open()) return;
 
-            std::ofstream out(dst.c_str(), std::ios::binary);
-            if (!out.is_open()) return;
+                out << in.rdbuf();
+            };
 
-            out << in.rdbuf();
-        };
-
-        copyIfMissing("wallpaper.png", "wallpaper.png");
-        copyIfMissing("gamesrepo.txt", "gamesrepo.txt");
+            copyFromRomfs("config.dat", "config.dat", false);
+            copyFromRomfs("wallpaper.png", "wallpaper.png", true);
+            copyFromRomfs("gamesrepo.txt", "gamesrepo.txt", false);
+        }
+        syncBottomWallpaperFromConfig();
     }
 
     void initNetwork() {
@@ -628,10 +810,10 @@ private:
             // Not fatal; HTTP-only endpoints can still work.
         }
 
-        // 4) HTTPC
-        rc = httpcInit(0);
-        if (R_FAILED(rc)) {
-            log("[3DS][NET] httpcInit failed: 0x%08lX", (u32)rc);
+        // 4) libcurl (3ds-curl)
+        CURLcode curlRc = curl_global_init(CURL_GLOBAL_DEFAULT);
+        if (curlRc != CURLE_OK) {
+            log("[3DS][NET] curl_global_init failed: %d", (int)curlRc);
             if (sslcReady) { sslcExit(); sslcReady = false; }
             socExit();
             if (socBufferOwned) {
@@ -641,6 +823,7 @@ private:
             }
             return;
         }
+        curlReady = true;
 
         networkReady = true;
     }
@@ -658,7 +841,10 @@ private:
     void shutdownNetwork() {
         if (!networkReady) return;
 
-        httpcExit();
+        if (curlReady) {
+            curl_global_cleanup();
+            curlReady = false;
+        }
 
         if (sslcReady) {
             sslcExit();
@@ -743,6 +929,16 @@ private:
             linearFree(gameSubtexTop);
             gameSubtexTop = nullptr;
         }
+
+if (gameTexTopR) {
+    C3D_TexDelete(gameTexTopR);
+    linearFree(gameTexTopR);
+    gameTexTopR = nullptr;
+}
+if (gameSubtexTopR) {
+    linearFree(gameSubtexTopR);
+    gameSubtexTopR = nullptr;
+}
         C2D_Fini();
         C3D_Fini();
         gfxExit();
@@ -806,14 +1002,17 @@ private:
                     }
                 }
             }
-    
-            // 2) Copy indices as-is (no per-pixel conversion loop).
-            memcpy(destIndexBuffer, framebuffer, (size_t)(kPicoWidth * kPicoHeight));
-    
-            // 3) Update GPU palette if it changed this frame.
+            // 2) Update GPU palette if it changed this frame.
             updateGpuPaletteIfNeeded(paletteLUT565);
-    
-            // 4) Upload indices -> tiled texture in VRAM.
+
+#if REAL8_3DS_DIRECT_TEX_UPDATE
+            // 3) Write indices directly into the CPU-accessible texture in swizzled (tiled) order.
+            swizzleCopyPal8_128((const u8*)framebuffer, (u8*)destTex->data, /*maskLowNibble=*/true);
+            GSPGPU_FlushDataCache(destTex->data, (size_t)(kPicoWidth * kPicoHeight));
+            (void)destIndexBuffer;
+#else
+            // 3) Copy indices linearly then use GX display transfer to swizzle into VRAM.
+            memcpy(destIndexBuffer, framebuffer, (size_t)(kPicoWidth * kPicoHeight));
             GSPGPU_FlushDataCache(destIndexBuffer, indexBufferSize);
             C3D_SyncDisplayTransfer(
                 (u32*)destIndexBuffer, GX_BUFFER_DIM(kPicoWidth, kPicoHeight),
@@ -822,6 +1021,7 @@ private:
                  GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_I8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_I8) |
                  GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
             );
+#endif
         }
     #endif // REAL8_3DS_HAS_PAL8_TLUT
     
@@ -829,6 +1029,40 @@ private:
         void blitFrameToTexture(uint8_t (*framebuffer)[128], C3D_Tex *destTex,
                                 const uint16_t *paletteLUT565, const uint32_t *paletteLUT32,
                                 bool updateScreenshot, u16 *destBuffer565) {
+#if REAL8_3DS_DIRECT_TEX_UPDATE
+            // Write RGB565 directly into the CPU-accessible texture in swizzled (tiled) order.
+            // Screenshot conversion (rare) stays linear for simplicity.
+            if (updateScreenshot) {
+                int idx = 0;
+                for (int y = 0; y < kPicoHeight; ++y) {
+                    for (int x = 0; x < kPicoWidth; ++x) {
+                        uint8_t col = framebuffer[y][x] & 0x0F;
+                        screenBuffer32[idx++] = paletteLUT32[col];
+                    }
+                }
+            }
+            // Swizzled write for the texture.
+            const u8* mort = mortonLut64();
+            constexpr int W = kPicoWidth;
+            constexpr int H = kPicoHeight;
+            constexpr int tilesX = W / 8;
+            u16* dst = (u16*)destTex->data;
+            for (int ty = 0; ty < H; ty += 8) {
+                const int tileY = ty >> 3;
+                for (int tx = 0; tx < W; tx += 8) {
+                    const int tileX = tx >> 3;
+                    u16* dstTile = dst + (tileY * tilesX + tileX) * 64;
+                    for (int y = 0; y < 8; ++y) {
+                        const u8* srcRow = &framebuffer[ty + y][tx];
+                        for (int x = 0; x < 8; ++x) {
+                            u8 c = srcRow[x] & 0x0F;
+                            dstTile[mort[(y<<3) | x]] = paletteLUT565[c];
+                        }
+                    }
+                }
+            }
+            GSPGPU_FlushDataCache(destTex->data, (size_t)(kPicoWidth * kPicoHeight * sizeof(u16)));
+#else
             int idx = 0;
             for (int y = 0; y < kPicoHeight; ++y) {
                 for (int x = 0; x < kPicoWidth; ++x) {
@@ -850,6 +1084,7 @@ private:
                  GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) |
                  GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
             );
+#endif
         }
 
     // When browsing directories, the shell may give a dedicated top buffer.
@@ -872,6 +1107,7 @@ public:
     Real8VM *debugVMRef = nullptr;
     bool crt_filter = false;
     bool interpolation = false;
+    bool bottomWallpaperVisible = (REAL8_BOTTOM_NOBACK == 0);
 
     bool bottomStaticValid = false;
     bool lastInGameSingleScreen = false;
@@ -897,11 +1133,20 @@ public:
     const char *getPlatform() override { return "3DS"; }
     std::string getClipboardText() override { return ""; }
 
+    // Raw 3DS key state helpers (used by main loop / host controls)
+    u32 getKeysHeldRaw() const { return m_keysHeld; }
+    u32 getKeysDownRaw() const { return m_keysDown; }
+    bool isExitComboHeld() const { return (m_keysHeld & (KEY_START | KEY_SELECT)) == (KEY_START | KEY_SELECT); }
+
     void setInterpolation(bool active) {
         interpolation = active;
         if (gameTexTop) {
             GPU_TEXTURE_FILTER_PARAM filter = active ? GPU_LINEAR : GPU_NEAREST;
             C3D_TexSetFilter(gameTexTop, filter, filter);
+        }
+        if (gameTexTopR) {
+            GPU_TEXTURE_FILTER_PARAM filter = active ? GPU_LINEAR : GPU_NEAREST;
+            C3D_TexSetFilter(gameTexTopR, filter, filter);
         }
         if (gameTex) {
             C3D_TexSetFilter(gameTex, GPU_NEAREST, GPU_NEAREST);
@@ -977,6 +1222,74 @@ public:
             topPreviewBlank = isBlankTopPreview(topbuffer, bottombuffer);
         }
 
+
+        // Stereoscopic 3D (top screen): if enabled in the VM and the 3D slider is up,
+        // render separate left/right eye images from vm->stereo_layers using bucket-based parallax.
+        const float stereoSlider = osGet3DSliderState();
+        const bool stereoActive =
+            (inGameSingleScreen &&
+             debugVMRef && debugVMRef->stereoscopic && !debugVMRef->isShellUI &&
+             debugVMRef->stereo_layers != nullptr &&
+             topTargetR != nullptr && gameTexTopR != nullptr &&
+             stereoSlider > 0.01f);
+
+        // When 3D is disabled, the system duplicates the left framebuffer to the right.
+        gfxSet3D(stereoActive);
+
+        if (stereoActive) {
+            static uint8_t eyeL[128][128];
+            static uint8_t eyeR[128][128];
+            static uint8_t zL[128 * 128];
+            static uint8_t zR[128 * 128];
+
+            std::memset(eyeL, 0, sizeof(eyeL));
+            std::memset(eyeR, 0, sizeof(eyeR));
+            std::memset(zL, 0, sizeof(zL));
+            std::memset(zR, 0, sizeof(zR));
+
+            constexpr float kPxPerBucket = 1.0f; // 1 source pixel per bucket at max slider
+            for (int li = 0; li < Real8VM::STEREO_LAYER_COUNT; ++li) {
+                const int bucket = li - Real8VM::STEREO_BUCKET_BIAS;
+                int shift = (int)lroundf((float)bucket * stereoSlider * kPxPerBucket);
+                if (shift < -Real8VM::STEREO_BUCKET_MAX) shift = -Real8VM::STEREO_BUCKET_MAX;
+                if (shift >  Real8VM::STEREO_BUCKET_MAX) shift =  Real8VM::STEREO_BUCKET_MAX;
+                const uint8_t zval = (uint8_t)(bucket < 0 ? -bucket : bucket); // |bucket| in 0..7
+
+                for (int y = 0; y < kPicoHeight; ++y) {
+                    const uint8_t* src_row = debugVMRef->stereo_layers[li * kPicoHeight + y];
+                    for (int x = 0; x < kPicoWidth; ++x) {
+                        uint8_t src = src_row[x];
+                        if (src == 0xFF) continue;
+                        src &= 0x0F;
+
+                        const int lx = x + shift;
+                        if ((unsigned)lx < (unsigned)kPicoWidth) {
+                            const int i = y * kPicoWidth + lx;
+                            if (zval >= zL[i]) { zL[i] = zval; eyeL[y][lx] = src; }
+                        }
+
+                        const int rx = x - shift;
+                        if ((unsigned)rx < (unsigned)kPicoWidth) {
+                            const int i = y * kPicoWidth + rx;
+                            if (zval >= zR[i]) { zR[i] = zval; eyeR[y][rx] = src; }
+                        }
+                    }
+                }
+            }
+
+#if REAL8_3DS_HAS_PAL8_TLUT
+            if (useGpuPalette) {
+                // Use separate CPU buffers for the two uploads to avoid any chance of overlap.
+                blitFrameToTexture(eyeL, gameTexTop,  paletteLUT565, paletteLUT32, true,  indexBufferTop);
+                blitFrameToTexture(eyeR, gameTexTopR, paletteLUT565, paletteLUT32, false, indexBufferBottom);
+            } else
+#endif
+            {
+                blitFrameToTexture(eyeL, gameTexTop,  paletteLUT565, paletteLUT32, true,  pixelBuffer565Top);
+                blitFrameToTexture(eyeR, gameTexTopR, paletteLUT565, paletteLUT32, false, pixelBuffer565Bottom);
+            }
+        } else {
+
         if (inGameSingleScreen) {
             // Update top texture and screenshot buffer from the game framebuffer.
             #if REAL8_3DS_HAS_PAL8_TLUT
@@ -1009,19 +1322,24 @@ public:
             }
         }
 
+        
+        }
+
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
-        C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_ALL);
-        C3D_RenderTargetClear(topTarget, C3D_CLEAR_ALL, kClearColor, 0);
-        C2D_SceneBegin(topTarget);
 
         int tx, ty, tw, th;
         float tscale;
         bool hasWallpaper = (wallpaperTex != nullptr);
-        bool topHasWallpaper = hasWallpaper && (!debugVMRef || debugVMRef->showSkin);
-        bool bottomHasWallpaper = hasWallpaper;
         bool topStretch = debugVMRef && debugVMRef->stretchScreen;
+        bool topHasWallpaper = hasWallpaper && (!debugVMRef || (debugVMRef->showSkin && !topStretch));
+        bool bottomHasWallpaper = hasWallpaper && bottomWallpaperVisible;
         buildGameRect(topStretch, topHasWallpaper, kTopWidth, kTopHeight, tx, ty, tw, th, tscale);
-        if (topHasWallpaper && wallW > 0 && wallH > 0) {
+
+        auto drawTopScene = [&](C3D_RenderTarget* tgt, const C2D_Image& img) {
+            C3D_RenderTargetClear(tgt, C3D_CLEAR_ALL, kClearColor, 0);
+            C2D_SceneBegin(tgt);
+
+            if (topHasWallpaper && wallW > 0 && wallH > 0) {
             float scaleW = (float)kTopWidth / (float)wallW;
             float scaleH = (float)kTopHeight / (float)wallH;
             float scale = (scaleW > scaleH) ? scaleW : scaleH;
@@ -1032,7 +1350,7 @@ public:
             C2D_DrawImageAt(wallpaperImage, dstX, dstY, 0.0f, nullptr, scale, scale);
         }
 
-        float tscaleX = (float)tw / (float)kPicoWidth;
+            float tscaleX = (float)tw / (float)kPicoWidth;
 
         // Use the "2x (minus 16px)" vertical mapping whenever the final height is the full
         // top-screen height (240). This keeps the game full-height even when the skin/wallpaper
@@ -1047,11 +1365,11 @@ public:
 #endif
 
         if (!topPreviewBlank) {
-                
+
             if (!useTallScale) {
                 // Fallback: uniform scaling
                 float tscaleY = (float)th / (float)kPicoHeight;
-                C2D_DrawImageAt(gameImageTop, (float)tx, (float)ty, 0.5f, nullptr, tscaleX, tscaleY);
+                C2D_DrawImageAt(img, (float)tx, (float)ty, 0.5f, nullptr, tscaleX, tscaleY);
             } else {
                 // Special vertical mapping:
                 // - First 16 source rows are NOT doubled (1x)
@@ -1081,7 +1399,7 @@ public:
                 subTop.top    = vTopFull;
                 subTop.bottom = vSplit;
 
-                C2D_Image imgTop = gameImageTop;
+                C2D_Image imgTop = img;
                 imgTop.subtex = &subTop;
                 C2D_DrawImageAt(imgTop, (float)tx, (float)ty, 0.5f, nullptr, tscaleX, 1.0f);
 
@@ -1093,7 +1411,7 @@ public:
                 subBot.top    = vSplit;
                 subBot.bottom = vBotFull;
 
-                C2D_Image imgBot = gameImageTop;
+                C2D_Image imgBot = img;
                 imgBot.subtex = &subBot;
                 C2D_DrawImageAt(imgBot, (float)tx, (float)ty + dstTopH, 0.5f, nullptr, tscaleX, scaleYBot);
             }
@@ -1103,7 +1421,14 @@ public:
             }
         }
 
-        C2D_Flush();
+        };
+
+        // Left eye (always drawn)
+        drawTopScene(topTarget, gameImageTop);
+        // Right eye (only when stereoscopic 3D is active)
+        if (stereoActive) {
+            drawTopScene(topTargetR, gameImageTopR);
+        }
 
         C3D_RenderTargetClear(bottomTarget, C3D_CLEAR_ALL, kClearColor, 0);
         C2D_SceneBegin(bottomTarget);
@@ -1135,6 +1460,7 @@ public:
             C2D_DrawImageAt(gameImageBottom, (float)bx, (float)by, 0.5f, nullptr, bscaleX, bscaleY);
         }
 
+        // Flush once after all targets have been drawn this frame.
         C2D_Flush();
         C3D_FrameEnd(0);
         
@@ -1279,11 +1605,15 @@ public:
         if (m_keysHeld & KEY_DOWN) mask |= (1 << 3);
         if (m_keysHeld & KEY_B) mask |= (1 << 4);
         if (m_keysHeld & KEY_A) mask |= (1 << 5);
-        if (m_keysHeld & KEY_START) mask |= (1 << 6);
+        if ((m_keysHeld | m_keysDown) & KEY_START) mask |= (1 << 6);
         return mask;
     }
 
     void pollInput() override {
+        u64 nowMs = osGetTime();
+        if (nowMs == m_lastInputPollMs) return;
+        m_lastInputPollMs = nowMs;
+
         hidScanInput();
         m_keysDown = hidKeysDown();
         m_keysHeld = hidKeysHeld();
@@ -1385,7 +1715,7 @@ public:
 
         // Some VM codepaths may toggle networking off. Be defensive and bring it up on-demand.
         if (!networkReady) initNetwork();
-        if (!networkReady) return false;
+        if (!networkReady || !curlReady) return false;
 
         if (acReady) {
             u32 wifi = 0;
@@ -1396,134 +1726,15 @@ public:
             }
         }
 
-        auto isAbsUrl = [](const std::string& u) -> bool {
-            return (u.rfind("http://", 0) == 0) || (u.rfind("https://", 0) == 0);
+        auto pickCaBundle = [&]() -> std::string {
+            std::string sdCa = rootPath + "/config/cacert.pem";
+            if (access(sdCa.c_str(), F_OK) == 0) return sdCa;
+            const std::string romfsCa = "romfs:/cacert.pem";
+            if (access(romfsCa.c_str(), F_OK) == 0) return romfsCa;
+            return "";
         };
 
-        auto baseOrigin = [](const std::string& u) -> std::string {
-            // Returns "scheme://host[:port]" from a full URL.
-            const size_t schemePos = u.find("://");
-            if (schemePos == std::string::npos) return std::string();
-            const size_t afterScheme = schemePos + 3;
-            size_t slashPos = u.find('/', afterScheme);
-            if (slashPos == std::string::npos) return u;
-            return u.substr(0, slashPos);
-        };
-
-        auto baseDir = [](const std::string& u) -> std::string {
-            // Returns "scheme://host[:port]/path/dir/" (ending with '/')
-            const size_t schemePos = u.find("://");
-            if (schemePos == std::string::npos) return std::string();
-            const size_t afterScheme = schemePos + 3;
-            size_t slashPos = u.find('/', afterScheme);
-            if (slashPos == std::string::npos) return u + "/";
-
-            const size_t lastSlash = u.rfind('/');
-            if (lastSlash == std::string::npos || lastSlash < slashPos) return u.substr(0, slashPos + 1);
-            return u.substr(0, lastSlash + 1);
-        };
-
-        auto absolutize = [&](const std::string& current, const std::string& loc) -> std::string {
-            if (loc.empty()) return std::string();
-            if (isAbsUrl(loc)) return loc;
-
-            // Handle protocol-relative URLs: //example.com/path
-            if (loc.rfind("//", 0) == 0) {
-                const size_t schemePos = current.find("://");
-                if (schemePos == std::string::npos) return std::string("https:") + loc;
-                return current.substr(0, schemePos) + ":" + loc;
-            }
-
-            // Absolute-path redirect: /new/path
-            if (loc[0] == '/') {
-                std::string origin = baseOrigin(current);
-                if (origin.empty()) return std::string();
-                return origin + loc;
-            }
-
-            // Relative-path redirect: new/path
-            std::string dir = baseDir(current);
-            if (dir.empty()) return std::string();
-            return dir + loc;
-        };
-
-        auto configureRequest = [&](httpcContext* ctx) {
-            // SSL + headers
-            httpcSetSSLOpt(ctx, SSLCOPT_DisableVerify);
-            httpcAddRequestHeaderField(ctx, "User-Agent", "Real8-3DS");
-
-            // Avoid compressed responses (gzip/br) unless you implement decompression.
-            httpcAddRequestHeaderField(ctx, "Accept-Encoding", "identity");
-
-            // Many hosts behave better if we explicitly prefer JSON for repo endpoints.
-            httpcAddRequestHeaderField(ctx, "Accept", "application/json, */*;q=0.1");
-
-            // KeepAlive can interact badly if the content isn’t fully drained; we’ll drain anyway,
-            // but disabling KeepAlive reduces weird edge cases.
-            httpcSetKeepAlive(ctx, HTTPC_KEEPALIVE_DISABLED);
-        };
-
-        auto beginAndGetStatus = [&](const std::string& u, u32* outStatus, std::string* outLocation) -> Result {
-            httpcContext ctx;
-            Result rc = httpcOpenContext(&ctx, HTTPC_METHOD_GET, u.c_str(), 0);
-            if (R_FAILED(rc)) return rc;
-
-            configureRequest(&ctx);
-
-            rc = httpcBeginRequest(&ctx);
-            if (R_FAILED(rc)) {
-                httpcCloseContext(&ctx);
-                return rc;
-            }
-
-            u32 status = 0;
-            httpcGetResponseStatusCode(&ctx, &status);
-            if (outStatus) *outStatus = status;
-
-            if (outLocation) {
-                outLocation->clear();
-                if (status >= 300 && status < 400) {
-                    char loc[1024] = {0};
-                    Result lrc = httpcGetResponseHeader(&ctx, "Location", loc, sizeof(loc));
-                    if (R_SUCCEEDED(lrc) && loc[0]) {
-                        *outLocation = loc;
-                    }
-                }
-            }
-
-            httpcCloseContext(&ctx);
-            return 0;
-        };
-
-        // Resolve redirects first. Many hosts (GitHub, Cloudflare, itch.io, etc.)
-        // will 301/302 to canonical HTTPS URLs or to raw content endpoints.
-        std::string currentUrl = url;
-        for (int i = 0; i < 6; ++i) {
-            u32 status = 0;
-            std::string location;
-            Result rc = beginAndGetStatus(currentUrl, &status, &location);
-            if (R_FAILED(rc)) {
-                log("ERROR [3DS][NET] http begin failed: 0x%08lX url=%s", (unsigned long)rc, currentUrl.c_str());
-                return false;
-            }
-
-            if (status >= 300 && status < 400) {
-                if (location.empty()) {
-                    log("ERROR [3DS][NET] redirect without Location header (%lu) url=%s", (unsigned long)status, currentUrl.c_str());
-                    return false;
-                }
-                std::string nextUrl = absolutize(currentUrl, location);
-                if (nextUrl.empty()) {
-                    log("ERROR [3DS][NET] could not resolve redirect Location=%s base=%s", location.c_str(), currentUrl.c_str());
-                    return false;
-                }
-                currentUrl = nextUrl;
-                continue;
-            }
-
-            // Non-redirect: proceed with download attempt (status validated below).
-            break;
-        }
+        const std::string caBundle = pickCaBundle();
 
         // Temp file in the real filesystem (supports atomic-ish replace).
         std::string fullPath = resolveVirtualPath(savePath);
@@ -1532,67 +1743,80 @@ public:
         FILE *out = fopen(tempPath.c_str(), "wb");
         if (!out) return false;
 
-        httpcContext ctx;
-        Result rc = httpcOpenContext(&ctx, HTTPC_METHOD_GET, currentUrl.c_str(), 0);
-        if (R_FAILED(rc)) {
-            fclose(out);
-            remove(tempPath.c_str());
-            return false;
-        }
+        CurlWriteState state;
+        state.file = out;
 
-        configureRequest(&ctx);
+        auto performDownload = [&](bool insecure, long &httpCode, std::string &err) -> CURLcode {
+            CURL *curl = curl_easy_init();
+            if (!curl) return CURLE_FAILED_INIT;
 
-        rc = httpcBeginRequest(&ctx);
-        if (R_FAILED(rc)) {
-            httpcCloseContext(&ctx);
-            fclose(out);
-            remove(tempPath.c_str());
-            return false;
-        }
+            char errBuf[CURL_ERROR_SIZE] = {0};
+            curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errBuf);
+            curl_easy_setopt(curl, CURLOPT_URL, url);
+            curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+            curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 6L);
+            curl_easy_setopt(curl, CURLOPT_USERAGENT, "Real8-3DS");
+            curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity");
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteCallback);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
+            curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
+            curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+            curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 
-        u32 status = 0;
-        httpcGetResponseStatusCode(&ctx, &status);
-        if (status < 200 || status >= 300) {
-            // If we still got a redirect here, it likely exceeded our redirect cap above.
-            log("ERROR [3DS][NET] http status=%lu url=%s", (unsigned long)status, currentUrl.c_str());
-            httpcCloseContext(&ctx);
-            fclose(out);
-            remove(tempPath.c_str());
-            return false;
-        }
+            struct curl_slist *headers = nullptr;
+            headers = curl_slist_append(headers, "Accept: application/json, */*;q=0.1");
+            if (headers) {
+                curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+            }
 
-        // Stream using httpcDownloadData so we know exactly how many bytes are valid in buffer.
-        const u32 kChunk = 0x4000;
-        std::vector<u8> buffer(kChunk);
-
-        bool ok = true;
-        while (true) {
-            u32 bytesRead = 0;
-            rc = httpcDownloadData(&ctx, buffer.data(), (u32)buffer.size(), &bytesRead);
-
-            // Write whatever we actually received this iteration.
-            if (bytesRead) {
-                if (fwrite(buffer.data(), 1, bytesRead, out) != bytesRead) {
-                    ok = false;
-                    break;
+            if (insecure) {
+                curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+                curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+            } else {
+                curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+                curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+                if (!caBundle.empty()) {
+                    curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
                 }
             }
 
-            if (rc == (Result)HTTPC_RESULTCODE_DOWNLOADPENDING) {
-                // More data remains; keep looping. Avoid a tight spin if nothing arrived.
-                if (bytesRead == 0) svcSleepThread(1000000LL);
-                continue;
+            CURLcode rc = curl_easy_perform(curl);
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+            if (errBuf[0] != '\0') err = errBuf;
+            if (headers) {
+                curl_slist_free_all(headers);
             }
+            curl_easy_cleanup(curl);
+            return rc;
+        };
 
-            // rc == 0 => finished successfully. Anything else => error.
-            if (R_FAILED(rc)) ok = false;
-            break;
+        long httpCode = 0;
+        std::string err;
+        CURLcode rc = performDownload(false, httpCode, err);
+
+        if (rc == CURLE_PEER_FAILED_VERIFICATION || rc == CURLE_SSL_CACERT || rc == CURLE_SSL_CACERT_BADFILE) {
+            fclose(out);
+            out = fopen(tempPath.c_str(), "wb");
+            if (!out) {
+                remove(tempPath.c_str());
+                return false;
+            }
+            state = {};
+            state.file = out;
+            err.clear();
+            httpCode = 0;
+            rc = performDownload(true, httpCode, err);
         }
 
-        httpcCloseContext(&ctx);
         fclose(out);
 
-        if (!ok) {
+        if (rc != CURLE_OK || state.error || state.total == 0) {
+            if (!err.empty()) {
+                log("[3DS][NET] downloadFile failed: %s (HTTP %ld)", err.c_str(), httpCode);
+            } else {
+                log("[3DS][NET] downloadFile failed: curl error %d (HTTP %ld)", (int)rc, httpCode);
+            }
             remove(tempPath.c_str());
             return false;
         }
@@ -1606,7 +1830,7 @@ public:
                 fclose(chk);
                 // gzip magic: 1F 8B
                 if (h[0] == 0x1F && h[1] == 0x8B) {
-                    log("ERROR [3DS][NET] response was gzipped despite Accept-Encoding: identity url=%s", currentUrl.c_str());
+                    log("ERROR [3DS][NET] response was gzipped despite Accept-Encoding: identity url=%s", url);
                     remove(tempPath.c_str());
                     return false;
                 }

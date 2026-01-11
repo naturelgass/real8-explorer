@@ -59,6 +59,29 @@ public:
         (void)y1;
         flipScreen(framebuffer, palette_map);
     }
+
+// Optional true-color flip (stereo/anaglyph). Pixel format: 0x00RRGGBB (XRGB8888).
+virtual bool flipScreenRGBADirty(const uint32_t* xrgb8888, int w, int h,
+                                 int x0, int y0, int x1, int y1) {
+    (void)xrgb8888; (void)w; (void)h; (void)x0; (void)y0; (void)x1; (void)y1;
+    return false;
+}
+virtual bool flipScreenRGBA(const uint32_t* xrgb8888, int w, int h) {
+    (void)xrgb8888; (void)w; (void)h;
+    return false;
+}
+
+// Optional RGB565 flip (0brrrrrggggggbbbbb).
+virtual bool flipScreenRGB565Dirty(const uint16_t* rgb565, int w, int h,
+                                   int x0, int y0, int x1, int y1) {
+    (void)rgb565; (void)w; (void)h; (void)x0; (void)y0; (void)x1; (void)y1;
+    return false;
+}
+virtual bool flipScreenRGB565(const uint16_t* rgb565, int w, int h) {
+    (void)rgb565; (void)w; (void)h;
+    return false;
+}
+
     virtual void beginFrame() {}
     virtual bool queueSprite(const uint8_t* spriteSheet, int n, int x, int y, int w, int h, bool fx, bool fy) {
         (void)spriteSheet;

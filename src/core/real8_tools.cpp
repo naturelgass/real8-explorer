@@ -17,6 +17,22 @@
 // Include lodePNG here so the main VM doesn't need to depend on it
 #include <lodePNG.h>
 
+#ifndef REAL8_STRETCHED
+#define REAL8_STRETCHED 0
+#endif
+#ifndef REAL8_CRTFILTER
+#define REAL8_CRTFILTER 0
+#endif
+#ifndef REAL8_INTERPOL8
+#define REAL8_INTERPOL8 0
+#endif
+#ifndef REAL8_TOP_NOBACK
+#define REAL8_TOP_NOBACK 0
+#endif
+#ifndef REAL8_BOTTOM_NOBACK
+#define REAL8_BOTTOM_NOBACK 0
+#endif
+
 namespace fs = std::filesystem;
 
 // --------------------------------------------------------------------------
@@ -101,6 +117,17 @@ static std::string GetActiveCartName(Real8VM* vm)
     return "";
 }
 
+static bool readConfigFlags2(const std::vector<uint8_t>& data, uint8_t& outFlags2)
+{
+    if (data.size() < 6) return false;
+    uint32_t inputSize = 0;
+    memcpy(&inputSize, &data[1], 4);
+    size_t offset = 5 + inputSize;
+    if (data.size() <= offset) return false;
+    outFlags2 = data[offset];
+    return true;
+}
+
 // --------------------------------------------------------------------------
 // CONFIGURATION & ASSETS
 // --------------------------------------------------------------------------
@@ -115,14 +142,23 @@ void Real8Tools::LoadSettings(Real8VM* vm, IReal8Host* host)
     std::vector<uint8_t> data = host->loadFile("/config.dat");
     if (data.size() < 1) {
         vm->showRepoSnap = false;
-        vm->showSkin = true;
-        vm->crt_filter = false;
         vm->showStats = false;
-        vm->interpolation = false;
         vm->showRepoGames = true;
-        vm->stretchScreen = false;
+
+        if (is3ds) {
+            vm->showSkin = (REAL8_TOP_NOBACK == 0);
+            vm->crt_filter = (REAL8_CRTFILTER != 0);
+            vm->interpolation = (REAL8_INTERPOL8 != 0);
+            vm->stretchScreen = (REAL8_STRETCHED != 0);
+        } else {
+            vm->showSkin = true;
+            vm->crt_filter = false;
+            vm->interpolation = false;
+            vm->stretchScreen = false;
+        }
+
         SaveSettings(vm, host);
-        if (vm->showSkin) { LoadSkin(vm, host); }
+        if (vm->showSkin || (is3ds && (REAL8_BOTTOM_NOBACK == 0))) { LoadSkin(vm, host); }
         return;
     }
 
@@ -171,7 +207,7 @@ void Real8Tools::LoadSettings(Real8VM* vm, IReal8Host* host)
         vm->volume_sfx = data[offset++];
     }
 
-    if (vm->showSkin || is3ds) { LoadSkin(vm, host); }
+    if (vm->showSkin || (is3ds && (REAL8_BOTTOM_NOBACK == 0))) { LoadSkin(vm, host); }
 }
 
 void Real8Tools::SaveSettings(Real8VM* vm, IReal8Host* host)
@@ -181,6 +217,8 @@ void Real8Tools::SaveSettings(Real8VM* vm, IReal8Host* host)
     if (strcmp(host->getPlatform(), "Libretro") == 0) return;
 
     if (!vm || !host) return;
+
+    const bool is3ds = (strcmp(host->getPlatform(), "3DS") == 0);
 
     uint8_t flags = 0;
     if (vm->showRepoSnap) flags |= (1 << 0);
@@ -202,6 +240,15 @@ void Real8Tools::SaveSettings(Real8VM* vm, IReal8Host* host)
     uint8_t flags2 = 0;
     if (vm->showRepoGames) flags2 |= (1 << 0);
     if (vm->stretchScreen) flags2 |= (1 << 2);
+    if (is3ds) {
+        uint8_t existingFlags2 = 0;
+        std::vector<uint8_t> existing = host->loadFile("/config.dat");
+        if (readConfigFlags2(existing, existingFlags2)) {
+            if (existingFlags2 & (1 << 1)) flags2 |= (1 << 1);
+        } else if (REAL8_BOTTOM_NOBACK != 0) {
+            flags2 |= (1 << 1);
+        }
+    }
     buffer.push_back(flags2);
 
     uint32_t urlLen = (uint32_t)vm->currentRepoUrl.length();
