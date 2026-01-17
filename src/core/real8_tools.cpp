@@ -426,6 +426,180 @@ bool Real8Tools::InjectBinaryMod(Real8VM* vm, IReal8Host* host, const std::strin
 // EXPORTERS
 // --------------------------------------------------------------------------
 
+
+
+void Real8Tools::ExportLUA(Real8VM* vm, IReal8Host* host, const std::string &outputFile)
+{
+    if (!vm || !host) return;
+    if (outputFile.empty()) return;
+
+#if defined(__GBA__)
+    host->log("[EXPORT] ExportLUA is not supported on this platform.");
+    return;
+#else
+    if (!vm->ram) {
+        host->log("[EXPORT] No RAM available to export cart data.");
+        vm->gpu.renderMessage("SYSTEM", "NO CART DATA", 11);
+        vm->show_frame();
+        host->delayMs(500);
+        return;
+    }
+
+    // We store the last loaded cart source in the VM during loadGame()
+    const std::string &lua = vm->loadedLuaSource;
+    if (lua.empty()) {
+        host->log("[EXPORT] No LUA source available to export.");
+        vm->gpu.renderMessage("SYSTEM", "NO LUA SOURCE", 11);
+        vm->show_frame();
+        host->delayMs(500);
+        return;
+    }
+
+    fs::path outPath(outputFile);
+    std::error_code ec;
+    if (outPath.has_parent_path()) {
+        fs::create_directories(outPath.parent_path(), ec);
+    }
+    if (ec) {
+        host->log("[EXPORT] Failed to create output folder: %s", outPath.parent_path().string().c_str());
+        return;
+    }
+
+    auto hex = [](int v) -> char {
+        static const char* digits = "0123456789abcdef";
+        return digits[v & 0xF];
+    };
+
+    auto writeHexByte = [&](std::stringstream& ss, uint8_t b) {
+        ss << hex(b >> 4) << hex(b & 0xF);
+    };
+
+    std::stringstream ss;
+
+    // Header
+    ss << "pico-8 cartridge // http://www.pico-8.com\n";
+    ss << "version 41\n";
+
+    // LUA
+    ss << "__lua__\n";
+    ss << lua;
+    if (!lua.empty() && lua.back() != '\n') ss << "\n";
+
+    // GFX (0x0000 - 0x1FFF), 128 lines x 128 nibbles
+    ss << "__gfx__\n";
+    {
+        const uint8_t* gfx = vm->ram + 0x0000;
+        for (int y = 0; y < 128; y++) {
+            for (int x = 0; x < 128; x++) {
+                uint8_t b = gfx[y * 64 + (x / 2)];
+                int v = (x % 2 == 0) ? (b & 0x0F) : ((b >> 4) & 0x0F);
+                ss << hex(v);
+            }
+            ss << "\n";
+        }
+    }
+
+    // GFF (sprite flags) (0x3000 - 0x30FF), 256 bytes
+    ss << "__gff__\n";
+    {
+        const uint8_t* gff = vm->ram + 0x3000;
+        for (int i = 0; i < 256; i++) {
+            writeHexByte(ss, gff[i]);
+            if ((i % 32) == 31) ss << "\n"; // 32 bytes per line
+        }
+        if ((256 % 32) != 0) ss << "\n";
+    }
+
+    // MAP (extended 64 rows): 0x2000 bytes total
+    // - rows 0..31 from 0x2000..0x2FFF
+    // - rows 32..63 from shared area 0x1000..0x1FFF
+    ss << "__map__\n";
+    {
+        auto mapByte = [&](int idx) -> uint8_t {
+            if (idx < 0x1000) return vm->ram[0x2000 + idx];
+            return vm->ram[0x1000 + (idx - 0x1000)];
+        };
+
+        for (int y = 0; y < 64; y++) {
+            for (int x = 0; x < 128; x++) {
+                uint8_t b = mapByte(y * 128 + x);
+                writeHexByte(ss, b);
+            }
+            ss << "\n";
+        }
+    }
+
+    // SFX (0x3200 - 0x42FF), 64 sfx * 68 bytes
+    ss << "__sfx__\n";
+    {
+        const uint8_t* sfx = vm->ram + 0x3200;
+        for (int s = 0; s < 64; s++) {
+            int base = s * 68;
+
+            // header bytes (offset 64..67)
+            for (int h = 0; h < 4; h++) writeHexByte(ss, sfx[base + 64 + h]);
+            ss << " ";
+
+            // 32 notes: pitch(2 hex) + instrument(1) + volume(1) + effect(1)
+            for (int n = 0; n < 32; n++) {
+                uint8_t pitch = sfx[base + n * 2 + 0];
+                uint8_t b2    = sfx[base + n * 2 + 1];
+                int instr = (b2 >> 5) & 0x7;
+                int vol   = (b2 >> 2) & 0x7;
+                int eff   = (b2 >> 0) & 0x3;
+
+                writeHexByte(ss, pitch);
+                ss << hex(instr) << hex(vol) << hex(eff);
+
+                if (n != 31) ss << " ";
+            }
+            ss << "\n";
+        }
+    }
+
+    // MUSIC (0x3100 - 0x31FF), 64 patterns * 4 bytes
+    ss << "__music__\n";
+    {
+        const uint8_t* music = vm->ram + 0x3100;
+
+        auto chanToText = [&](uint8_t mb) -> std::string {
+            uint8_t v = mb & 0x7F; // strip loop/stop flags (0x80)
+            if (v & 0x40) return "-1";
+            return std::to_string((int)(v & 0x3F));
+        };
+
+        for (int p = 0; p < 64; p++) {
+            uint8_t m0 = music[p * 4 + 0];
+            uint8_t m1 = music[p * 4 + 1];
+            uint8_t m2 = music[p * 4 + 2];
+            uint8_t m3 = music[p * 4 + 3];
+
+            int flags = 0;
+            if (m0 & 0x80) flags |= 1; // loop start
+            if (m1 & 0x80) flags |= 2; // loop back
+            if (m2 & 0x80) flags |= 4; // stop
+
+            ss << hex(flags >> 4) << hex(flags & 0xF) << " ";
+            ss << chanToText(m0) << " " << chanToText(m1) << " " << chanToText(m2) << " " << chanToText(m3) << "\n";
+        }
+    }
+
+    std::string data = ss.str();
+    if (host->saveState(outPath.string().c_str(), (const uint8_t*)data.data(), data.size())) {
+        host->log("[EXPORT] Cart exported to: %s", outPath.string().c_str());
+        vm->gpu.renderMessage("SYSTEM", "CART EXPORTED", 11);
+        vm->show_frame();
+        host->delayMs(500);
+    } else {
+        host->log("[EXPORT] Failed to write: %s", outPath.string().c_str());
+        vm->gpu.renderMessage("SYSTEM", "EXPORT FAILED", 11);
+        vm->show_frame();
+        host->delayMs(500);
+    }
+#endif
+}
+
+
 void Real8Tools::ExportGFX(Real8VM* vm, IReal8Host* host, const std::string &outputFolder)
 {
     if (!vm || !host) return;

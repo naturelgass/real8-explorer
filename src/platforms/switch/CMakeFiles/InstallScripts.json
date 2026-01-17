@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/d/Workspace/REAL8-Explorer/src/platforms/switch/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

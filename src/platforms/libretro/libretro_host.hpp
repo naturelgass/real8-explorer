@@ -154,7 +154,12 @@ namespace z8 {
         
         // --- Stubs ---
         void delayMs(int ms) override {} 
-        void flipScreen(uint8_t (*framebuffer)[128], uint8_t *palette_map) override {} 
+        void flipScreen(const uint8_t *framebuffer, int fb_w, int fb_h, uint8_t *palette_map) override {
+            (void)framebuffer;
+            (void)fb_w;
+            (void)fb_h;
+            (void)palette_map;
+        }
         
         void setNetworkActive(bool active) override {}
         void setWifiCredentials(const char *ssid, const char *pass) override {}

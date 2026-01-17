@@ -9,7 +9,7 @@
 #include <string.h>
 
 #define lstate_c
-#if defined(__GBA__) || defined(__3DS__)
+#if defined(__GBA__) || defined(__3DS__) || defined(__SWITCH__)
   #define LUA_CORE
 #endif
 

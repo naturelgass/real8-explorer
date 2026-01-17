@@ -24,12 +24,75 @@
 #endif
 #endif
 
+namespace {
+struct FrameStats {
+    u64 frameStartMs = 0;
+    u64 accumFrameMs = 0;
+    u64 accumWorkMs = 0;
+    int frames = 0;
+
+    void beginFrame() { frameStartMs = osGetTime(); }
+
+    void endFrame(ThreeDSHost* host, u64 workEndMs) {
+        if (frameStartMs == 0) return;
+        u64 frameEndMs = osGetTime();
+        u64 frameMs = frameEndMs - frameStartMs;
+        u64 workMs = workEndMs - frameStartMs;
+
+        accumFrameMs += frameMs;
+        accumWorkMs += workMs;
+        frames++;
+
+        if (frames >= 60 && host) {
+            double avgFrame = (double)accumFrameMs / (double)frames;
+            double avgWork = (double)accumWorkMs / (double)frames;
+            host->log("[PERF] frame %.2f ms (work %.2f ms) avg over %d frames", avgFrame, avgWork, frames);
+            accumFrameMs = 0;
+            accumWorkMs = 0;
+            frames = 0;
+        }
+    }
+};
+
+void applyN3DSSpeedup(ThreeDSHost* host) {
+    bool isNew3ds = false;
+    Result rc = APT_CheckNew3DS(&isNew3ds);
+    if (R_FAILED(rc)) {
+        if (host) host->log("[3DS] APT_CheckNew3DS failed: 0x%08lX", (unsigned long)rc);
+        return;
+    }
+    if (!isNew3ds) {
+        if (host) host->log("[3DS] Old3DS detected. Speedup not enabled.");
+        return;
+    }
+
+    osSetSpeedupEnable(true);
+
+    u32 beforeLimit = 0;
+    u32 afterLimit = 0;
+    (void)APT_GetAppCpuTimeLimit(&beforeLimit);
+    Result rcSet = APT_SetAppCpuTimeLimit(80);
+    (void)APT_GetAppCpuTimeLimit(&afterLimit);
+
+    if (host) {
+        if (R_FAILED(rcSet)) {
+            host->log("[3DS] N3DS speedup enabled; CPU time limit set failed: 0x%08lX (was %lu)",
+                      (unsigned long)rcSet, (unsigned long)beforeLimit);
+        } else {
+            host->log("[3DS] N3DS speedup enabled; CPU time limit %lu -> %lu",
+                      (unsigned long)beforeLimit, (unsigned long)afterLimit);
+        }
+    }
+}
+} // namespace
+
 int main(int argc, char *argv[])
 {
     (void)argc;
     (void)argv;
 
     ThreeDSHost *host = new ThreeDSHost();
+    applyN3DSSpeedup(host);
     Real8VM *vm = new Real8VM(host);
     host->debugVMRef = vm;
 
@@ -266,7 +329,9 @@ int main(int argc, char *argv[])
         }
     };
 
+    FrameStats frameStats;
     while (running && aptMainLoop()) {
+        frameStats.beginFrame();
         host->pollInput();
         if (host->isExitComboHeld()) {
             running = false;
@@ -336,7 +401,7 @@ int main(int argc, char *argv[])
             if (vm->isMenuPressed()) {
                 std::memcpy(top_screen_fb, vm->fb, sizeof(top_screen_fb));
                 applyPauseCheckerboard(top_screen_fb);
-                vm->setAltFramebuffer(top_screen_fb);
+                vm->setAltFramebuffer(&top_screen_fb[0][0], 128, 128);
 
                 vm->gpu.saveState(menuGfxBackup);
                 vm->gpu.reset();
@@ -345,9 +410,11 @@ int main(int argc, char *argv[])
             }
         }
 
+        u64 workEndMs = osGetTime();
         if (!host->isFastForwardHeld()) {
             gspWaitForVBlank();
         }
+        frameStats.endFrame(host, workEndMs);
     }
 
     delete vm;
@@ -363,7 +430,9 @@ int main(int argc, char *argv[])
     host->log("Real-8 3DS Port Started.");
     bool running = true;
 
+    FrameStats frameStats;
     while (running && aptMainLoop()) {
+        frameStats.beginFrame();
         // Poll input once per frame (pollInput internally avoids duplicate scans in the same ms).
         host->pollInput();
         if (host->isExitComboHeld()) {
@@ -384,9 +453,11 @@ int main(int argc, char *argv[])
         }
 
         // Frame pacing: lock to VBlank unless fast-forward is held.
+        u64 workEndMs = osGetTime();
         if (!host->isFastForwardHeld()) {
             gspWaitForVBlank();
         }
+        frameStats.endFrame(host, workEndMs);
     }
 
     delete shell;

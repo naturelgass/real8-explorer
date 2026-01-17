@@ -21,6 +21,7 @@
 #include <cstdarg>
 #include <cstring>
 #include <cstdio>
+#include <cmath>
 
 namespace fs = std::filesystem;
 
@@ -37,12 +38,18 @@ private:
     bool sdmcMounted = false;
     bool romfsMounted = false;
     
-    uint32_t screenBuffer[128 * 128];
+    std::vector<uint32_t> screenBuffer;
+    int screenW = 128;
+    int screenH = 128;
     std::vector<uint32_t> wallBuffer;
     int wallW = 0, wallH = 0;
     fs::path rootPath;
     int lastTouchX = 0;
     int lastTouchY = 0;
+    HidSixAxisSensorHandle sensorHandle{};
+    bool sensorActive = false;
+    bool sensorAvailable = false;
+    u64 lastSensorUs = 0;
 
     // Helper for scaling logic
     void calculateGameRect(int winW, int winH, SDL_Rect *outRect, float *outScale)
@@ -57,18 +64,59 @@ private:
         if (availW < 1) availW = 1;
         if (availH < 1) availH = 1;
 
+        int gameW = (debugVMRef && debugVMRef->fb_w > 0) ? debugVMRef->fb_w : 128;
+        int gameH = (debugVMRef && debugVMRef->fb_h > 0) ? debugVMRef->fb_h : 128;
+        int mode = (debugVMRef ? debugVMRef->r8_vmode_cur : 0);
+
+        if (mode == 3) {
+            int scale = 2;
+            int drawW = gameW * scale;
+            int drawH = gameH * scale;
+            outRect->x = (winW - drawW) / 2;
+            outRect->y = (winH - drawH) / 2;
+            outRect->w = drawW;
+            outRect->h = drawH;
+            if (outScale) *outScale = (float)scale;
+            return;
+        }
+
+        if (mode == 2) {
+            int scale = 2;
+            int drawW = gameW * scale;
+            int drawH = gameH * scale;
+            outRect->x = (winW - drawW) / 2;
+            outRect->y = (winH - drawH) / 2;
+            outRect->w = drawW;
+            outRect->h = drawH;
+            if (outScale) *outScale = (float)scale;
+            return;
+        }
+
+        if (mode != 0) {
+            int scale = std::min(availW / gameW, availH / gameH);
+            if (scale < 1) scale = 1;
+            int drawW = gameW * scale;
+            int drawH = gameH * scale;
+            outRect->x = (winW - drawW) / 2;
+            outRect->y = (winH - drawH) / 2;
+            outRect->w = drawW;
+            outRect->h = drawH;
+            if (outScale) *outScale = (float)scale;
+            return;
+        }
+
         if (stretch) {
             outRect->x = padding;
             outRect->y = padding;
             outRect->w = availW;
             outRect->h = availH;
-            if (outScale) *outScale = (float)availW / 128.0f;
+            if (outScale) *outScale = (float)availW / (float)gameW;
             return;
         }
 
-        float scale = std::min((float)availW / 128.0f, (float)availH / 128.0f);
-        int drawW = (int)(128.0f * scale);
-        int drawH = (int)(128.0f * scale);
+        float scale = std::min((float)availW / (float)gameW, (float)availH / (float)gameH);
+        int drawW = (int)((float)gameW * scale);
+        int drawH = (int)((float)gameH * scale);
 
         outRect->x = (winW - drawW) / 2;
         outRect->y = (winH - drawH) / 2;
@@ -218,6 +266,14 @@ public:
 
         texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 128, 128);
         if (texture) SDL_SetTextureScaleMode(texture, SDL_ScaleModeNearest);
+        screenBuffer.resize((size_t)screenW * (size_t)screenH);
+
+        HidSixAxisSensorHandle handles[1];
+        int handleCount = hidGetSixAxisSensorHandles(handles, 1, HidNpadIdType_Handheld, HidNpadStyleTag_NpadHandheld);
+        if (handleCount > 0) {
+            sensorHandle = handles[0];
+            sensorAvailable = true;
+        }
 
         input.init();
         initAudio();
@@ -252,9 +308,81 @@ public:
         ensureBundledConfigFiles();
     }
 
+    static inline int32_t to_q16_16(float v) {
+        return (int32_t)lroundf(v * 65536.0f);
+    }
+
+    void updateMotionSensors()
+    {
+        if (!debugVMRef || !debugVMRef->ram) return;
+        if (!sensorAvailable) {
+            debugVMRef->motion.flags = 0;
+            debugVMRef->motion.dt_us = 0;
+            debugVMRef->motion.accel_x = 0;
+            debugVMRef->motion.accel_y = 0;
+            debugVMRef->motion.accel_z = 0;
+            debugVMRef->motion.gyro_x = 0;
+            debugVMRef->motion.gyro_y = 0;
+            debugVMRef->motion.gyro_z = 0;
+            return;
+        }
+
+        const bool enabled = (debugVMRef->ram[0x5FE0] & 0x01) != 0;
+        if (!enabled) {
+            if (sensorActive) {
+                hidStopSixAxisSensor(sensorHandle);
+                sensorActive = false;
+            }
+            debugVMRef->motion.flags = 0x03; // accel + gyro present, data invalid
+            debugVMRef->motion.dt_us = 0;
+            debugVMRef->motion.accel_x = 0;
+            debugVMRef->motion.accel_y = 0;
+            debugVMRef->motion.accel_z = 0;
+            debugVMRef->motion.gyro_x = 0;
+            debugVMRef->motion.gyro_y = 0;
+            debugVMRef->motion.gyro_z = 0;
+            lastSensorUs = 0;
+            return;
+        }
+
+        if (!sensorActive) {
+            hidStartSixAxisSensor(sensorHandle);
+            sensorActive = true;
+            lastSensorUs = 0;
+        }
+
+        HidSixAxisSensorState state = {};
+        int count = (int)hidGetSixAxisSensorStates(sensorHandle, &state, 1);
+        if (count <= 0) {
+            debugVMRef->motion.flags = 0x03;
+            debugVMRef->motion.dt_us = 0;
+            return;
+        }
+
+        u64 ticks = armGetSystemTick();
+        u64 freq = armGetSystemTickFreq();
+        u64 now_us = (freq != 0) ? (ticks * 1000000ULL) / freq : 0;
+        u64 dt = (lastSensorUs == 0) ? 0 : (now_us - lastSensorUs);
+        lastSensorUs = now_us;
+        if (dt > 0xFFFFFFFFu) dt = 0xFFFFFFFFu;
+
+        debugVMRef->motion.accel_x = to_q16_16(state.acceleration.x);
+        debugVMRef->motion.accel_y = to_q16_16(state.acceleration.y);
+        debugVMRef->motion.accel_z = to_q16_16(state.acceleration.z);
+        debugVMRef->motion.gyro_x = to_q16_16(state.angular_velocity.x);
+        debugVMRef->motion.gyro_y = to_q16_16(state.angular_velocity.y);
+        debugVMRef->motion.gyro_z = to_q16_16(state.angular_velocity.z);
+        debugVMRef->motion.flags = 0x07;
+        debugVMRef->motion.dt_us = (uint32_t)dt;
+    }
+
     ~SwitchHost()
     {
         // Cleanup libnx sockets
+        if (sensorActive && sensorAvailable) {
+            hidStopSixAxisSensor(sensorHandle);
+            sensorActive = false;
+        }
         if (curlReady) curl_global_cleanup();
         socketExit();
         if (nifmReady) nifmExit();
@@ -334,16 +462,18 @@ public:
                 int relX = (int)(touchX - (float)gameRect.x);
                 int relY = (int)(touchY - (float)gameRect.y);
 
+                int gameW = (debugVMRef && debugVMRef->fb_w > 0) ? debugVMRef->fb_w : 128;
+                int gameH = (debugVMRef && debugVMRef->fb_h > 0) ? debugVMRef->fb_h : 128;
                 bool stretch = (debugVMRef && debugVMRef->stretchScreen);
-                float scaleX = stretch ? ((float)gameRect.w / 128.0f) : scale;
-                float scaleY = stretch ? ((float)gameRect.h / 128.0f) : scale;
+                float scaleX = stretch ? ((float)gameRect.w / (float)gameW) : scale;
+                float scaleY = stretch ? ((float)gameRect.h / (float)gameH) : scale;
                 if (scaleX <= 0.0f) scaleX = 1.0f;
                 if (scaleY <= 0.0f) scaleY = 1.0f;
 
                 int mx = (int)(relX / scaleX);
                 int my = (int)(relY / scaleY);
-                if (mx < 0) mx = 0; if (mx > 127) mx = 127;
-                if (my < 0) my = 0; if (my > 127) my = 127;
+                if (mx < 0) mx = 0; if (mx >= gameW) mx = gameW - 1;
+                if (my < 0) my = 0; if (my >= gameH) my = gameH - 1;
 
                 lastTouchX = mx;
                 lastTouchY = my;
@@ -366,6 +496,15 @@ public:
     void setInterpolation(bool active) {
         interpolation = active;
         // Force recreation on next frame so scale mode is applied immediately
+        if (texture) {
+            SDL_DestroyTexture(texture);
+            texture = nullptr;
+        }
+    }
+
+    void onFramebufferResize(int fb_w, int fb_h) override {
+        (void)fb_w;
+        (void)fb_h;
         if (texture) {
             SDL_DestroyTexture(texture);
             texture = nullptr;
@@ -395,11 +534,15 @@ public:
     
     void updateOverlay() override {}
 
-    void flipScreen(uint8_t (*framebuffer)[128], uint8_t *palette_map) override
+    void flipScreen(const uint8_t *framebuffer, int fb_w, int fb_h, uint8_t *palette_map) override
     {
+        if (!framebuffer || fb_w <= 0 || fb_h <= 0) return;
+
+        updateMotionSensors();
+
         uint32_t paletteLUT[16];
         for (int i = 0; i < 16; i++) {
-            uint8_t p8ID = palette_map[i];
+            uint8_t p8ID = palette_map ? palette_map[i] : (uint8_t)i;
             const uint8_t *rgb;
             if (p8ID < 16) rgb = Real8Gfx::PALETTE_RGB[p8ID];
             else if (p8ID >= 128 && p8ID < 144) rgb = Real8Gfx::PALETTE_RGB[p8ID - 128 + 16];
@@ -407,10 +550,17 @@ public:
             paletteLUT[i] = (255u << 24) | (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
         }
 
-        int idx = 0;
-        for (int y = 0; y < 128; y++) {
-            for (int x = 0; x < 128; x++) {
-                screenBuffer[idx++] = paletteLUT[framebuffer[y][x] & 0x0F];
+        if (screenW != fb_w || screenH != fb_h) {
+            screenW = fb_w;
+            screenH = fb_h;
+            screenBuffer.resize((size_t)screenW * (size_t)screenH);
+        }
+
+        for (int y = 0; y < fb_h; y++) {
+            const uint8_t *src_row = framebuffer + (y * fb_w);
+            uint32_t *dst_row = screenBuffer.data() + (y * fb_w);
+            for (int x = 0; x < fb_w; x++) {
+                dst_row[x] = paletteLUT[src_row[x] & 0x0F];
             }
         }
 
@@ -433,20 +583,22 @@ public:
             SDL_RenderCopy(renderer, wallpaperTex, NULL, &dst);
         }
 
-        // Ensure texture exists and matches 128x128
         int texW = 0, texH = 0;
-        if (!texture || SDL_QueryTexture(texture, NULL, NULL, &texW, &texH) != 0 || texW != 128) {
+        if (!texture || SDL_QueryTexture(texture, NULL, NULL, &texW, &texH) != 0 || texW != fb_w || texH != fb_h) {
             if (texture) SDL_DestroyTexture(texture);
-            texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 128, 128);
-            SDL_SetTextureScaleMode(texture, interpolation ? SDL_ScaleModeBest : SDL_ScaleModeNearest);
+            texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, fb_w, fb_h);
         }
 
-        SDL_UpdateTexture(texture, NULL, screenBuffer, 128 * sizeof(uint32_t));
+        const int mode = (debugVMRef ? debugVMRef->r8_vmode_cur : 0);
+        SDL_SetTextureScaleMode(texture, (mode == 0 && interpolation) ? SDL_ScaleModeBest : SDL_ScaleModeNearest);
+
+        SDL_UpdateTexture(texture, NULL, screenBuffer.data(), fb_w * sizeof(uint32_t));
 
         SDL_Rect dstRect;
-        SDL_Rect srcRect = {0, 0, 128, 128};
+        SDL_Rect srcRect = {0, 0, fb_w, fb_h};
 
-        calculateGameRect(outputW, outputH, &dstRect, NULL);
+        float scale = 1.0f;
+        calculateGameRect(outputW, outputH, &dstRect, &scale);
 
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
         SDL_RenderCopy(renderer, texture, &srcRect, &dstRect);
@@ -735,7 +887,9 @@ public:
         
         fs::create_directories(rootPath / "screenshots");
         
-        SDL_Surface *surface = SDL_CreateRGBSurfaceFrom((void *)screenBuffer, 128, 128, 32, 128 * 4,
+        const int capW = (screenW > 0) ? screenW : 128;
+        const int capH = (screenH > 0) ? screenH : 128;
+        SDL_Surface *surface = SDL_CreateRGBSurfaceFrom((void *)screenBuffer.data(), capW, capH, 32, capW * 4,
             0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000);
 
         if (surface) {

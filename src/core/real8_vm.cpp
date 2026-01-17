@@ -17,9 +17,11 @@
 #include <sstream>
 #include <iomanip>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
+#include <cctype>
 #include <vector>
 
 #if defined(__GBA__)
@@ -37,6 +39,86 @@
 #else
 #define IWRAM_INPUT_CODE
 #endif
+
+static const char* g_last_api_call = "none";
+static const char* g_last_lua_phase = "none";
+static char g_last_cart_path[512] = {0};
+static int g_last_lua_line = 0;
+static char g_last_lua_source[256] = {0};
+
+void real8_set_last_api_call(const char* name)
+{
+    g_last_api_call = name ? name : "none";
+}
+
+void real8_set_last_lua_phase(const char* name)
+{
+    g_last_lua_phase = name ? name : "none";
+}
+
+void real8_set_last_cart_path(const char* path)
+{
+    if (!path) {
+        g_last_cart_path[0] = '\0';
+        return;
+    }
+    std::strncpy(g_last_cart_path, path, sizeof(g_last_cart_path) - 1);
+    g_last_cart_path[sizeof(g_last_cart_path) - 1] = '\0';
+}
+
+void real8_set_last_lua_line(int line, const char* source)
+{
+    g_last_lua_line = line;
+    if (source && source[0]) {
+        std::strncpy(g_last_lua_source, source, sizeof(g_last_lua_source) - 1);
+        g_last_lua_source[sizeof(g_last_lua_source) - 1] = '\0';
+    }
+}
+
+const char* real8_get_last_api_call()
+{
+    return g_last_api_call ? g_last_api_call : "none";
+}
+
+const char* real8_get_last_lua_phase()
+{
+    return g_last_lua_phase ? g_last_lua_phase : "none";
+}
+
+const char* real8_get_last_cart_path()
+{
+    return g_last_cart_path;
+}
+
+int real8_get_last_lua_line()
+{
+    return g_last_lua_line;
+}
+
+const char* real8_get_last_lua_source()
+{
+    return g_last_lua_source;
+}
+
+static bool ends_with_ci(const std::string& value, const char* suffix)
+{
+    size_t value_len = value.size();
+    size_t suffix_len = strlen(suffix);
+    if (value_len < suffix_len) return false;
+    size_t offset = value_len - suffix_len;
+    for (size_t i = 0; i < suffix_len; ++i)
+    {
+        char a = (char)tolower((unsigned char)value[offset + i]);
+        char b = (char)tolower((unsigned char)suffix[i]);
+        if (a != b) return false;
+    }
+    return true;
+}
+
+static bool is_text_cart_path(const std::string& path)
+{
+    return ends_with_ci(path, ".p8");
+}
 
 #if defined(__GBA__)
 #ifndef REAL8_GBA_IWRAM_MAPCHECK
@@ -243,7 +325,7 @@ Real8VM::Real8VM(IReal8Host *h) : host(h), gpu(this)
     isGbaPlatform = (host && strcmp(host->getPlatform(), "GBA") == 0);
     skipDirtyRect = isLibretroPlatform;
 
-    dirty_x0 = WIDTH; dirty_y0 = HEIGHT;
+    dirty_x0 = fb_w; dirty_y0 = fb_h;
     dirty_x1 = 0; dirty_y1 = 0;
     
 #if REAL8_HAS_LIBRETRO_BUFFERS
@@ -291,7 +373,14 @@ Real8VM::~Real8VM()
     depth_fb = nullptr;
     stereo_layers = nullptr;
 #else
-    if (fb) { P8_FREE(fb); fb = nullptr; }
+    if (fb) {
+        if (fb_is_linear && host) {
+            host->freeLinearFramebuffer(fb);
+        } else {
+            P8_FREE(fb);
+        }
+        fb = nullptr;
+    }
     if (depth_fb) { P8_FREE(depth_fb); depth_fb = nullptr; }
     if (stereo_layers) { P8_FREE(stereo_layers); stereo_layers = nullptr; }
 #endif
@@ -337,9 +426,14 @@ bool Real8VM::ensureWritableRom()
 bool Real8VM::initMemory()
 {
     // 1. Allocate Master RAM (32KB)
+    bool newRam = false;
     if (!ram) {
         ram = (uint8_t *)calloc(1, 0x8000); 
         if (!ram) return false;
+        newRam = true;
+    }
+    if (newRam) {
+        ram[0x5F81] = 3; // default stereo mode = host default
     }
 
     if (!rom) {
@@ -363,42 +457,156 @@ bool Real8VM::initMemory()
     user_data = ram + 0x4300;
     screen_ram = ram + 0x6000;
 
-    // 3. Framebuffer
-    if (!fb) {
-        fb = (uint8_t (*)[RAW_WIDTH])calloc(RAW_WIDTH * HEIGHT, 1);
-        if (!fb) return false;
+    // 3. Framebuffer + stereo buffers (dynamic resolution)
+    r8_flags = ram ? ram[0x5FE0] : 0;
+    r8_vmode_req = ram ? ram[0x5FE1] : 0;
+    applyVideoMode(r8_vmode_req, /*force=*/true);
+    return fb != nullptr;
+}
+
+namespace {
+    static inline uint8_t clamp_mode_u8(uint8_t v) {
+        return (v > 3) ? 3 : v;
     }
 
-
-#if !defined(__GBA__)
-    // 3b. Stereo depth buffer (one byte per pixel; stores layer index 0..14 for -7..+7)
-    if (!depth_fb) {
-        depth_fb = (uint8_t (*)[RAW_WIDTH])calloc(RAW_WIDTH * HEIGHT, 1);
-        if (!depth_fb) return false;
+    static inline uint8_t clamp_mode_for_platform(const Real8VM* vm, uint8_t mode) {
+        if (!vm || !vm->host) return mode;
+        const char* platform = vm->host->getPlatform();
+        if (!platform) return mode;
+        if (std::strcmp(platform, "3DS") == 0) {
+            if (mode == 3) mode = 2;
+        } else if (std::strcmp(platform, "GBA") == 0) {
+            if (mode >= 2) mode = 1;
+        }
+        return mode;
     }
 
-    // 3c. Optional stereo layers (-7..+7 buckets). Each layer stores color indices (0..15),
-    // with 0xFF meaning "unset" for that layer. The screen-plane layer (bucket 0) is initialized to the current
-    // framebuffer clear (default 0).
-    if (!stereo_layers) {
-        const size_t layer_rows = (size_t)HEIGHT * (size_t)STEREO_LAYER_COUNT;
-        stereo_layers = (uint8_t (*)[RAW_WIDTH])calloc(layer_rows * RAW_WIDTH, 1);
-        if (!stereo_layers) return false;
-        // Mark all layers "unset" and provide a sane default background in layer 0.
-        std::memset(&stereo_layers[0][0], 0xFF, layer_rows * RAW_WIDTH);
-        for (int y = 0; y < HEIGHT; ++y) {
-            std::memset(stereo_layers[STEREO_BUCKET_BIAS * HEIGHT + y], 0, (size_t)RAW_WIDTH);
+    static inline void mode_to_size(uint8_t mode, int& out_w, int& out_h) {
+        switch (mode) {
+            case 0: out_w = 128; out_h = 128; break;
+            case 1: out_w = 240; out_h = 160; break;
+            case 2: out_w = 320; out_h = 240; break;
+            case 3: out_w = 640; out_h = 360; break;
+            default: out_w = 128; out_h = 128; break;
         }
     }
+}
+
+void Real8VM::applyVideoMode(uint8_t requested_mode, bool force)
+{
+    const uint8_t prev_req = r8_vmode_req;
+    const uint8_t prev_cur = r8_vmode_cur;
+    const int prev_w = fb_w;
+    const int prev_h = fb_h;
+
+    uint8_t req = clamp_mode_u8(requested_mode);
+    uint8_t cur = clamp_mode_for_platform(this, req);
+
+    int new_w = fb_w;
+    int new_h = fb_h;
+    mode_to_size(cur, new_w, new_h);
+    const char* platform = host ? host->getPlatform() : nullptr;
+    if (platform && std::strcmp(platform, "3DS") == 0 && cur == 2) {
+        new_w = 400;
+        new_h = 240;
+    } else if (platform && std::strcmp(platform, "Switch") == 0 && cur == 2) {
+        new_w = 400;
+        new_h = 240;
+    }
+
+    const bool size_changed = (new_w != prev_w || new_h != prev_h);
+    const bool mode_changed = (prev_req != req || prev_cur != cur);
+    const bool need_realloc = (size_changed || !fb);
+    const bool need_clear = force || mode_changed || size_changed;
+
+    r8_vmode_req = req;
+    r8_vmode_cur = cur;
+    if (ram) {
+        ram[0x5FE0] = r8_flags;
+        ram[0x5FE1] = r8_vmode_req;
+        ram[0x5FE2] = r8_vmode_cur;
+    }
+
+    fb_w = new_w;
+    fb_h = new_h;
+
+    if (need_realloc) {
+        if (fb) {
+            if (fb_is_linear && host) {
+                host->freeLinearFramebuffer(fb);
+            } else {
+                P8_FREE(fb);
+            }
+            fb = nullptr;
+        }
+        fb_is_linear = false;
+
+        const size_t fb_bytes = (size_t)fb_w * (size_t)fb_h;
+        void* linear = host ? host->allocLinearFramebuffer(fb_bytes, 0x80) : nullptr;
+        if (linear) {
+            fb = (uint8_t*)linear;
+            fb_is_linear = true;
+        } else {
+            fb = (uint8_t*)calloc(fb_bytes, 1);
+            fb_is_linear = false;
+        }
+
+#if !defined(__GBA__)
+        if (depth_fb) { P8_FREE(depth_fb); depth_fb = nullptr; }
+        if (stereo_layers) { P8_FREE(stereo_layers); stereo_layers = nullptr; }
 #else
-    // Stereoscopic depth/layers disabled on GBA build.
-    depth_fb = nullptr;
-    stereo_layers = nullptr;
+        depth_fb = nullptr;
+        stereo_layers = nullptr;
+#endif
+    }
+
+#if !defined(__GBA__)
+    if (!depth_fb && fb) {
+        const size_t fb_bytes = (size_t)fb_w * (size_t)fb_h;
+        depth_fb = (uint8_t*)calloc(fb_bytes, 1);
+        if (depth_fb) {
+            std::memset(depth_fb, (uint8_t)STEREO_BUCKET_BIAS, fb_bytes);
+        }
+    }
+    if (!stereo_layers && fb) {
+        const size_t layer_rows = (size_t)fb_h * (size_t)STEREO_LAYER_COUNT;
+        stereo_layers = (uint8_t*)calloc(layer_rows * (size_t)fb_w, 1);
+        if (stereo_layers) {
+            std::memset(stereo_layers, 0xFF, layer_rows * (size_t)fb_w);
+            for (int y = 0; y < fb_h; ++y) {
+                std::memset(stereo_layer_row(STEREO_BUCKET_BIAS, y), 0, (size_t)fb_w);
+            }
+        }
+    }
 #endif
 
-    dirty_x0 = 0; dirty_y0 = 0;
-    dirty_x1 = 127; dirty_y1 = 127;
-    return true;
+    if (need_clear && fb) {
+        const size_t fb_bytes = (size_t)fb_w * (size_t)fb_h;
+        std::memset(fb, 0, fb_bytes);
+#if !defined(__GBA__)
+        if (depth_fb) std::memset(depth_fb, (uint8_t)STEREO_BUCKET_BIAS, fb_bytes);
+        if (stereo_layers) {
+            const size_t layer_rows = (size_t)fb_h * (size_t)STEREO_LAYER_COUNT;
+            std::memset(stereo_layers, 0xFF, layer_rows * (size_t)fb_w);
+            for (int y = 0; y < fb_h; ++y) {
+                std::memset(stereo_layer_row(STEREO_BUCKET_BIAS, y), 0, (size_t)fb_w);
+            }
+        }
+#endif
+    }
+
+    if (need_clear) {
+        dirty_x0 = 0;
+        dirty_y0 = 0;
+        dirty_x1 = fb_w - 1;
+        dirty_y1 = fb_h - 1;
+    }
+
+    gpu.clip(0, 0, fb_w, fb_h);
+
+    if (need_realloc && host) {
+        host->onFramebufferResize(fb_w, fb_h);
+    }
 }
 
 
@@ -410,7 +618,7 @@ void Real8VM::clearDepthBuffer(uint8_t bucket)
     if (b < STEREO_BUCKET_MIN) b = STEREO_BUCKET_MIN;
     if (b > STEREO_BUCKET_MAX) b = STEREO_BUCKET_MAX;
     const uint8_t layer_idx = (uint8_t)(b + STEREO_BUCKET_BIAS);
-    std::memset(&depth_fb[0][0], layer_idx, (size_t)RAW_WIDTH * HEIGHT);
+    std::memset(depth_fb, layer_idx, (size_t)fb_w * (size_t)fb_h);
 #else
     (void)bucket;
 #endif
@@ -512,10 +720,12 @@ void Real8VM::rebootVM()
     memset(cart_data_ram, 0, sizeof(cart_data_ram));
     
     if (ram) memset(ram, 0, 0x8000);
-    if (fb) memset(fb, 0, WIDTH * HEIGHT);
+    if (ram) ram[0x5F81] = 3; // default stereo mode = host default
     if (rom && !rom_readonly) memset(rom, 0, 0x8000);
     memset(custom_font, 0, 0x800);
     clear_menu_items();
+    r8_flags = 0;
+    applyVideoMode(0, /*force=*/true);
     gbaLog("[BOOT] REBOOT CORE OK");
 
     // Reset Hardware
@@ -569,7 +779,7 @@ void Real8VM::forceExit()
     gpu.draw_mask = 0;
     if (ram) ram[0x5F5E] = 0;
     gpu.camera(0, 0);
-    gpu.clip(0, 0, WIDTH, HEIGHT);
+    gpu.clip(0, 0, fb_w, fb_h);
     
     host->deleteFile("/cache.p8.png");
     resetInputState();
@@ -606,6 +816,7 @@ void Real8VM::runFrame()
 {
     const bool isLibretro = isLibretroPlatform;
     const bool isGba = isGbaPlatform;
+    if (ram) ram[0x5FE2] = r8_vmode_cur;
 #if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
     const bool gbaAudioDisabled = isGba && kGbaAudioDisabledDefault;
 #endif
@@ -809,9 +1020,11 @@ void Real8VM::runFrame()
 
     // _update / _update60
     if (lua_ref_update60 != LUA_NOREF) {
+        real8_set_last_lua_phase("_update60");
         lua_rawgeti(L, LUA_REGISTRYINDEX, lua_ref_update60);
         if (!run_protected(0)) return;
     } else if (lua_ref_update != LUA_NOREF) {
+        real8_set_last_lua_phase("_update");
         lua_rawgeti(L, LUA_REGISTRYINDEX, lua_ref_update);
         if (!run_protected(0)) return;
     }
@@ -831,6 +1044,7 @@ void Real8VM::runFrame()
     // _draw
     if (lua_ref_draw != LUA_NOREF) {
         REAL8_PROFILE_BEGIN(this, kProfileDraw);
+        real8_set_last_lua_phase("_draw");
         lua_rawgeti(L, LUA_REGISTRYINDEX, lua_ref_draw);
         run_protected(0);
         REAL8_PROFILE_END(this, kProfileDraw);
@@ -839,6 +1053,8 @@ void Real8VM::runFrame()
 #if !(defined(__GBA__) && REAL8_GBA_FAST_LUA)
     lua_pop(L, 1); // Pop traceback
 #endif
+
+    real8_set_last_lua_phase("idle");
 
     // --------------------------------------------------------------------------
     // 5. OVERLAYS & AUDIO UPDATE
@@ -857,9 +1073,9 @@ void Real8VM::runFrame()
             // Manual Drawing Backup (Simplified)
             int bk_cx = gpu.cam_x, bk_cy = gpu.cam_y;
             uint8_t bk_pen = gpu.getPen();
-            gpu.camera(0, 0); gpu.clip(0, 0, WIDTH, HEIGHT);
-            int y0 = 128 - 7;
-            gpu.rectfill(0, y0, 32, 127, 0); 
+            gpu.camera(0, 0); gpu.clip(0, 0, fb_w, fb_h);
+            int y0 = fb_h - 7;
+            gpu.rectfill(0, y0, 32, fb_h - 1, 0); 
             char fpsText[16];
             snprintf(fpsText, sizeof(fpsText), "FPS:%d", debugFPS);
             gpu.pprint(fpsText, (int)strlen(fpsText), 1, y0 + 1, 11);
@@ -899,6 +1115,9 @@ bool Real8VM::loadGame(const GameData& game)
     auto gbaLog = [&](const char* msg) {
         if (isGba && host) host->log("%s", msg);
     };
+
+    if (!currentCartPath.empty())
+        real8_set_last_cart_path(currentCartPath.c_str());
 
     gbaLog("[BOOT] loadGame");
     clearLastError();
@@ -953,6 +1172,9 @@ bool Real8VM::loadGame(const GameData& game)
 
     const char* lua_src = nullptr;
     size_t lua_len = 0;
+
+    // Cached for Export LUA on desktop hosts
+    loadedLuaSource.clear();
     if (game.lua_code_ptr && game.lua_code_size > 0) {
         lua_src = game.lua_code_ptr;
         lua_len = game.lua_code_size;
@@ -968,7 +1190,27 @@ bool Real8VM::loadGame(const GameData& game)
         host->log("[BOOT] Lua bytes: %lu", (unsigned long)lua_len);
     }
 
+    std::string normalized_lua;
     if (lua_len > 0) {
+#if !defined(__GBA__)
+        if (!currentCartPath.empty() && is_text_cart_path(currentCartPath))
+        {
+            size_t old_len = lua_len;
+            std::string src_copy(lua_src, lua_len);
+            normalized_lua = p8_normalize_lua_strings(src_copy);
+            if (normalized_lua.size() != old_len || memcmp(normalized_lua.data(), lua_src, old_len) != 0)
+            {
+                if (host) host->log("[BOOT] UTF-8 string normalization applied (%lu -> %lu bytes)",
+                                    (unsigned long)old_len, (unsigned long)normalized_lua.size());
+                lua_src = normalized_lua.c_str();
+                lua_len = normalized_lua.size();
+            }
+        }
+#endif
+#if !defined(__GBA__)
+        loadedLuaSource.assign(lua_src, lua_len);
+#endif
+
         if (!useGbaInitWatchdog) {
 #if !defined(__GBA__)
             debug.setSource(game.lua_code);
@@ -1004,6 +1246,7 @@ bool Real8VM::loadGame(const GameData& game)
         // _init (make it fatal so you see it immediately)
         cacheLuaRefs();
         if (lua_ref_init != LUA_NOREF) {
+            real8_set_last_lua_phase("_init");
             lua_rawgeti(L, LUA_REGISTRYINDEX, lua_ref_init);
             if (useGbaInitWatchdog && host) host->log("[BOOT] _init");
             if (pcallWithInitWatchdog(0) != LUA_OK) {
@@ -1038,6 +1281,7 @@ bool Real8VM::loadGame(const GameData& game)
 
     lua_pop(L, 1); // pop traceback handler
 
+    real8_set_last_lua_phase("idle");
     detectCartFPS();
     if (useGbaInitWatchdog && host) host->log("[BOOT] fps ok");
     mark_dirty_rect(0, 0, 128, 128);
@@ -1118,6 +1362,11 @@ void Real8VM::detectCartFPS()
 
 void IWRAM_DIRTYRECT_CODE Real8VM::mark_dirty_rect(int x0, int y0, int x1, int y1)
 {
+    if (x1 < 0 || y1 < 0 || x0 >= fb_w || y0 >= fb_h) return;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= fb_w) x1 = fb_w - 1;
+    if (y1 >= fb_h) y1 = fb_h - 1;
     if (x0 < dirty_x0) dirty_x0 = x0;
     if (y0 < dirty_y0) dirty_y0 = y0;
     if (x1 > dirty_x1) dirty_x1 = x1;
@@ -1221,11 +1470,14 @@ void Real8VM::show_frame()
 // 2. Convert FB -> 32-bit XRGB (or stereo anaglyph when enabled)
 const bool stereo_active = (stereoscopic && !isShellUI && stereo_layers != nullptr);
 if (!stereo_active) {
-    uint32_t* dest = screen_buffer;
-    for (int y = 0; y < 128; y++) {
-        const uint8_t* src_row = fb[y];
-        for (int x = 0; x < 128; x++) {
-            *dest++ = palette_lut[draw_map[src_row[x] & 0x0F]];
+    const int copy_w = std::min(fb_w, 128);
+    const int copy_h = std::min(fb_h, 128);
+    std::memset(screen_buffer, 0, sizeof(screen_buffer));
+    for (int y = 0; y < copy_h; y++) {
+        const uint8_t* src_row = fb_row(y);
+        uint32_t* dest_row = screen_buffer + (y * 128);
+        for (int x = 0; x < copy_w; x++) {
+            dest_row[x] = palette_lut[draw_map[src_row[x] & 0x0F]];
         }
     }
     return; // Libretro frontend handles the actual flip
@@ -1237,6 +1489,8 @@ if (!stereo_active) {
 // Bucket-to-pixel mapping: each depth bucket step = 1 pixel of disparity (bucket 7 -> 7px).
 static uint8_t z_left[128 * 128];
 static uint8_t z_right[128 * 128];
+const int copy_w = std::min(fb_w, 128);
+const int copy_h = std::min(fb_h, 128);
 std::memset(screen_buffer, 0, 128u * 128u * sizeof(uint32_t));
 std::memset(z_left, 0, sizeof(z_left));
 std::memset(z_right, 0, sizeof(z_right));
@@ -1250,9 +1504,9 @@ for (int li = 0; li < STEREO_LAYER_COUNT; ++li) {
     const int bucket = li - STEREO_BUCKET_BIAS;
     const int shift = bucket; // 1px per bucket step (signed)
     const uint8_t zval = (uint8_t)(bucket < 0 ? -bucket : bucket); // |bucket| in 0..7
-    for (int y = 0; y < 128; ++y) {
-        const uint8_t* src_row = stereo_layers[li * 128 + y];
-        for (int x = 0; x < 128; ++x) {
+    for (int y = 0; y < copy_h; ++y) {
+        const uint8_t* src_row = stereo_layer_row(li, y);
+        for (int x = 0; x < copy_w; ++x) {
             const uint8_t src_idx = src_row[x];
             if (src_idx == 0xFF) continue;
             const uint32_t rgb = palette_lut[draw_map[src_idx & 0x0F]];
@@ -1287,11 +1541,14 @@ for (int li = 0; li < STEREO_LAYER_COUNT; ++li) {
 return; // Libretro frontend handles the actual flip
 #else
 // 2. Convert FB -> 32-bit XRGB (stereo disabled on GBA)
-    uint32_t* dest = screen_buffer;
-    for (int y = 0; y < 128; y++) {
-        const uint8_t* src_row = fb[y];
-        for (int x = 0; x < 128; x++) {
-            *dest++ = palette_lut[draw_map[src_row[x] & 0x0F]];
+    const int copy_w = std::min(fb_w, 128);
+    const int copy_h = std::min(fb_h, 128);
+    std::memset(screen_buffer, 0, sizeof(screen_buffer));
+    for (int y = 0; y < copy_h; y++) {
+        const uint8_t* src_row = fb_row(y);
+        uint32_t* dest_row = screen_buffer + (y * 128);
+        for (int x = 0; x < copy_w; x++) {
+            dest_row[x] = palette_lut[draw_map[src_row[x] & 0x0F]];
         }
     }
     return; // Libretro frontend handles the actual flip
@@ -1307,7 +1564,7 @@ return; // Libretro frontend handles the actual flip
 
     if (!host) return;
 
-    // If nothing drew since last present, donÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢t re-upload/re-render.
+    // If nothing drew since last present, don't re-upload/re-render.
     if (dirty_x1 < 0 || dirty_y1 < 0) {
         return;
     }
@@ -1323,44 +1580,83 @@ return; // Libretro frontend handles the actual flip
 
     
 #if !defined(__GBA__)
-    const bool stereo_active = (stereoscopic && !isShellUI && stereo_layers != nullptr);
+    uint8_t st_flags = 0;
+    uint8_t st_mode = 3;
+    int8_t st_depth = 0;
+    int8_t st_conv = 0;
+    if (ram) {
+        st_flags = ram[0x5F80];
+        st_mode = ram[0x5F81];
+        st_depth = (int8_t)ram[0x5F82];
+        st_conv = (int8_t)ram[0x5F83];
+    }
+    bool stereo_requested = false;
+    if (st_mode == 3) {
+        stereo_requested = stereoscopic;
+    } else if (st_mode == 1 && (st_flags & 0x01)) {
+        stereo_requested = true;
+    }
+    const bool stereo_active = (stereo_requested && !isShellUI && stereo_layers != nullptr);
+    const bool swap_eyes = (st_flags & 0x02) != 0;
+
+    int stereoPxPerLevel = 1;
+    int convPxPerLevel = 1;
+    if (host) {
+        const char* platform = host->getPlatform();
+        if (platform && std::strcmp(platform, "Switch") == 0) {
+            stereoPxPerLevel = 2;
+            convPxPerLevel = 2;
+        }
+    }
+
+    int depthLevel = st_depth;
+    if (st_mode == 3 && depthLevel == 0) depthLevel = 1;
+    const int convPx = st_conv * convPxPerLevel;
+    const int maxShift = std::abs(STEREO_BUCKET_MAX * depthLevel * stereoPxPerLevel) + std::abs(convPx);
 
     // 3DS host supports native stereoscopic output (separate left/right views).
     // When running on 3DS, let the host present from vm->stereo_layers directly
     // instead of building an anaglyph image here.
     if (stereo_active && host && std::strcmp(host->getPlatform(), "3DS") == 0) {
-        constexpr int kStereoMaxShift = 7;
+        const int kStereoMaxShift = maxShift;
         int sx0 = dirty_x0 - kStereoMaxShift; if (sx0 < 0) sx0 = 0;
         int sy0 = dirty_y0; if (sy0 < 0) sy0 = 0;
-        int sx1 = dirty_x1 + kStereoMaxShift; if (sx1 > 127) sx1 = 127;
-        int sy1 = dirty_y1; if (sy1 > 127) sy1 = 127;
+        int sx1 = dirty_x1 + kStereoMaxShift; if (sx1 > (fb_w - 1)) sx1 = fb_w - 1;
+        int sy1 = dirty_y1; if (sy1 > (fb_h - 1)) sy1 = fb_h - 1;
 
         if (alt_fb) {
-            host->flipScreens(alt_fb, fb, palette_map);
+            host->flipScreens(alt_fb, alt_fb_w, alt_fb_h, fb, fb_w, fb_h, palette_map);
         } else {
-            host->flipScreenDirty(fb, palette_map, sx0, sy0, sx1, sy1);
+            host->flipScreenDirty(fb, fb_w, fb_h, palette_map, sx0, sy0, sx1, sy1);
         }
 
-        dirty_x0 = WIDTH; dirty_y0 = HEIGHT; dirty_x1 = -1; dirty_y1 = -1;
+        dirty_x0 = fb_w; dirty_y0 = fb_h; dirty_x1 = -1; dirty_y1 = -1;
         return;
     }
 
     if (!stereo_active) {
         if (alt_fb) {
-            host->flipScreens(alt_fb, fb, palette_map);
+            host->flipScreens(alt_fb, alt_fb_w, alt_fb_h, fb, fb_w, fb_h, palette_map);
         } else {
-            host->flipScreenDirty(fb, palette_map, dirty_x0, dirty_y0, dirty_x1, dirty_y1);
+            host->flipScreenDirty(fb, fb_w, fb_h, palette_map, dirty_x0, dirty_y0, dirty_x1, dirty_y1);
         }
     } else {
         // Build a true-color anaglyph frame (0x00RRGGBB per pixel).
         // Bucket-to-pixel mapping: each depth bucket step = 1 pixel of disparity.
-        constexpr int kStereoMaxShift = 7;
-        static uint32_t stereo_xrgb[128 * 128];
-        static uint8_t z_left[128 * 128];
-        static uint8_t z_right[128 * 128];
-        std::memset(stereo_xrgb, 0, sizeof(stereo_xrgb));
-        std::memset(z_left, 0, sizeof(z_left));
-        std::memset(z_right, 0, sizeof(z_right));
+        const int kStereoMaxShift = maxShift;
+        static std::vector<uint32_t> stereo_xrgb;
+        static std::vector<uint8_t> z_left;
+        static std::vector<uint8_t> z_right;
+        const size_t stereo_pixels = (size_t)fb_w * (size_t)fb_h;
+        if (stereo_xrgb.size() != stereo_pixels) {
+            stereo_xrgb.assign(stereo_pixels, 0);
+            z_left.assign(stereo_pixels, 0);
+            z_right.assign(stereo_pixels, 0);
+        } else {
+            std::fill(stereo_xrgb.begin(), stereo_xrgb.end(), 0);
+            std::fill(z_left.begin(), z_left.end(), 0);
+            std::fill(z_right.begin(), z_right.end(), 0);
+        }
 
         // Build draw_map from screen palette (0x5F10) for 0..15 -> 0..31.
         uint8_t draw_map[16];
@@ -1373,11 +1669,12 @@ return; // Libretro frontend handles the actual flip
         // Use |bucket| as Z for occlusion so negative buckets are not overwritten by bucket 0.
         for (int li = 0; li < STEREO_LAYER_COUNT; ++li) {
             const int bucket = li - STEREO_BUCKET_BIAS;
-            const int shift = bucket; // 1px per bucket step (signed)
+            int shift = (bucket * depthLevel * stereoPxPerLevel) + convPx;
+            if (swap_eyes) shift = -shift;
             const uint8_t zval = (uint8_t)(bucket < 0 ? -bucket : bucket); // |bucket| in 0..7
-            for (int y = 0; y < 128; ++y) {
-                const uint8_t* src_row = stereo_layers[li * 128 + y];
-                for (int x = 0; x < 128; ++x) {
+            for (int y = 0; y < fb_h; ++y) {
+                const uint8_t* src_row = stereo_layer_row(li, y);
+                for (int x = 0; x < fb_w; ++x) {
                     const uint8_t src_idx = src_row[x];
                     if (src_idx == 0xFF) continue;
                     const uint8_t pal32 = draw_map[src_idx & 0x0F];
@@ -1386,8 +1683,8 @@ return; // Libretro frontend handles the actual flip
                     const uint8_t ylum = (uint8_t)((77u * r + 150u * g + 29u * bb) >> 8);
 
                     const int lx = x + shift;
-                    if ((unsigned)lx < 128u) {
-                        const int i = y * 128 + lx;
+                    if ((unsigned)lx < (unsigned)fb_w) {
+                        const size_t i = (size_t)y * (size_t)fb_w + (size_t)lx;
                         if (zval >= z_left[i]) {
                             z_left[i] = zval;
                             stereo_xrgb[i] = (stereo_xrgb[i] & 0x0000FFFFu) | ((uint32_t)ylum << 16);
@@ -1395,8 +1692,8 @@ return; // Libretro frontend handles the actual flip
                     }
 
                     const int rx = x - shift;
-                    if ((unsigned)rx < 128u) {
-                        const int i = y * 128 + rx;
+                    if ((unsigned)rx < (unsigned)fb_w) {
+                        const size_t i = (size_t)y * (size_t)fb_w + (size_t)rx;
                         if (zval >= z_right[i]) {
                             z_right[i] = zval;
                             stereo_xrgb[i] = (stereo_xrgb[i] & 0x00FF0000u) | ((uint32_t)ylum << 8) | (uint32_t)ylum;
@@ -1409,19 +1706,19 @@ return; // Libretro frontend handles the actual flip
         // Expand dirty rect to include disparity shifts.
         int sx0 = dirty_x0 - kStereoMaxShift; if (sx0 < 0) sx0 = 0;
         int sy0 = dirty_y0; if (sy0 < 0) sy0 = 0;
-        int sx1 = dirty_x1 + kStereoMaxShift; if (sx1 > 127) sx1 = 127;
-        int sy1 = dirty_y1; if (sy1 > 127) sy1 = 127;
+        int sx1 = dirty_x1 + kStereoMaxShift; if (sx1 > (fb_w - 1)) sx1 = fb_w - 1;
+        int sy1 = dirty_y1; if (sy1 > (fb_h - 1)) sy1 = fb_h - 1;
 
         // Try true-color host present first (best quality).
         bool presented = false;
-        presented = host->flipScreenRGBADirty(stereo_xrgb, 128, 128, sx0, sy0, sx1, sy1);
+        presented = host->flipScreenRGBADirty(stereo_xrgb.data(), fb_w, fb_h, sx0, sy0, sx1, sy1);
         if (!presented) {
-            presented = host->flipScreenRGBA(stereo_xrgb, 128, 128);
+            presented = host->flipScreenRGBA(stereo_xrgb.data(), fb_w, fb_h);
         }
 
         if (!presented) {
             // Fallback: quantize into a 16-color palette so stereo still works on hosts without true-color support.
-            static uint8_t stereo_fb[128][128];
+            static std::vector<uint8_t> stereo_fb;
             static uint8_t stereo_palmap[16];
 
             // Fixed 16-entry palette (indices into the 32-color pico palette) biased toward red/cyan + neutrals.
@@ -1439,9 +1736,15 @@ return; // Libretro frontend handles the actual flip
                 pr[i] = c[0]; pg[i] = c[1]; pb2[i] = c[2];
             }
 
-            for (int y = 0; y < 128; ++y) {
-                for (int x = 0; x < 128; ++x) {
-                    const uint32_t rgb = stereo_xrgb[y * 128 + x];
+            if (stereo_fb.size() != stereo_pixels) {
+                stereo_fb.assign(stereo_pixels, 0);
+            } else {
+                std::fill(stereo_fb.begin(), stereo_fb.end(), 0);
+            }
+
+            for (int y = 0; y < fb_h; ++y) {
+                for (int x = 0; x < fb_w; ++x) {
+                    const uint32_t rgb = stereo_xrgb[(size_t)y * (size_t)fb_w + (size_t)x];
                     const int r = (rgb >> 16) & 0xFF;
                     const int g = (rgb >> 8) & 0xFF;
                     const int b = rgb & 0xFF;
@@ -1454,22 +1757,22 @@ return; // Libretro frontend handles the actual flip
                         int d = dr*dr + dg*dg + db*db;
                         if (d < bestd) { bestd = d; best = i; }
                     }
-                    stereo_fb[y][x] = (uint8_t)best;
+                    stereo_fb[(size_t)y * (size_t)fb_w + (size_t)x] = (uint8_t)best;
                 }
             }
 
-            host->flipScreenDirty(stereo_fb, stereo_palmap, sx0, sy0, sx1, sy1);
+            host->flipScreenDirty(stereo_fb.data(), fb_w, fb_h, stereo_palmap, sx0, sy0, sx1, sy1);
         }
     }
 #else
     // GBA build: stereoscopic output disabled to save IWRAM.
     if (alt_fb) {
-        host->flipScreens(alt_fb, fb, palette_map);
+        host->flipScreens(alt_fb, alt_fb_w, alt_fb_h, fb, fb_w, fb_h, palette_map);
     } else {
-        host->flipScreenDirty(fb, palette_map, dirty_x0, dirty_y0, dirty_x1, dirty_y1);
+        host->flipScreenDirty(fb, fb_w, fb_h, palette_map, dirty_x0, dirty_y0, dirty_x1, dirty_y1);
     }
 #endif
-    dirty_x0 = WIDTH; dirty_y0 = HEIGHT; dirty_x1 = -1; dirty_y1 = -1;
+    dirty_x0 = fb_w; dirty_y0 = fb_h; dirty_x1 = -1; dirty_y1 = -1;
 
 }
 
@@ -1542,6 +1845,7 @@ bool Real8VM::loadState()
 
     if (ram) {
         memcpy(ram, data.data(), 0x8000);
+        applyVideoMode(ram[0x5FE1], /*force=*/true);
         if (screen_ram) memcpy(screen_ram, &ram[0x6000], 0x2000);
         for (int i = 0; i < 0x2000; i++) screenByteToFB(i, ram[0x6000 + i]);
         for(int i=0; i<16; i++) { 
@@ -1675,6 +1979,7 @@ bool Real8VM::unserialize(const void* data, size_t size) {
     // 1. Restore Main RAM
     memcpy(ram, ptr, 0x8000); 
     ptr += 0x8000;
+    applyVideoMode(ram[0x5FE1], /*force=*/true);
 
     // 2. Restore Cart Data
     memcpy(cart_data_ram, ptr, sizeof(cart_data_ram)); 

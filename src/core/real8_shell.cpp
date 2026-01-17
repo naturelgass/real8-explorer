@@ -257,16 +257,19 @@ void Real8Shell::update()
         if (sysState == STATE_RUNNING) {
             // Normal gameplay: single framebuffer (both screens show the game)
             vm->clearAltFramebuffer();
+            host->clearTopPreviewBlankHint();
         }
         else if (sysState == STATE_INGAME_MENU) {
             // In-game menu: keep the frozen game frame on the TOP screen
             // (top_screen_fb is filled when the menu is opened)
-            vm->setAltFramebuffer(top_screen_fb);
+            vm->setAltFramebuffer(&top_screen_fb[0][0], 128, 128);
+            host->setTopPreviewBlankHint(false);
         }
         else if (sysState != STATE_BROWSER) {
             // Other menus: top screen uses the dedicated buffer
             memset(top_screen_fb, 0, sizeof(top_screen_fb));
-            vm->setAltFramebuffer(top_screen_fb);
+            vm->setAltFramebuffer(&top_screen_fb[0][0], 128, 128);
+            host->setTopPreviewBlankHint(true);
         }
     }
 
@@ -464,7 +467,8 @@ void Real8Shell::update()
                     // Apply paused overlay effect (checkerboard like fillp(0xA5A5))
                     applyPauseCheckerboardToTop();
 
-                    vm->setAltFramebuffer(top_screen_fb);
+                    vm->setAltFramebuffer(&top_screen_fb[0][0], 128, 128);
+                    host->setTopPreviewBlankHint(false);
                 }
 
                 vm->gpu.saveState(menu_gfx_backup);
@@ -481,6 +485,7 @@ void Real8Shell::update()
                     vm->exit_requested = false;
                     vm->forceExit();
                     vm->resetInputState();
+                    resetModeForShell();
                     sysState = STATE_BROWSER;
                     refreshGameList();
                 }
@@ -530,6 +535,7 @@ void Real8Shell::update()
             if (vm->btnp(4) || vm->btnp(5)) {
                 vm->forceExit();
                 vm->resetInputState();
+                resetModeForShell();
                 sysState = STATE_BROWSER;
             }
             break;
@@ -557,6 +563,12 @@ void Real8Shell::startAsyncDownload(AsyncDownload &task, const std::string &url,
         task.done = true;
         task.active = false;
     });
+}
+
+void Real8Shell::resetModeForShell()
+{
+    if (!vm) return;
+    vm->applyVideoMode(0, /*force=*/true);
 }
 
 bool Real8Shell::isPreviewDownloadActiveFor(const std::string &url) const
@@ -1049,16 +1061,20 @@ void Real8Shell::renderFileList(bool drawTopPreview)
 void Real8Shell::renderTopPreview3ds(const char *statusText)
 {
     memset(top_screen_fb, 0, sizeof(top_screen_fb));
+    bool previewBlank = true;
     if (statusText && statusText[0] != '\0') {
         drawMenuTextToBuffer(top_screen_fb, statusText, getCenteredX(statusText), 60, 11);
+        previewBlank = false;
     } else if (has_preview) {
         for (int y = 0; y < 128; ++y) {
             for (int x = 0; x < 128; ++x) {
                 top_screen_fb[y][x] = preview_ram[y][x] & 0x0F;
             }
         }
+        previewBlank = false;
     }
-    vm->setAltFramebuffer(top_screen_fb);
+    vm->setAltFramebuffer(&top_screen_fb[0][0], 128, 128);
+    host->setTopPreviewBlankHint(previewBlank);
 }
 
 void Real8Shell::renderOptionsMenu()
@@ -1148,35 +1164,97 @@ void Real8Shell::parseJsonGames()
     const char* platform = host->getPlatform();
     bool RepoSupport = isRepoSupportedPlatform(platform);
     bool is3ds = (strcmp(platform, "3DS") == 0);
+    (void)is3ds; // kept for future platform-specific tweaks
 
-    // 1. Local JSON (always load so local lists remain visible)
-    std::vector<uint8_t> localData = host->loadFile("/gameslist.json");
-    if (!localData.empty()) {
-        parseJsonToVFS(std::string(localData.begin(), localData.end()));
+    bool repoGamesEnabled = RepoSupport && vm->showRepoGames;
+    bool isBootRefresh = pendingInitialRefresh;
+
+    if (isBootRefresh && repoGamesEnabled) {
+        pendingRepoBootCopy = true;
     }
 
-    // 2. Remote JSON (Repo) — only when repo games are enabled
-    if (RepoSupport && vm->showRepoGames) {
-        const char *repoPath = "/repo_games.json";
-        if (isSwitchPlatform) {
-            std::vector<uint8_t> remoteData = host->loadFile(repoPath);
-            if (!remoteData.empty()) {
+    // Goal: do NOT show Repo Games unless we have internet, even if repoGamesEnabled is true.
+    // So we only read/parse the cached repo list and do any repo handling when `isConnected` is true.
+    const bool isConnected = repoGamesEnabled ? host->getNetworkInfo().connected : false;
+
+    // 1) Cached local JSON (repo mirror) — only when connected (hide repo list offline)
+    std::vector<uint8_t> localData;
+    if (isConnected) {
+        localData = host->loadFile("/gameslist.json");
+        if (!localData.empty()) {
+            parseJsonToVFS(std::string(localData.begin(), localData.end()));
+        }
+    }
+
+    // 2) Remote JSON (Repo) — only when repo games are enabled AND connected
+    bool hasLocalList = !localData.empty();
+    bool allowRemoteHandling = isConnected && repoGamesEnabled && (pendingRepoBootCopy || !hasLocalList);
+    bool allowNetworkFetch  = isConnected && repoGamesEnabled && (isBootRefresh || !hasLocalList);
+
+    if (!allowRemoteHandling) {
+        return;
+    }
+
+    const char *repoPath = "/repo_games.json";
+
+    if (isSwitchPlatform) {
+        // Switch: prefer async download, but still allow using an already-downloaded repo file.
+        std::vector<uint8_t> remoteData = host->loadFile(repoPath);
+        const bool remoteEmpty = remoteData.empty();
+
+        if (!remoteEmpty) {
+            bool remoteMatchesLocal = !localData.empty() &&
+                localData.size() == remoteData.size() &&
+                memcmp(localData.data(), remoteData.data(), localData.size()) == 0;
+
+            if (pendingRepoBootCopy) {
+                vfs.clear();
+            }
+
+            if (!remoteMatchesLocal || pendingRepoBootCopy) {
                 parseJsonToVFS(std::string(remoteData.begin(), remoteData.end()));
             }
-            if (!repoDownload.active && remoteData.empty()) {
-                startAsyncDownload(repoDownload, vm->currentRepoUrl, repoPath);
+
+            if (pendingRepoBootCopy) {
+                host->saveState("/gameslist.json", remoteData.data(), remoteData.size());
+                pendingRepoBootCopy = false;
             }
-        } else {
-            renderMessage("REAL-8 EXPLORER", "LOADING REPO GAMES", 1);
-            vm->show_frame();
-            if (host->downloadFile(vm->currentRepoUrl.c_str(), repoPath)) {
-                std::vector<uint8_t> remoteData = host->loadFile(repoPath);
-                if (!remoteData.empty()) parseJsonToVFS(std::string(remoteData.begin(), remoteData.end()));
-                host->deleteFile(repoPath);
+        }
+
+        // Fix: `remoteData` was previously out-of-scope here. Use `remoteEmpty` instead.
+        if (allowNetworkFetch && !repoDownload.active && remoteEmpty) {
+            startAsyncDownload(repoDownload, vm->currentRepoUrl, repoPath);
+        }
+    } else if (allowNetworkFetch) {
+        // Other platforms: blocking download is fine
+        renderMessage("REAL-8 EXPLORER", "LOADING REPO GAMES", 1);
+        vm->show_frame();
+
+        if (host->downloadFile(vm->currentRepoUrl.c_str(), repoPath)) {
+            std::vector<uint8_t> remoteData = host->loadFile(repoPath);
+            if (!remoteData.empty()) {
+                bool remoteMatchesLocal = !localData.empty() &&
+                    localData.size() == remoteData.size() &&
+                    memcmp(localData.data(), remoteData.data(), localData.size()) == 0;
+
+                if (pendingRepoBootCopy) {
+                    vfs.clear();
+                }
+
+                if (!remoteMatchesLocal || pendingRepoBootCopy) {
+                    parseJsonToVFS(std::string(remoteData.begin(), remoteData.end()));
+                }
+
+                if (pendingRepoBootCopy) {
+                    host->saveState("/gameslist.json", remoteData.data(), remoteData.size());
+                    pendingRepoBootCopy = false;
+                }
             }
+            host->deleteFile(repoPath);
         }
     }
 }
+
 
 void Real8Shell::parseJsonToVFS(const std::string &json)
 {

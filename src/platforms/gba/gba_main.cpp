@@ -442,7 +442,8 @@ int main(void) {
     host.renderDebugOverlay();
 
     vm.ram = gba_ram;
-    vm.fb = (uint8_t (*)[128])gba_fb;
+    vm.fb = &gba_fb[0][0];
+    vm.fb_is_linear = true;
     vm.setRomView(nullptr, 0, true);
 
     host.log("[BOOT] initMemory");

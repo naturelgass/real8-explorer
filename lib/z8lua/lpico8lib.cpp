@@ -11,6 +11,7 @@
 //
 
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 
 #define lpico8lib_c
@@ -303,42 +304,87 @@ static int pico8_ord(lua_State *l) {
 }
 
 static int pico8_split(lua_State *l) {
-    if (lua_isnil(l, 1)) {
-        return 0;
+    // If input is nil, PICO-8 returns an empty table or nil depending on version.
+    // Standard behavior is to return a table with the nil converted to "" or just 0 results.
+    if (lua_isnil(l, 1)) return 0;
+
+    size_t len;
+    const char *s = luaL_checklstring(l, 1, &len);
+
+    // Default delimiter in PICO-8 is a comma ","
+    size_t needle_len = 1;
+    const char *needle = ",";
+    
+    if (!lua_isnoneornil(l, 2)) {
+        needle = luaL_checklstring(l, 2, &needle_len);
     }
-    size_t count = 0, hlen;
-    char const *haystack = luaL_checklstring(l, 1, &hlen);
-    if (!haystack)
-        return 0;
+
+    bool convert = lua_toboolean(l, 3);
     lua_newtable(l);
-    // Split either by chunk size or by needle position
-    int size = 0;
-    char needle = ',';
-    if (lua_isnumber(l, 2)) {
-        size = int(lua_tonumber(l, 2));
-        if (size <= 0)
-            size = 1;
-    } else if (lua_isstring(l, 2)) {
-        needle = *lua_tostring(l, 2);
+    int count = 0;
+
+    // Case 1: Empty delimiter (split into individual characters)
+    if (needle_len == 0) {
+        for (size_t i = 0; i < len; ++i) {
+            lua_pushlstring(l, s + i, 1);
+            lua_rawseti(l, -2, ++count);
+        }
+        return 1;
     }
-    auto convert = lua_isnone(l, 3) || lua_toboolean(l, 3);
-    char const *end = haystack + hlen + (!size && needle);
-    for (char const *parser = haystack; parser < end; ) {
-        lua_Number num;
-        char const *next = size ? parser + size
-                         : needle ? (char const*)memchr(parser, needle, end - parser) : parser + 1;
-        if (!next || next > end)
-            next = haystack + hlen;
-        char saved = *next; // temporarily put a null terminator here
-        *(char *)next = '\0';
-        if (convert && luaO_str2d(parser, next - parser, &num))
-            lua_pushnumber(l, num);
-        else
-            lua_pushlstring(l, parser, next - parser);
-        *(char *)next = saved;
-        lua_rawseti(l, -2, int(++count));
-        parser = next + (!size && needle);
+
+    // Case 2: Standard split
+    const char *parser = s;
+    const char *end = s + len;
+
+    while (parser <= end) {
+        // Find the occurrence of the first char of the needle
+        const char *next = (const char *)memchr(parser, needle[0], end - parser);
+        
+        // If needle is multi-char, verify the rest of the string matches
+        if (next && needle_len > 1) {
+            if (size_t(end - next) < needle_len || memcmp(next, needle, needle_len) != 0) {
+                // Not a match, skip this char and search again from next + 1
+                parser = next + 1;
+                if (parser > end) break;
+                continue; 
+            }
+        }
+
+        // If no more delimiters found, point to end of string
+        const char *found_at = next ? next : end;
+        size_t part_len = found_at - parser;
+
+        // Extract the substring
+        if (convert) {
+            lua_Number num;
+            char temp[64]; // Sufficient for PICO-8 fixed point strings
+            size_t copy_len = part_len < 63 ? part_len : 63;
+            memcpy(temp, parser, copy_len);
+            temp[copy_len] = '\0';
+
+            if (luaO_str2d(temp, copy_len, &num))
+                lua_pushnumber(l, num);
+            else
+                lua_pushlstring(l, parser, part_len);
+        } else {
+            lua_pushlstring(l, parser, part_len);
+        }
+
+        lua_rawseti(l, -2, ++count);
+
+        if (!next) break; // No more delimiters, exit loop
+
+        // Move parser forward past the delimiter
+        parser = next + needle_len;
+
+        // PICO-8 quirk: if string ends with a delimiter, append an empty string
+        if (parser == end) {
+            lua_pushliteral(l, "");
+            lua_rawseti(l, -2, ++count);
+            break;
+        }
     }
+
     return 1;
 }
 

@@ -55,6 +55,7 @@ private:
     ShellState sysState = STATE_BOOT;
     bool isSwitchPlatform = false;
     bool pendingInitialRefresh = true;
+    bool pendingRepoBootCopy = false;
 
     Real8Gfx::GfxState menu_gfx_backup;
     
@@ -66,6 +67,7 @@ private:
     void updateInGameMenu();
     void buildInGameMenu();
     void buildContextMenu();
+    void resetModeForShell();
 
     // --- Rendering ---
     void renderFileList(bool drawTopPreview = true);

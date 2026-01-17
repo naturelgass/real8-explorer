@@ -7,16 +7,53 @@
 namespace {
 
 static const int FONT_WIDTH = 5;
-static const int SCREEN_CENTER_X = 64;
-
 // 3DS: remember the user's skin setting while the in-game menu is open
 static bool s_menuSavedShowSkinValid = false;
 static bool s_menuSavedShowSkin = false;
 
-int getCenteredX(const char* text)
+int getScreenW(const Real8VM* vm)
+{
+    return (vm && vm->fb_w > 0) ? vm->fb_w : 128;
+}
+
+int getScreenH(const Real8VM* vm)
+{
+    return (vm && vm->fb_h > 0) ? vm->fb_h : 128;
+}
+
+int getCenteredX(const char* text, int screenW)
 {
     int textLenInPixels = (int)std::strlen(text) * FONT_WIDTH;
-    return SCREEN_CENTER_X - (textLenInPixels / 2);
+    return (screenW / 2) - (textLenInPixels / 2);
+}
+
+bool isStereoMenuEnabled(const Real8VM* vm)
+{
+    if (!vm) return false;
+    if (!vm->ram) return vm->stereoscopic;
+
+    const uint8_t st_mode = vm->ram[0x5F81] & 0x03;
+    const uint8_t st_flags = vm->ram[0x5F80];
+    if (st_mode == 1) return (st_flags & 0x01) != 0;
+    if (st_mode == 3) return vm->stereoscopic;
+    return false;
+}
+
+void setStereoMenuEnabled(Real8VM* vm, bool enabled)
+{
+    if (!vm) return;
+    if (vm->ram) {
+        const uint8_t st_mode = vm->ram[0x5F81] & 0x03;
+        if (st_mode == 1) {
+            uint8_t st_flags = vm->ram[0x5F80];
+            if (enabled) st_flags |= 0x01;
+            else st_flags = (uint8_t)(st_flags & ~0x01);
+            vm->ram[0x5F80] = st_flags;
+        } else if (enabled) {
+            vm->ram[0x5F81] = 3;
+        }
+    }
+    vm->stereoscopic = enabled;
 }
 
 bool isRepoSupportedPlatform(const char* platform)
@@ -73,7 +110,8 @@ void drawMenuFrame(Real8VM* vm, int mx, int my, int mw, int mh, const char* titl
     vm->gpu.rect(mx, my, mx + mw, my + mh, 1);
     vm->gpu.rectfill(mx, my, mx + mw, my + 9, 1);
 
-    vm->gpu.pprint(title, (int)std::strlen(title), getCenteredX(title), my + 2, 6);
+    int screenW = getScreenW(vm);
+    vm->gpu.pprint(title, (int)std::strlen(title), getCenteredX(title, screenW), my + 2, 6);
 }
 
 } // namespace
@@ -268,7 +306,8 @@ InGameResult UpdateInGameMenu(Real8VM* vm,
             inGameMenuSelection = savedSel;
         }
         else if (action == "STEREO SCR") {
-            vm->stereoscopic = !vm->stereoscopic;
+            const bool enabled = isStereoMenuEnabled(vm);
+            setStereoMenuEnabled(vm, !enabled);
             Real8Tools::SaveSettings(vm, host);
         }
         else if (action == "STRETCH SCR") {
@@ -351,10 +390,12 @@ void RenderSettingsMenu(Real8VM* vm, IReal8Host* host, int menuSelection, const 
     ScrollWindow window = computeScrollWindow(menuSelection, itemCount, maxVisibleItems);
 
     // Auto-size menu box based on visible item count
+    int screenW = getScreenW(vm);
+    int screenH = getScreenH(vm);
     int mw = 107;                       // keeps the old 10..117 horizontal layout
     int mh = (window.visibleItems * 11) + 16;  // same formula as pause menu
-    int mx = (128 - mw) / 2;
-    int my = ((128 - mh) / 2) - (is3ds ? 5 : 0);
+    int mx = (screenW - mw) / 2;
+    int my = ((screenH - mh) / 2) - (is3ds ? 5 : 0);
 
     drawMenuFrame(vm, mx, my, mw, mh, "SETTINGS");
 
@@ -417,17 +458,21 @@ void RenderInGameMenu(Real8VM* vm,
     } else {
         // Keep game background on other platforms
         vm->gpu.fillp(0xA5A5);
-        vm->gpu.rectfill(0, 0, 128, 128, 0);
+        int screenW = getScreenW(vm);
+        int screenH = getScreenH(vm);
+        vm->gpu.rectfill(0, 0, screenW - 1, screenH - 1, 0);
         vm->gpu.fillp(0);
     }
 
     const int maxVisibleItems = 7;
     ScrollWindow window = computeScrollWindow(inGameMenuSelection, (int)inGameOptions.size(), maxVisibleItems);
 
+    int screenW = getScreenW(vm);
+    int screenH = getScreenH(vm);
     int mw = 100;
     int mh = (window.visibleItems * 11) + 16;
-    int mx = (128 - mw) / 2;
-    int my = (128 - mh) / 2 - (is3ds ? 8 : 0);
+    int mx = (screenW - mw) / 2;
+    int my = (screenH - mh) / 2 - (is3ds ? 8 : 0);
 
     drawMenuFrame(vm, mx, my, mw, mh, "PAUSED");
 
@@ -472,8 +517,9 @@ void RenderInGameMenu(Real8VM* vm,
             drawRightStatus(status, oy, statusCol);
         }
         else if (inGameOptions[idx] == "STEREO SCR") {
-            const char* status = vm->stereoscopic ? "ON" : "OFF";
-            int statusCol = vm->stereoscopic ? 11 : 8;
+            const bool enabled = isStereoMenuEnabled(vm);
+            const char* status = enabled ? "ON" : "OFF";
+            int statusCol = enabled ? 11 : 8;
             drawRightStatus(status, oy, statusCol);
         }
         else if (inGameOptions[idx] == "STRETCH SCR") {
@@ -503,9 +549,15 @@ void RenderMessage(Real8VM* vm, const char* header, const char* msg, int color)
 {
     vm->gpu.setMenuFont(true);
     vm->gpu.cls(0);
-    vm->gpu.rectfill(0, 50, 127, 75, color);
-    vm->gpu.pprint(header, (int)std::strlen(header), getCenteredX(header), 55, 7);
-    vm->gpu.pprint(msg, (int)std::strlen(msg), getCenteredX(msg), 65, 7);
+    int screenW = getScreenW(vm);
+    int screenH = getScreenH(vm);
+    int boxW = std::min(128, screenW);
+    int boxH = 26;
+    int boxX = (screenW - boxW) / 2;
+    int boxY = (screenH - boxH) / 2;
+    vm->gpu.rectfill(boxX, boxY, boxX + boxW - 1, boxY + boxH - 1, color);
+    vm->gpu.pprint(header, (int)std::strlen(header), getCenteredX(header, screenW), boxY + 5, 7);
+    vm->gpu.pprint(msg, (int)std::strlen(msg), getCenteredX(msg, screenW), boxY + 15, 7);
     vm->gpu.setMenuFont(false);
 }
 
@@ -550,6 +602,7 @@ void Real8Shell::updateInGameMenu()
         sysState = STATE_LOADING;
         break;
     case Real8Menu::InGameAction::ExitToBrowser:
+        resetModeForShell();
         sysState = STATE_BROWSER;
         break;
     default:

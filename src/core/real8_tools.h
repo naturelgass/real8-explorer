@@ -38,6 +38,7 @@ public:
     // --------------------------------------------------------------------------
     // EXPORTERS
     // --------------------------------------------------------------------------
+    static void ExportLUA(Real8VM* vm, IReal8Host* host, const std::string &outputFile);
     static void ExportGFX(Real8VM* vm, IReal8Host* host, const std::string &outputFolder);
     static void ExportMAP(Real8VM* vm, IReal8Host* host, const std::string &outputFolder);
     static void ExportStaticVars(Real8VM* vm, IReal8Host* host, const std::string &outputFolder);

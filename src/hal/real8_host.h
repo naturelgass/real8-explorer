@@ -24,7 +24,7 @@ class IReal8Host
 public:
 
     static constexpr const char *REAL8_APPNAME = "REAL-8 EXPLORER";
-    static constexpr const char *REAL8_VERSION = "1.0";
+    static constexpr const char *REAL8_VERSION = "1.1.0";
     static constexpr const char *DEFAULT_GAMES_REPOSITORY = "https://raw.githubusercontent.com/naturelgass/real8games/main/gameslist.json";
     
     bool interlaced = false;
@@ -47,17 +47,22 @@ public:
     virtual void saveRepoUrlToFile(const std::string& url) {}
     
     // --- Graphics ---
-    virtual void flipScreen(uint8_t (*framebuffer)[128], uint8_t *palette_map) = 0;
-    virtual void flipScreens(uint8_t (*top)[128], uint8_t (*bottom)[128], uint8_t *palette_map) {
-        flipScreen(bottom, palette_map);
+    virtual void flipScreen(const uint8_t *framebuffer, int fb_w, int fb_h, uint8_t *palette_map) = 0;
+    virtual void flipScreens(const uint8_t *top, int top_w, int top_h,
+                             const uint8_t *bottom, int bottom_w, int bottom_h,
+                             uint8_t *palette_map) {
+        (void)top;
+        (void)top_w;
+        (void)top_h;
+        flipScreen(bottom, bottom_w, bottom_h, palette_map);
     }
-    virtual void flipScreenDirty(uint8_t (*framebuffer)[128], uint8_t *palette_map,
+    virtual void flipScreenDirty(const uint8_t *framebuffer, int fb_w, int fb_h, uint8_t *palette_map,
                                  int x0, int y0, int x1, int y1) {
         (void)x0;
         (void)y0;
         (void)x1;
         (void)y1;
-        flipScreen(framebuffer, palette_map);
+        flipScreen(framebuffer, fb_w, fb_h, palette_map);
     }
 
 // Optional true-color flip (stereo/anaglyph). Pixel format: 0x00RRGGBB (XRGB8888).
@@ -77,10 +82,20 @@ virtual bool flipScreenRGB565Dirty(const uint16_t* rgb565, int w, int h,
     (void)rgb565; (void)w; (void)h; (void)x0; (void)y0; (void)x1; (void)y1;
     return false;
 }
-virtual bool flipScreenRGB565(const uint16_t* rgb565, int w, int h) {
-    (void)rgb565; (void)w; (void)h;
-    return false;
-}
+    virtual bool flipScreenRGB565(const uint16_t* rgb565, int w, int h) {
+        (void)rgb565; (void)w; (void)h;
+        return false;
+    }
+
+    // Optional DMA-friendly framebuffer allocation (platform-specific).
+    virtual void* allocLinearFramebuffer(size_t bytes, size_t align) {
+        (void)bytes;
+        (void)align;
+        return nullptr;
+    }
+    virtual void freeLinearFramebuffer(void* ptr) { (void)ptr; }
+
+    virtual void onFramebufferResize(int fb_w, int fb_h) { (void)fb_w; (void)fb_h; }
 
     virtual void beginFrame() {}
     virtual bool queueSprite(const uint8_t* spriteSheet, int n, int x, int y, int w, int h, bool fx, bool fy) {
@@ -95,6 +110,8 @@ virtual bool flipScreenRGB565(const uint16_t* rgb565, int w, int h) {
         return false;
     }
     virtual void cancelSpriteBatch() {}
+    virtual void setTopPreviewBlankHint(bool blank) { (void)blank; }
+    virtual void clearTopPreviewBlankHint() {}
 
     // --- System ---
     virtual unsigned long getMillis() = 0;

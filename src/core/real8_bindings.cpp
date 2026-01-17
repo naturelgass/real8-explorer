@@ -26,6 +26,8 @@
 #define ENABLE_GAME_LOGS 1 // Set to 1 to enable logs, 0 to disable
 // ---------------------
 
+#define REAL8_TRACE_API(name) real8_set_last_api_call(name)
+
 int debug_spr_count = 0;
 int debug_print_count = 0;
 int debug_cls_count = 0;
@@ -425,6 +427,47 @@ static int l_stat(lua_State *L)
         return 1;
     case 124: // Current path
         lua_pushstring(L, vm ? vm->currentCartPath.c_str() : "");
+        return 1;
+
+    // --- REAL-8 EXTENSIONS ---
+    case 140: // Active REAL-8 mode index
+        lua_pushinteger(L, vm ? vm->r8_vmode_cur : 0);
+        return 1;
+    case 141: // Raw requested mode byte (debug)
+        lua_pushinteger(L, (vm && vm->ram) ? vm->ram[0x5FE1] : 0);
+        return 1;
+    case 142: // Accel X (Q16.16)
+        lua_pushnumber(L, vm ? lua_Number::frombits(vm->motion.accel_x) : lua_Number(0));
+        return 1;
+    case 143: // Accel Y (Q16.16)
+        lua_pushnumber(L, vm ? lua_Number::frombits(vm->motion.accel_y) : lua_Number(0));
+        return 1;
+    case 144: // Accel Z (Q16.16)
+        lua_pushnumber(L, vm ? lua_Number::frombits(vm->motion.accel_z) : lua_Number(0));
+        return 1;
+    case 145: // Gyro X (Q16.16)
+        lua_pushnumber(L, vm ? lua_Number::frombits(vm->motion.gyro_x) : lua_Number(0));
+        return 1;
+    case 146: // Gyro Y (Q16.16)
+        lua_pushnumber(L, vm ? lua_Number::frombits(vm->motion.gyro_y) : lua_Number(0));
+        return 1;
+    case 147: // Gyro Z (Q16.16)
+        lua_pushnumber(L, vm ? lua_Number::frombits(vm->motion.gyro_z) : lua_Number(0));
+        return 1;
+    case 148: // Sensor flags bitmask
+        lua_pushinteger(L, vm ? (int)vm->motion.flags : 0);
+        return 1;
+    case 149: // dt_us since last sample
+        lua_pushinteger(L, vm ? (int)vm->motion.dt_us : 0);
+        return 1;
+    case 150: // Framebuffer width
+        lua_pushinteger(L, vm ? vm->fb_w : 0);
+        return 1;
+    case 151: // Framebuffer height
+        lua_pushinteger(L, vm ? vm->fb_h : 0);
+        return 1;
+    case 152: // Current host platform
+        lua_pushstring(L, (vm && vm->host && vm->host->getPlatform()) ? vm->host->getPlatform() : "");
         return 1;
 
     default:
@@ -903,11 +946,15 @@ static int l_flip(lua_State *L)
     // Address 0x5F2C (24364) = 5 triggers Horizontal Mirroring (0-63 -> 127-64)
     if (vm->ram && vm->ram[0x5F2C] == 5 && vm->fb)
     {
-        for (int y = 0; y < 128; y++)
+        const int w = vm->fb_w;
+        const int h = vm->fb_h;
+        const int half = w / 2;
+        for (int y = 0; y < h; y++)
         {
-            for (int x = 0; x < 64; x++)
+            uint8_t* row = vm->fb_row(y);
+            for (int x = 0; x < half; x++)
             {
-                vm->fb[y][127 - x] = vm->fb[y][x];
+                row[w - 1 - x] = row[x];
             }
         }
     }
@@ -1078,6 +1125,7 @@ static int l_cls(lua_State *L)
 }
 static int IWRAM_BINDINGS_CODE l_pset(lua_State *L)
 {
+    REAL8_TRACE_API("pset");
     auto *vm = get_vm(L);
     int x = to_int_floor(L, 1);
     int y = to_int_floor(L, 2);
@@ -1135,6 +1183,7 @@ static int IWRAM_BINDINGS_CODE l_pget(lua_State *L)
 }
 static int IWRAM_BINDINGS_CODE l_line(lua_State *L)
 {
+    REAL8_TRACE_API("line");
     auto *vm = get_vm(L);
     int argc = lua_gettop(L);
 
@@ -1175,6 +1224,7 @@ static int IWRAM_BINDINGS_CODE l_line(lua_State *L)
 }
 static int IWRAM_BINDINGS_CODE l_rectfill(lua_State *L)
 {
+    REAL8_TRACE_API("rectfill");
     auto *vm = get_vm(L);
     int x0 = to_int_floor(L, 1);
     int y0 = to_int_floor(L, 2);
@@ -1190,6 +1240,7 @@ static int IWRAM_BINDINGS_CODE l_rectfill(lua_State *L)
 }
 static int l_rect(lua_State *L)
 {
+    REAL8_TRACE_API("rect");
     auto *vm = get_vm(L);
     int x0 = to_int_floor(L, 1);
     int y0 = to_int_floor(L, 2);
@@ -1354,6 +1405,115 @@ static std::string p8_utf8_to_p8scii(char const *s, size_t len)
     return out;
 }
 
+std::string p8_normalize_lua_strings(const std::string& src)
+{
+    std::string out;
+    out.reserve(src.size());
+
+    enum State { CODE, STRING_S, STRING_D, COMMENT_LINE, COMMENT_BLOCK };
+    State state = CODE;
+    bool escape = false;
+    char quote = 0;
+    std::string str_buf;
+
+    auto flush_string = [&]() {
+        if (!str_buf.empty())
+        {
+            out += p8_utf8_to_p8scii(str_buf.c_str(), str_buf.size());
+            str_buf.clear();
+        }
+    };
+
+    for (size_t i = 0; i < src.size(); ++i)
+    {
+        char c = src[i];
+        char next = (i + 1 < src.size()) ? src[i + 1] : 0;
+
+        if (state == CODE)
+        {
+            if (c == '-' && next == '-')
+            {
+                out += c;
+                out += next;
+                i++;
+                if (i + 2 < src.size() && src[i + 1] == '[' && src[i + 2] == '[')
+                    state = COMMENT_BLOCK;
+                else
+                    state = COMMENT_LINE;
+                continue;
+            }
+            if (c == '/' && next == '/')
+            {
+                out += c;
+                out += next;
+                i++;
+                state = COMMENT_LINE;
+                continue;
+            }
+            if (c == '\'' || c == '"')
+            {
+                state = (c == '\'') ? STRING_S : STRING_D;
+                quote = c;
+                escape = false;
+                out += c;
+                continue;
+            }
+            out += c;
+            continue;
+        }
+
+        if (state == COMMENT_LINE)
+        {
+            out += c;
+            if (c == '\n') state = CODE;
+            continue;
+        }
+        if (state == COMMENT_BLOCK)
+        {
+            out += c;
+            if (c == ']' && next == ']')
+            {
+                out += next;
+                i++;
+                state = CODE;
+            }
+            continue;
+        }
+
+        if (state == STRING_S || state == STRING_D)
+        {
+            if (escape)
+            {
+                str_buf += c;
+                escape = false;
+                continue;
+            }
+            if (c == '\\')
+            {
+                str_buf += c;
+                escape = true;
+                continue;
+            }
+            if (c == quote)
+            {
+                flush_string();
+                out += c;
+                state = CODE;
+                continue;
+            }
+            str_buf += c;
+            continue;
+        }
+    }
+
+    if (state == STRING_S || state == STRING_D)
+    {
+        flush_string();
+    }
+
+    return out;
+}
+
 
 // Helper: Convert PICO-8 Hex char (0-9, a-f) to integer (0-15)
 static int p8_hex_val(char c) {
@@ -1387,6 +1547,7 @@ static int p8_char_width(unsigned char c) {
 
 static int l_print(lua_State *L)
 {
+    REAL8_TRACE_API("print");
     debug_print_count++;
     auto *vm = get_vm(L);
     
@@ -1919,6 +2080,7 @@ static int l_cursor(lua_State *L)
 
 static int l_peek(lua_State *L)
 {
+    REAL8_TRACE_API("peek");
     auto *vm = get_vm(L);
     int addr = to_int_floor(L, 1); // Use safe cast
 
@@ -2047,6 +2209,43 @@ static void vm_sync_ram(Real8VM *vm, uint32_t start_addr, int length)
             vm->gpu.draw_mask = vm->ram[0x5F5E];
         }
     }
+
+    // 5. Stereo GPIO (0x5F80 - 0x5F8F)
+    if (end_addr > 0x5F80 && start_addr <= 0x5F8F)
+    {
+        auto clamp_s8 = [](uint8_t v) -> uint8_t {
+            int8_t s = (int8_t)v;
+            if (s < -3) s = -3;
+            if (s > 3) s = 3;
+            return (uint8_t)s;
+        };
+
+        if (start_addr <= 0x5F81 && end_addr > 0x5F81)
+            vm->ram[0x5F81] = (uint8_t)(vm->ram[0x5F81] & 0x03);
+
+        const uint16_t clamp_addrs[] = {
+            0x5F82, 0x5F83
+        };
+        for (uint16_t addr : clamp_addrs) {
+            if (start_addr <= addr && end_addr > addr) {
+                vm->ram[addr] = clamp_s8(vm->ram[addr]);
+            }
+        }
+    }
+
+    // 6. REAL-8 GPIO (0x5FE0 - 0x5FE2)
+    if (end_addr > 0x5FE0 && start_addr <= 0x5FE2)
+    {
+        if (start_addr <= 0x5FE0 && end_addr > 0x5FE0) {
+            vm->r8_flags = vm->ram[0x5FE0];
+        }
+        if (start_addr <= 0x5FE1 && end_addr > 0x5FE1) {
+            vm->applyVideoMode(vm->ram[0x5FE1], /*force=*/false);
+        }
+        if (start_addr <= 0x5FE2 && end_addr > 0x5FE2) {
+            vm->ram[0x5FE2] = vm->r8_vmode_cur;
+        }
+    }
 }
 
 struct MappedAddr {
@@ -2097,16 +2296,16 @@ static uint8_t read_screen_byte(Real8VM *vm, uint32_t addr)
         return vm->ram[addr];
 
     uint32_t offset = addr - 0x6000;
-    if (!vm->fb)
+    if (!vm->fb || vm->r8_vmode_cur != 0)
         return vm->ram[addr];
 
     int y = offset >> 6;
     int x = (offset & 63) << 1;
-    if (y >= 128)
+    if (y >= vm->fb_h || (x + 1) >= vm->fb_w)
         return 0;
 
-    uint8_t p1 = vm->fb[y][x];
-    uint8_t p2 = vm->fb[y][x + 1];
+    uint8_t p1 = vm->fb_row(y)[x];
+    uint8_t p2 = vm->fb_row(y)[x + 1];
     uint8_t val = (p1 & 0x0F) | ((p2 & 0x0F) << 4);
     vm->ram[addr] = val;
     return val;
@@ -2156,6 +2355,7 @@ static void write_mapped_byte(Real8VM *vm, uint32_t addr, uint8_t val)
 
 static int l_poke(lua_State *L)
 {
+    REAL8_TRACE_API("poke");
     auto *vm = get_vm(L);
     if (!vm || !vm->ram)
         return 0;
@@ -2200,6 +2400,7 @@ static int l_poke(lua_State *L)
 
 static int l_memcpy(lua_State *L)
 {
+    REAL8_TRACE_API("memcpy");
     auto *vm = get_vm(L);
     int dest = to_int_floor(L, 1);
     int src = to_int_floor(L, 2);
@@ -2232,7 +2433,7 @@ static int l_memcpy(lua_State *L)
 
     // If reading FROM Screen (0x6000+), we must reconstruct the RAM data from the
     // visual Framebuffer because vm->spr() likely bypasses screen_ram for speed.
-    if (src_hits_screen && vm->fb)
+    if (src_hits_screen && vm->fb && vm->r8_vmode_cur == 0)
     {
         int s_start = std::max((int)src, 0x6000);
         int s_end = std::min((int)(src + len), 0x8000);
@@ -2243,11 +2444,11 @@ static int l_memcpy(lua_State *L)
             int y = offset >> 6;        // Divide by 64 (rows)
             int x = (offset & 63) << 1; // Mod 64 * 2 pixels per byte
 
-            if (y < 128)
+            if (y < vm->fb_h && (x + 1) < vm->fb_w)
             {
                 // Scavenge pixels directly from the visual buffer
-                uint8_t p1 = vm->fb[y][x];
-                uint8_t p2 = vm->fb[y][x + 1];
+                uint8_t p1 = vm->fb_row(y)[x];
+                uint8_t p2 = vm->fb_row(y)[x + 1];
 
                 // Re-pack into PICO-8 4-bit nibbles
                 uint8_t val = (p1 & 0x0F) | ((p2 & 0x0F) << 4);
@@ -2296,6 +2497,7 @@ static int l_memcpy(lua_State *L)
 
 static int l_memset(lua_State *L)
 {
+    REAL8_TRACE_API("memset");
     auto *vm = get_vm(L);
     int dest = to_int_floor(L, 1);
     uint8_t val = (uint8_t)to_int_floor(L, 2);
@@ -2340,36 +2542,38 @@ static int l_memset(lua_State *L)
         }
 
         // --- Visual Update (Framebuffer) ---
-        uint8_t c1 = val & 0x0F;
-        uint8_t c2 = (val >> 4) & 0x0F;
+        if (vm->r8_vmode_cur == 0) {
+            uint8_t c1 = val & 0x0F;
+            uint8_t c2 = (val >> 4) & 0x0F;
 
-        // Optimization: If high/low nibbles match (solid color),
-        // and we have direct FB access, fill pixels faster.
-        if (vm->fb && c1 == c2)
-        {
-            int offset = start - 0x6000;
-            for (int k = 0; k < count; k++)
+            // Optimization: If high/low nibbles match (solid color),
+            // and we have direct FB access, fill pixels faster.
+            if (vm->fb && c1 == c2)
             {
-                int idx = offset + k;
-                int y = idx >> 6;        // idx / 64
-                int x = (idx & 63) << 1; // (idx % 64) * 2
-                // vm->fb usually stores 1 byte per pixel
-                if (y < 128)
+                int offset = start - 0x6000;
+                for (int k = 0; k < count; k++)
                 {
-                    vm->fb[y][x] = c1;
-                    vm->fb[y][x + 1] = c2;
+                    int idx = offset + k;
+                    int y = idx >> 6;        // idx / 64
+                    int x = (idx & 63) << 1; // (idx % 64) * 2
+                    // vm->fb usually stores 1 byte per pixel
+                    if (y < vm->fb_h && (x + 1) < vm->fb_w)
+                    {
+                        vm->fb_row(y)[x] = c1;
+                        vm->fb_row(y)[x + 1] = c2;
+                    }
                 }
             }
-        }
-        else
-        {
-            // Slow/Safe path: Convert packed byte to pixels via host/VM method
-            for (int addr = start; addr < end; addr++)
+            else
             {
-                vm->screenByteToFB(addr - 0x6000, val);
+                // Slow/Safe path: Convert packed byte to pixels via host/VM method
+                for (int addr = start; addr < end; addr++)
+                {
+                    vm->screenByteToFB(addr - 0x6000, val);
+                }
             }
+            vm->mark_dirty_rect(0, 0, vm->fb_w - 1, vm->fb_h - 1);
         }
-        vm->mark_dirty_rect(0, 0, 127, 127);
     }
 
     // 3. Hardware Sync (GFX/Map/Registers)
@@ -2406,6 +2610,7 @@ static void ellipse_points(Real8VM *vm, int cx, int cy, int x, int y, uint8_t c,
 
 static int l_ovalcommon(lua_State *L, bool fill)
 {
+    REAL8_TRACE_API(fill ? "ovalfill" : "oval");
     auto *vm = get_vm(L);
     int x0 = to_int_floor(L, 1), y0 = to_int_floor(L, 2);
     int x1 = to_int_floor(L, 3), y1 = to_int_floor(L, 4);
@@ -2453,6 +2658,7 @@ static int l_ovalfill(lua_State *L) { return l_ovalcommon(L, true); }
 
 static int l_circ(lua_State *L)
 {
+    REAL8_TRACE_API("circ");
     auto *vm = get_vm(L);
     int cx = to_int_floor(L, 1);
     int cy = to_int_floor(L, 2);
@@ -2468,6 +2674,7 @@ static int l_circ(lua_State *L)
 
 static int l_circfill(lua_State *L)
 {
+    REAL8_TRACE_API("circfill");
     auto *vm = get_vm(L);
     int cx = to_int_floor(L, 1);
     int cy = to_int_floor(L, 2);
@@ -2483,6 +2690,7 @@ static int l_circfill(lua_State *L)
 
 static int l_tline(lua_State *L)
 {
+    REAL8_TRACE_API("tline");
     auto *vm = get_vm(L);
     int x0 = to_int_floor(L, 1);
     int y0 = to_int_floor(L, 2);
@@ -2538,6 +2746,7 @@ static int l_tline(lua_State *L)
 
 static int l_pal(lua_State *L)
 {
+    REAL8_TRACE_API("pal");
     auto *vm = get_vm(L);
     int argc = lua_gettop(L);
 
@@ -2651,6 +2860,7 @@ static int l_pal(lua_State *L)
 
 static int l_clip(lua_State *L)
 {
+    REAL8_TRACE_API("clip");
     auto *vm = get_vm(L);
     int x = 0, y = 0, w = 128, h = 128;
     if (lua_gettop(L) >= 4)
@@ -2675,6 +2885,7 @@ static int l_clip(lua_State *L)
 
 static int l_palt(lua_State *L)
 {
+    REAL8_TRACE_API("palt");
     auto *vm = get_vm(L);
     int argc = lua_gettop(L);
 
@@ -2734,6 +2945,7 @@ static int l_palt(lua_State *L)
 }
 static int l_fillp(lua_State *L)
 {
+    REAL8_TRACE_API("fillp");
     auto *vm = get_vm(L);
     if (lua_gettop(L) == 0)
     {
@@ -2746,6 +2958,7 @@ static int l_fillp(lua_State *L)
 }
 static int l_camera(lua_State *L)
 {
+    REAL8_TRACE_API("camera");
     auto *vm = get_vm(L);
 
     // PICO-8 Standard:
@@ -2787,6 +3000,7 @@ static int l_map_check(lua_State *L)
 
 static int IWRAM_BINDINGS_CODE l_spr(lua_State *L)
 {
+    REAL8_TRACE_API("spr");
     debug_spr_count++;
 
     auto *vm = get_vm(L);
@@ -2813,6 +3027,7 @@ static int IWRAM_BINDINGS_CODE l_spr(lua_State *L)
 
 static int IWRAM_BINDINGS_CODE l_sspr(lua_State *L)
 {
+    REAL8_TRACE_API("sspr");
     auto *vm = get_vm(L);
     int sx = to_int_floor(L, 1), sy = to_int_floor(L, 2);
     int sw = to_int_floor(L, 3), sh = to_int_floor(L, 4);
@@ -2834,6 +3049,7 @@ static int IWRAM_BINDINGS_CODE l_sspr(lua_State *L)
 }
 static int l_sget(lua_State *L)
 {
+    REAL8_TRACE_API("sget");
     auto *vm = get_vm(L);
     int x = to_int_floor(L, 1), y = to_int_floor(L, 2);
     // Mask sprite sheet reads to 4 bits as well.
@@ -2842,6 +3058,7 @@ static int l_sget(lua_State *L)
 }
 static int l_sset(lua_State *L)
 {
+    REAL8_TRACE_API("sset");
     auto *vm = get_vm(L);
     int x = to_int_floor(L, 1);
     int y = to_int_floor(L, 2);
@@ -2856,6 +3073,7 @@ static int l_sset(lua_State *L)
 
 static int IWRAM_BINDINGS_CODE l_map(lua_State *L)
 {
+    REAL8_TRACE_API("map");
     auto *vm = get_vm(L);
     int n = lua_gettop(L);
     int mx, my, sx, sy, w, h, layer;
@@ -2911,6 +3129,7 @@ static int IWRAM_BINDINGS_CODE l_map(lua_State *L)
 }
 static int l_mget(lua_State *L)
 {
+    REAL8_TRACE_API("mget");
     auto *vm = get_vm(L);
     int x = to_int_floor(L, 1), y = to_int_floor(L, 2);
     lua_pushinteger(L, vm->gpu.mget(x, y));
@@ -2918,6 +3137,7 @@ static int l_mget(lua_State *L)
 }
 static int l_mset(lua_State *L)
 {
+    REAL8_TRACE_API("mset");
     auto *vm = get_vm(L);
     int x = to_int_floor(L, 1), y = to_int_floor(L, 2);
     int v = to_int_floor(L, 3);
@@ -3194,6 +3414,7 @@ static int l_dset(lua_State *L)
 
 static int l_peek2(lua_State *L)
 {
+    REAL8_TRACE_API("peek2");
     auto *vm = get_vm(L);
     int addr = to_int_floor(L, 1);
 
@@ -3213,6 +3434,7 @@ static int l_peek2(lua_State *L)
 
 static int l_poke2(lua_State *L)
 {
+    REAL8_TRACE_API("poke2");
     auto *vm = get_vm(L);
     if (vm && vm->ram)
     {
@@ -3229,6 +3451,7 @@ static int l_poke2(lua_State *L)
 
 static int l_peek4(lua_State *L)
 {
+    REAL8_TRACE_API("peek4");
     auto *vm = get_vm(L);
     // PICO-8 uses 16.16 fixed point numbers. peek4 returns a standard Lua number.
     if (vm && vm->ram)
@@ -3251,6 +3474,7 @@ static int l_peek4(lua_State *L)
 
 static int l_poke4(lua_State *L)
 {
+    REAL8_TRACE_API("poke4");
     auto *vm = get_vm(L);
     if (vm && vm->ram)
     {
@@ -3530,10 +3754,11 @@ static int l_load_p8_file(lua_State *L) {
     
     // 1. C++ Transpiler (Memory Ops Only)
     std::string transpiled = transpile_pico8_memory_ops(std::string(str, len));
+    std::string normalized = p8_normalize_lua_strings(transpiled);
 
     // 2. Lua Compiler (Handles +=, //, ?, etc. via z8lua native llex)
     // Note: z8lua usually expects the chunk name to start with '@' or '=' for debugging
-    int status = luaL_loadbuffer(L, transpiled.c_str(), transpiled.size(), "p8_code");
+    int status = luaL_loadbuffer(L, normalized.c_str(), normalized.size(), "p8_code");
 
     if (status != LUA_OK) {
         lua_pushnil(L);
@@ -3752,6 +3977,14 @@ static int l_tonum(lua_State *L)
 // --- Lua Binding: split(str, [sep], [convert]) ---
 static int l_split(lua_State *L)
 {
+    REAL8_TRACE_API("split");
+    {
+        lua_Debug ar;
+        if (lua_getstack(L, 1, &ar)) {
+            lua_getinfo(L, "Sl", &ar);
+            real8_set_last_lua_line(ar.currentline, ar.short_src);
+        }
+    }
     size_t len;
     if (lua_gettop(L) == 0 || lua_isnil(L, 1))
     {
@@ -3871,6 +4104,7 @@ static int l_split(lua_State *L)
 
 static int l_add(lua_State *L)
 {
+    REAL8_TRACE_API("add");
     luaL_checktype(L, 1, LUA_TTABLE);
     int len = (int)lua_rawlen(L, 1);
 
@@ -3907,6 +4141,7 @@ static int l_add(lua_State *L)
 // Replaces Lua 'del'
 static int l_del(lua_State *L)
 {
+    REAL8_TRACE_API("del");
     luaL_checktype(L, 1, LUA_TTABLE);
     // del(t, v) removes first instance of v, returns v
     if (lua_gettop(L) < 2)
@@ -3978,6 +4213,7 @@ static int l_sgn(lua_State *L)
 // Replaces Lua 'deli' (delete by index)
 static int l_deli(lua_State *L)
 {
+    REAL8_TRACE_API("deli");
     luaL_checktype(L, 1, LUA_TTABLE);
     int len = (int)lua_rawlen(L, 1);
     // Default index is length (remove last)
@@ -4067,6 +4303,7 @@ static int l_all_iter(lua_State *L)
 // The all(t) function
 static int l_all(lua_State *L)
 {
+    REAL8_TRACE_API("all");
     // If the argument is nil, return a dummy iterator that does nothing.
     // This prevents crashes when iterating over uninitialized tables.
     if (lua_isnil(L, 1))
@@ -4096,6 +4333,7 @@ static int l_chr(lua_State *L)
 
 static int l_ord(lua_State *L)
 {
+    REAL8_TRACE_API("ord");
     size_t len;
     const char *s = luaL_checklstring(L, 1, &len);
 
@@ -4106,15 +4344,28 @@ static int l_ord(lua_State *L)
     // Convert 1-based (Lua) to 0-based (C)
     idx--;
 
-    if (idx >= 0 && idx < (int)len)
-    {
-        lua_pushinteger(L, (unsigned char)s[idx]);
-    }
-    else
+    int count = (lua_gettop(L) >= 3 && !lua_isnil(L, 3)) ? to_int_floor(L, 3) : 1;
+    if (count < 1)
     {
         lua_pushnil(L);
+        return 1;
     }
-    return 1;
+
+    int pushed = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        int pos = idx + i;
+        if (pos >= 0 && pos < (int)len)
+        {
+            lua_pushinteger(L, (unsigned char)s[pos]);
+        }
+        else
+        {
+            lua_pushnil(L);
+        }
+        pushed++;
+    }
+    return pushed;
 }
 
 static int l_tostr(lua_State *L)
@@ -4712,9 +4963,10 @@ int l_load_p8_code(lua_State* L) {
     
     // 1. Run C++ Transpiler
     std::string clean_lua = transpile_pico8(src);
+    std::string normalized = p8_normalize_lua_strings(clean_lua);
 
     // 2. Load the transpiled code into Lua (compiles to bytecode)
-    if (luaL_loadstring(L, clean_lua.c_str()) != LUA_OK) {
+    if (luaL_loadbuffer(L, normalized.c_str(), normalized.size(), "p8_code") != LUA_OK) {
         // Return nil, error_message
         lua_pushnil(L);
         lua_pushvalue(L, -2); // Error message is at top

@@ -84,6 +84,9 @@ public:
   static const int WIDTH = 128;
   static const int HEIGHT = 128;
   static const int RAW_WIDTH = 128;
+  static const int PICO_WIDTH = 128;
+  static const int PICO_HEIGHT = 128;
+  static const int PICO_RAW_WIDTH = 128;
 
 
   bool hasLastError = false;
@@ -110,12 +113,13 @@ public:
   
   void runFrame();     
   void show_frame();   
-  void setAltFramebuffer(uint8_t (*alt)[RAW_WIDTH]) { alt_fb = alt; }
-  void clearAltFramebuffer() { alt_fb = nullptr; }
+  void setAltFramebuffer(uint8_t *alt, int w, int h) { alt_fb = alt; alt_fb_w = w; alt_fb_h = h; }
+  void clearAltFramebuffer() { alt_fb = nullptr; alt_fb_w = PICO_WIDTH; alt_fb_h = PICO_HEIGHT; }
   bool hasAltFramebuffer() const { return alt_fb != nullptr; }
 
   // Stereoscopic depth buffer (optional)
   void clearDepthBuffer(uint8_t bucket = 0);
+  void applyVideoMode(uint8_t requested_mode, bool force = false);
 
   // --------------------------------------------------------------------------
   // STATE & CONFIG
@@ -234,15 +238,44 @@ public:
   size_t rom_size = 0;
   bool rom_readonly = false;
   bool rom_owned = false;
-  uint8_t (*fb)[RAW_WIDTH] = nullptr; 
-  uint8_t (*alt_fb)[RAW_WIDTH] = nullptr;
+  int fb_w = PICO_WIDTH;
+  int fb_h = PICO_HEIGHT;
+  uint8_t *fb = nullptr;
+  bool fb_is_linear = false;
+  uint8_t *alt_fb = nullptr;
+  int alt_fb_w = PICO_WIDTH;
+  int alt_fb_h = PICO_HEIGHT;
   // Per-pixel depth bucket buffer for stereoscopic/anaglyph output (one byte per pixel).
-  uint8_t (*depth_fb)[RAW_WIDTH] = nullptr;
+  uint8_t *depth_fb = nullptr;
 
   // Optional: per-depth-layer color buffers for stereoscopic/anaglyph rendering.
   // Layout: 15 layers (-7..+7) * 128 rows. Row index = (layer_index * HEIGHT + y), where layer_index = bucket + STEREO_BUCKET_BIAS.
   // Pixel value is 0..15; 0xFF means "unset" for that layer.
-  uint8_t (*stereo_layers)[RAW_WIDTH] = nullptr;
+  uint8_t *stereo_layers = nullptr;
+
+  inline uint8_t* fb_row(int y) { return fb + (size_t)y * (size_t)fb_w; }
+  inline const uint8_t* fb_row(int y) const { return fb + (size_t)y * (size_t)fb_w; }
+  inline uint8_t* depth_row(int y) { return depth_fb + (size_t)y * (size_t)fb_w; }
+  inline const uint8_t* depth_row(int y) const { return depth_fb + (size_t)y * (size_t)fb_w; }
+  inline uint8_t* stereo_layer_row(int layer_idx, int y) {
+    return stereo_layers + ((size_t)layer_idx * (size_t)fb_h + (size_t)y) * (size_t)fb_w;
+  }
+
+  uint8_t r8_flags = 0;
+  uint8_t r8_vmode_req = 0;
+  uint8_t r8_vmode_cur = 0;
+
+  struct MotionState {
+    int32_t accel_x = 0;
+    int32_t accel_y = 0;
+    int32_t accel_z = 0;
+    int32_t gyro_x = 0;
+    int32_t gyro_y = 0;
+    int32_t gyro_z = 0;
+    uint32_t flags = 0;
+    uint32_t dt_us = 0;
+  };
+  MotionState motion;
 
   void setRomView(const uint8_t* data, size_t size, bool readOnly);
   bool ensureWritableRom();
@@ -304,11 +337,12 @@ public:
   // HELPERS (Low Level)
   // --------------------------------------------------------------------------
   inline void screenByteToFB(size_t idx, uint8_t v) {
-    if (idx >= 0x2000) return;
+    if (idx >= 0x2000 || r8_vmode_cur != 0) return;
     int y = (int)(idx >> 6);
     int x = (int)((idx & 0x3F) << 1);
-    fb[y][x] = v & 0x0F;
-    fb[y][x + 1] = (v >> 4) & 0x0F;
+    if (!fb || y < 0 || y >= fb_h || x < 0 || x + 1 >= fb_w) return;
+    fb_row(y)[x] = v & 0x0F;
+    fb_row(y)[x + 1] = (v >> 4) & 0x0F;
     mark_dirty_rect(x, y, x + 1, y);
   }
   void mark_dirty_rect(int x0, int y0, int x1, int y1);
@@ -336,6 +370,8 @@ public:
   // PERSISTENCE
   // --------------------------------------------------------------------------
   std::string currentGameId;
+  // Cached LUA source of the last loaded cart (for exporting on desktop hosts)
+  std::string loadedLuaSource;
   void saveState();
   bool loadState();
   bool hasState();
@@ -415,3 +451,14 @@ private:
   void renderProfileOverlay();
   void initDefaultPalette(); // Still used for VM reboot reset
 };
+
+// Crash/debug breadcrumbs (lightweight, thread-unsafe by design)
+void real8_set_last_api_call(const char* name);
+void real8_set_last_lua_phase(const char* name);
+void real8_set_last_cart_path(const char* path);
+void real8_set_last_lua_line(int line, const char* source);
+const char* real8_get_last_api_call();
+const char* real8_get_last_lua_phase();
+const char* real8_get_last_cart_path();
+int real8_get_last_lua_line();
+const char* real8_get_last_lua_source();

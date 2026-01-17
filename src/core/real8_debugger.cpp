@@ -146,6 +146,7 @@ void Real8Debugger::luaHook(lua_State *L, lua_Debug *ar)
     Real8Debugger& dbg = vm->debug; 
 
     lua_getinfo(L, "Sl", ar);
+    real8_set_last_lua_line(ar->currentline, ar->short_src);
 
     // Hit Breakpoint OR Stepping Mode
     bool hit_break = (ar->currentline > 0 && dbg.breakpoints.count(ar->currentline));

@@ -19,15 +19,22 @@
 #include <shlobj.h>
 #include <iomanip>
 #include <sstream>
+#include <cmath>
 #include <urlmon.h>
 #include <commctrl.h>
 #include <fstream>
 #include <windowsx.h>
 #include <numeric>
 
+
+#include <wininet.h>
+#include <netlistmgr.h>
+#include <objbase.h>
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "comctl32.lib")
 
+#pragma comment(lib, "wininet.lib")
+#pragma comment(lib, "ole32.lib")
 namespace fs = std::filesystem;
 
 // IDs for the Repo Dialog
@@ -68,7 +75,11 @@ private:
 
     std::ofstream logFile;
 
-    uint32_t screenBuffer[128 * 128];
+    std::vector<uint32_t> screenBuffer;
+    int screenW = 128;
+    int screenH = 128;
+    int defaultWindowW = 0;
+    int defaultWindowH = 0;
     std::vector<uint32_t> wallBuffer;
     int wallW = 0, wallH = 0;
     fs::path rootPath;
@@ -658,10 +669,19 @@ public:
         }
     }
 
+    int getModeWindowScale(int mode) const
+    {
+        switch (mode) {
+        case 1: return 3;
+        case 2: return 2;
+        case 3: return 1;
+        default: return 1;
+        }
+    }
+
     void calculateGameRect(int winW, int winH, SDL_Rect *outRect, float *outScale)
     {
         int padding = 0;
-        if (wallpaperTex) padding = 50;
 
         int availW = winW - (padding * 2);
         int availH = winH - (padding * 2);
@@ -670,16 +690,18 @@ public:
         if (availH < 1) availH = 1;
 
         bool stretch = (debugVMRef && debugVMRef->stretchScreen);
+        int gameW = (debugVMRef && debugVMRef->fb_w > 0) ? debugVMRef->fb_w : 128;
+        int gameH = (debugVMRef && debugVMRef->fb_h > 0) ? debugVMRef->fb_h : 128;
         if (stretch) {
             outRect->x = padding;
             outRect->y = padding;
             outRect->w = availW;
             outRect->h = availH;
-            if (outScale) *outScale = (float)availW / 128.0f;
+            if (outScale) *outScale = (float)availW / (float)gameW;
         } else {
-            float scale = std::min((float)availW / 128.0f, (float)availH / 128.0f);
-            int drawW = (int)(128.0f * scale);
-            int drawH = (int)(128.0f * scale);
+            float scale = std::min((float)availW / (float)gameW, (float)availH / (float)gameH);
+            int drawW = (int)((float)gameW * scale);
+            int drawH = (int)((float)gameH * scale);
 
             outRect->x = (winW - drawW) / 2;
             outRect->y = (winH - drawH) / 2;
@@ -1177,6 +1199,10 @@ public:
         : renderer(r), texture(nullptr), wallpaperTex(nullptr), sdlWindow(win)
     {
         texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 128, 128);
+        if (sdlWindow) {
+            SDL_GetWindowSize(sdlWindow, &defaultWindowW, &defaultWindowH);
+        }
+        screenBuffer.resize((size_t)screenW * (size_t)screenH);
 
         // OPEN LOG FILE (Overwrites previous log on startup)
         logFile.open("logs.txt", std::ios::out | std::ios::trunc);
@@ -1713,6 +1739,24 @@ public:
         }
     }
 
+    void onFramebufferResize(int fb_w, int fb_h) override
+    {
+        if (!sdlWindow) return;
+        const int mode = (debugVMRef ? debugVMRef->r8_vmode_cur : 0);
+        if (mode == 0) {
+            if (defaultWindowW > 0 && defaultWindowH > 0) {
+                SDL_SetWindowSize(sdlWindow, defaultWindowW, defaultWindowH);
+            }
+        } else {
+            const int scale = getModeWindowScale(mode);
+            SDL_SetWindowSize(sdlWindow, fb_w * scale, fb_h * scale);
+        }
+        if (texture) {
+            SDL_DestroyTexture(texture);
+            texture = nullptr;
+        }
+    }
+
     ~WindowsHost() { 
         if (logFile.is_open()) logFile.close();
         if (wallpaperTex) SDL_DestroyTexture(wallpaperTex); 
@@ -1794,23 +1838,31 @@ public:
 
     void updateOverlay() override {}
 
-    void flipScreen(uint8_t (*framebuffer)[128], uint8_t *palette_map) override
+    void flipScreen(const uint8_t *framebuffer, int fb_w, int fb_h, uint8_t *palette_map) override
     {
-        uint32_t paletteLUT[16]; 
-        
-        for (int i = 0; i < 16; i++) { 
-            uint8_t p8ID = palette_map[i];
+        if (!framebuffer || fb_w <= 0 || fb_h <= 0) return;
+
+        uint32_t paletteLUT[16];
+        for (int i = 0; i < 16; i++) {
+            uint8_t p8ID = palette_map ? palette_map[i] : (uint8_t)i;
             const uint8_t *rgb;
             if (p8ID < 16) rgb = Real8Gfx::PALETTE_RGB[p8ID];
             else if (p8ID >= 128 && p8ID < 144) rgb = Real8Gfx::PALETTE_RGB[p8ID - 128 + 16];
             else rgb = Real8Gfx::PALETTE_RGB[p8ID & 0x0F];
-            paletteLUT[i] = (255 << 24) | (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
+            paletteLUT[i] = (255u << 24) | (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
         }
 
-        int idx = 0;
-        for (int y = 0; y < 128; y++) {
-            for (int x = 0; x < 128; x++) {
-                screenBuffer[idx++] = paletteLUT[framebuffer[y][x] & 0x0F]; 
+        if (screenW != fb_w || screenH != fb_h) {
+            screenW = fb_w;
+            screenH = fb_h;
+            screenBuffer.resize((size_t)screenW * (size_t)screenH);
+        }
+
+        for (int y = 0; y < fb_h; y++) {
+            const uint8_t *src_row = framebuffer + (y * fb_w);
+            uint32_t *dst_row = screenBuffer.data() + (y * fb_w);
+            for (int x = 0; x < fb_w; x++) {
+                dst_row[x] = paletteLUT[src_row[x] & 0x0F];
             }
         }
 
@@ -1819,48 +1871,43 @@ public:
         int outputW, outputH;
         SDL_GetRendererOutputSize(renderer, &outputW, &outputH);
 
+        int texW = 0, texH = 0;
+        if (!texture || SDL_QueryTexture(texture, NULL, NULL, &texW, &texH) != 0 || texW != fb_w || texH != fb_h) {
+            if (texture) SDL_DestroyTexture(texture);
+            texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, fb_w, fb_h);
+        }
+
+        const int mode = (debugVMRef ? debugVMRef->r8_vmode_cur : 0);
+        SDL_SetTextureScaleMode(texture, (mode == 0 && interpolation) ? SDL_ScaleModeBest : SDL_ScaleModeNearest);
+
+        SDL_UpdateTexture(texture, NULL, screenBuffer.data(), fb_w * sizeof(uint32_t));
+
+        SDL_Rect srcRect = {0, 0, fb_w, fb_h};
         // Draw Wallpaper
         if (wallpaperTex && wallW > 0 && wallH > 0) {
             float scaleW = (float)outputW / (float)wallW;
             float scaleH = (float)outputH / (float)wallH;
-            
-            // To "Cover" the area, we pick the larger scale factor
             float scale = (scaleW > scaleH) ? scaleW : scaleH;
 
             int drawW = (int)(wallW * scale);
             int drawH = (int)(wallH * scale);
 
-            // Center the image
-            SDL_Rect dstRect;
-            dstRect.x = (outputW - drawW) / 2;
-            dstRect.y = (outputH - drawH) / 2;
-            dstRect.w = drawW;
-            dstRect.h = drawH;
+            SDL_Rect wallRect;
+            wallRect.x = (outputW - drawW) / 2;
+            wallRect.y = (outputH - drawH) / 2;
+            wallRect.w = drawW;
+            wallRect.h = drawH;
 
-            SDL_RenderCopy(renderer, wallpaperTex, NULL, &dstRect);
+            SDL_RenderCopy(renderer, wallpaperTex, NULL, &wallRect);
         }
-
-        // B. Draw Game Texture
-        int texW = 0, texH = 0;
-        if (SDL_QueryTexture(texture, NULL, NULL, &texW, &texH) != 0 || texW != 128) {
-            if (texture) SDL_DestroyTexture(texture);
-            texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 128, 128);
-            SDL_SetTextureScaleMode(texture, this->interpolation ? SDL_ScaleModeBest : SDL_ScaleModeNearest);
-        }
-
-        SDL_UpdateTexture(texture, NULL, screenBuffer, 128 * sizeof(uint32_t));
 
         SDL_Rect dstRect;
-        SDL_Rect srcRect = {0, 0, 128, 128}; 
-
-        calculateGameRect(outputW, outputH, &dstRect, NULL);
-        
-        // Ensure blend mode is reset before drawing the main game texture
+        float scale = 1.0f;
+        calculateGameRect(outputW, outputH, &dstRect, &scale);
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
         SDL_RenderCopy(renderer, texture, &srcRect, &dstRect);
 
-        // C. Apply CRT Filter
-        if (crt_filter) {
+        if (mode == 0 && crt_filter) {
             SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
             SDL_SetRenderDrawColor(renderer, 0, 0, 0, 80);
             for (int y = dstRect.y; y < dstRect.y + dstRect.h; y += 2) {
@@ -1868,6 +1915,7 @@ public:
             }
             SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
         }
+
         SDL_RenderPresent(renderer);
     }
 
@@ -1944,7 +1992,48 @@ public:
         return false;
     }
 
-    NetworkInfo getNetworkInfo() override { return {true, "127.0.0.1", "DESKTOP MODE", 0.0f}; }
+
+    NetworkInfo getNetworkInfo() override
+    {
+        // Cache the result briefly to avoid expensive connectivity checks every frame.
+        using namespace std::chrono;
+        static steady_clock::time_point lastCheck{};
+        static bool lastConnected = false;
+
+        auto now = steady_clock::now();
+        if (lastCheck.time_since_epoch().count() == 0 || (now - lastCheck) > seconds(2))
+        {
+            bool connected = false;
+
+            // Prefer Network List Manager (checks actual internet connectivity),
+            // fall back to WinINet if NLM isn't available.
+            VARIANT_BOOL isConnected = VARIANT_FALSE;
+            HRESULT hrInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            bool didInit = (hrInit == S_OK || hrInit == S_FALSE);
+
+            INetworkListManager *pNLM = nullptr;
+            HRESULT hr = CoCreateInstance(CLSID_NetworkListManager, nullptr, CLSCTX_ALL,
+                                          IID_INetworkListManager, (void **)&pNLM);
+            if (SUCCEEDED(hr) && pNLM)
+            {
+                if (SUCCEEDED(pNLM->get_IsConnectedToInternet(&isConnected)))
+                    connected = (isConnected == VARIANT_TRUE);
+                pNLM->Release();
+            }
+            else
+            {
+                DWORD flags = 0;
+                connected = (InternetGetConnectedState(&flags, 0) == TRUE);
+            }
+
+            if (didInit) CoUninitialize();
+
+            lastConnected = connected;
+            lastCheck = now;
+        }
+
+        return {lastConnected, "127.0.0.1", "DESKTOP MODE", 0.0f};
+    }
     void setWifiCredentials(const char *ssid, const char *pass) override {}
     void setNetworkActive(bool active) override {}
 
@@ -1967,14 +2056,16 @@ public:
         int relY = y - gameRect.y;
         MouseState ms;
         bool stretch = (debugVMRef && debugVMRef->stretchScreen);
-        float scaleX = stretch ? ((float)gameRect.w / 128.0f) : scale;
-        float scaleY = stretch ? ((float)gameRect.h / 128.0f) : scale;
+        int gameW = (debugVMRef && debugVMRef->fb_w > 0) ? debugVMRef->fb_w : 128;
+        int gameH = (debugVMRef && debugVMRef->fb_h > 0) ? debugVMRef->fb_h : 128;
+        float scaleX = stretch ? ((float)gameRect.w / (float)gameW) : scale;
+        float scaleY = stretch ? ((float)gameRect.h / (float)gameH) : scale;
         if (scaleX <= 0.0f) scaleX = 1.0f;
         if (scaleY <= 0.0f) scaleY = 1.0f;
         ms.x = (int)(relX / scaleX);
         ms.y = (int)(relY / scaleY);
-        if (ms.x < 0) ms.x = 0; if (ms.x > 127) ms.x = 127;
-        if (ms.y < 0) ms.y = 0; if (ms.y > 127) ms.y = 127;
+        if (ms.x < 0) ms.x = 0; if (ms.x >= gameW) ms.x = gameW - 1;
+        if (ms.y < 0) ms.y = 0; if (ms.y >= gameH) ms.y = gameH - 1;
         ms.btn = 0;
         if (buttons & SDL_BUTTON(SDL_BUTTON_LEFT)) ms.btn |= 1;
         if (buttons & SDL_BUTTON(SDL_BUTTON_RIGHT)) ms.btn |= 2;
@@ -1999,11 +2090,13 @@ public:
         ss << finalDir << "\\screenshot_" << std::put_time(std::localtime(&now_c), "%Y-%m-%d_%H-%M-%S") << ".bmp";
         std::string fullPath = ss.str();
 
+        const int capW = (screenW > 0) ? screenW : 128;
+        const int capH = (screenH > 0) ? screenH : 128;
         SDL_Surface *surface = SDL_CreateRGBSurfaceFrom(
-            (void *)screenBuffer,
-            128, 128, 
+            (void *)screenBuffer.data(),
+            capW, capH,
             32,
-            128 * 4,
+            capW * 4,
             0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000
         );
 

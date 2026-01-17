@@ -20,8 +20,8 @@ public:
 
     void clearBorders();
     void setSplashBackdrop(bool enabled);
-    void flipScreen(uint8_t (*framebuffer)[128], uint8_t *palette_map) override;
-    void flipScreenDirty(uint8_t (*framebuffer)[128], uint8_t *palette_map,
+    void flipScreen(const uint8_t *framebuffer, int fb_w, int fb_h, uint8_t *palette_map) override;
+    void flipScreenDirty(const uint8_t *framebuffer, int fb_w, int fb_h, uint8_t *palette_map,
                          int x0, int y0, int x1, int y1) override;
     void resetVideo();
     void beginFrame() override;
@@ -69,8 +69,8 @@ private:
     void initAudio();
     void submitAudioFrame();
 #endif
-    void blitFrameTiles(const uint8_t (*framebuffer)[128], int x0, int y0, int x1, int y1);
-    void blitFrameDirty(const uint8_t (*framebuffer)[128], int x0, int y0, int x1, int y1);
+    void blitFrameTiles(const uint8_t *framebuffer, int fb_w, int fb_h, int x0, int y0, int x1, int y1);
+    void blitFrameDirty(const uint8_t *framebuffer, int fb_w, int fb_h, int x0, int y0, int x1, int y1);
     void flushSpriteBatch();
     void pushDebugLine(const char* line);
     void drawDebugOverlay();
@@ -98,7 +98,7 @@ private:
     int tilesY0 = 0;
     int tilesX1 = 0;
     int tilesY1 = 0;
-    uint8_t (*tilesFb)[128] = nullptr;
+    const uint8_t* tilesFb = nullptr;
     bool inputPolled = false;
 #if REAL8_GBA_ENABLE_AUDIO
     static constexpr int kAudioSampleRate = 22050;
@@ -117,4 +117,6 @@ private:
     const uint8_t* lastObjSpriteSheet = nullptr;
     bool objPending = false;
     Real8VM* profileVm = nullptr;
+    int gameW = 128;
+    int gameH = 128;
 };

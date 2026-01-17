@@ -124,8 +124,9 @@ endif
 CC = $(CXX)
 
 ARCH    := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
+LTO_PARTITION ?= none
 
-CFLAGS  := -g -Wall -O2 -mword-relocations \
+CFLAGS  := -g -Wall -Ofast -mword-relocations \
            -fomit-frame-pointer -ffunction-sections \
            $(ARCH)
 
@@ -141,10 +142,14 @@ LIBS := -lcitro2d -lcitro3d -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lctru 
 CFLAGS   += -Wno-sign-compare
 CXXFLAGS += -Wno-sign-compare
 
-CXXFLAGS += -fexceptions
-LDFLAGS  += -fexceptions
+CFLAGS   += -flto -flto-partition=$(LTO_PARTITION) -fno-exceptions -fno-unwind-tables
+CXXFLAGS += -flto -flto-partition=$(LTO_PARTITION) -fno-exceptions -fno-unwind-tables
+LDFLAGS  += -flto -flto-partition=$(LTO_PARTITION)
 
-CFLAGS  += -DLUA_32BITS
+CFLAGS  += -DLUA_32BITS -DLUA_USE_LONGJMP
+CXXFLAGS += -DLUA_32BITS -DLUA_USE_LONGJMP
+CFLAGS  += -DREAL8_3DS_DIRECT_TEX_UPDATE=1
+CXXFLAGS += -DREAL8_3DS_DIRECT_TEX_UPDATE=1
 ifneq ($(strip $(EMBED_CART_DEFS)),)
   CFLAGS   += $(EMBED_CART_DEFS)
   CXXFLAGS += $(EMBED_CART_DEFS)
@@ -528,4 +533,3 @@ endef
 #---------------------------------------------------------------------------------
 endif
 #---------------------------------------------------------------------------------
-

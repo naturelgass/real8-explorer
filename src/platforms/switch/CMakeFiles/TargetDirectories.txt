@@ -1,0 +1,3 @@
+/d/Workspace/REAL8-Explorer/src/platforms/switch/CMakeFiles/Real8Switch.dir
+/d/Workspace/REAL8-Explorer/src/platforms/switch/CMakeFiles/edit_cache.dir
+/d/Workspace/REAL8-Explorer/src/platforms/switch/CMakeFiles/rebuild_cache.dir

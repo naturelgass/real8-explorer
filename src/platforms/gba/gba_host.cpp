@@ -319,24 +319,27 @@ namespace {
 #define IWRAM_OBJBATCH_CODE
 #endif
 
-    static void IWRAM_CODE blitFrame(u16* vram, const uint8_t (*framebuffer)[128], int xOff, int yOff) {
+    static void IWRAM_CODE blitFrame(u16* vram, const uint8_t* framebuffer, int fb_w, int fb_h, int xOff, int yOff) {
+        if (!framebuffer || fb_w <= 0 || fb_h <= 0) return;
         const int stride = 240 / 2;
-        const uint8_t* src = &framebuffer[0][0];
+        const uint8_t* src = framebuffer;
         u16* dst = vram + (yOff * stride + (xOff / 2));
         const u32 srcAddr = (u32)src;
         const u32 dstAddr = (u32)dst;
-        if (((srcAddr | dstAddr) & 3u) == 0) {
-            const u32 count = 128 / 4;
-            for (int y = 0; y < 128; ++y) {
+        const bool aligned32 = (((srcAddr | dstAddr) & 3u) == 0);
+        const bool widthAligned32 = ((fb_w & 3) == 0);
+        if (aligned32 && widthAligned32) {
+            const u32 count = (u32)(fb_w / 4);
+            for (int y = 0; y < fb_h; ++y) {
                 dma3Copy32(src, dst, count);
-                src += 128;
+                src += fb_w;
                 dst += stride;
             }
         } else {
-            const u32 count = 128 / 2;
-            for (int y = 0; y < 128; ++y) {
+            const u32 count = (u32)(fb_w / 2);
+            for (int y = 0; y < fb_h; ++y) {
                 dma3Copy16(src, dst, count);
-                src += 128;
+                src += fb_w;
                 dst += stride;
             }
         }
@@ -401,15 +404,16 @@ namespace {
         }
     }
 
-    static void IWRAM_CODE markTilesDirtyRect(int x0, int y0, int x1, int y1) {
-        if (x1 < 0 || y1 < 0 || x0 > 127 || y0 > 127) {
+    static void IWRAM_CODE markTilesDirtyRect(int fb_w, int fb_h, int x0, int y0, int x1, int y1) {
+        if (fb_w <= 0 || fb_h <= 0) return;
+        if (x1 < 0 || y1 < 0 || x0 > (fb_w - 1) || y0 > (fb_h - 1)) {
             return;
         }
 
         if (x0 < 0) x0 = 0;
         if (y0 < 0) y0 = 0;
-        if (x1 > 127) x1 = 127;
-        if (y1 > 127) y1 = 127;
+        if (x1 >= fb_w) x1 = fb_w - 1;
+        if (y1 >= fb_h) y1 = fb_h - 1;
 
         const int tx0 = x0 >> 3;
         const int ty0 = y0 >> 3;
@@ -423,10 +427,10 @@ namespace {
         }
     }
 
-    static REAL8_ALWAYS_INLINE u32 hashTile(const uint8_t (*framebuffer)[128], int px, int py) {
+    static REAL8_ALWAYS_INLINE u32 hashTile(const uint8_t* framebuffer, int fb_w, int px, int py) {
         u32 hash = 2166136261u;
         for (int row = 0; row < kTileSize; ++row) {
-            const uint8_t* src = &framebuffer[py + row][px];
+            const uint8_t* src = framebuffer + (py + row) * fb_w + px;
             for (int col = 0; col < kTileSize; ++col) {
                 hash ^= src[col];
                 hash *= 16777619u;
@@ -655,12 +659,13 @@ void GbaHost::clearBorders() {
     if (splashBackdropActive) return;
     // Keep borders black using palette index 16.
     BG_PALETTE[16] = RGB5(0, 0, 0);
-    const int xOff = 56;
-    const int yOff = 16;
+    const int xOff = (240 - gameW) / 2;
+    const int yOff = (160 - gameH) / 2;
+    if (xOff <= 0 && yOff <= 0) return;
     fillRect(0, 0, xOff, 160, 16);
-    fillRect(xOff + 128, 0, 240 - (xOff + 128), 160, 16);
-    fillRect(xOff, 0, 128, yOff, 16);
-    fillRect(xOff, yOff + 128, 128, 160 - (yOff + 128), 16);
+    fillRect(xOff + gameW, 0, 240 - (xOff + gameW), 160, 16);
+    fillRect(xOff, 0, gameW, yOff, 16);
+    fillRect(xOff, yOff + gameH, gameW, 160 - (yOff + gameH), 16);
 }
 
 void GbaHost::beginFrame() {
@@ -747,13 +752,20 @@ void IWRAM_OBJBATCH_CODE GbaHost::flushSpriteBatch() {
 #endif
 }
 
-void IWRAM_CODE GbaHost::blitFrameTiles(const uint8_t (*framebuffer)[128], int x0, int y0, int x1, int y1) {
+void IWRAM_CODE GbaHost::blitFrameTiles(const uint8_t* framebuffer, int fb_w, int fb_h, int x0, int y0, int x1, int y1) {
 #if REAL8_GBA_TILEMODE
     if (!framebuffer) return;
+    if (fb_w != 128 || fb_h != 128) {
+        u16* vram = (u16*)VRAM;
+        const int xOff = (240 - fb_w) / 2;
+        const int yOff = (160 - fb_h) / 2;
+        blitFrame(vram, framebuffer, fb_w, fb_h, xOff, yOff);
+        return;
+    }
     if (x1 < 0 || y1 < 0 || x0 > 127 || y0 > 127) {
         // Some draw paths don\'t mark a dirty rect. Fall back to a full blit.
         u16* vram = (u16*)VRAM;
-        blitFrame(vram, framebuffer, 56, 16);
+        blitFrame(vram, framebuffer, fb_w, fb_h, 56, 16);
         return;
     }
 
@@ -779,7 +791,7 @@ void IWRAM_CODE GbaHost::blitFrameTiles(const uint8_t (*framebuffer)[128], int x
                 continue;
             }
             const int px = tx * kTileSize;
-            const u32 hash = hashTile(framebuffer, px, py);
+            const u32 hash = hashTile(framebuffer, fb_w, px, py);
             if (isTileHashValid(cacheIndex) && g_tileHash[cacheIndex] == hash) {
                 clearTileDirty(cacheIndex);
                 continue;
@@ -789,7 +801,7 @@ void IWRAM_CODE GbaHost::blitFrameTiles(const uint8_t (*framebuffer)[128], int x
             u16* tile = tileBase + (tileIndex * 16);
             alignas(4) u16 packed16[16];
             for (int row = 0; row < kTileSize; ++row) {
-                const uint8_t* src = &framebuffer[py + row][px];
+                const uint8_t* src = framebuffer + (py + row) * fb_w + px;
                 const uint16_t b0 = (uint16_t)(packLow[src[0]] | packHigh[src[1]]);
                 const uint16_t b1 = (uint16_t)(packLow[src[2]] | packHigh[src[3]]);
                 const uint16_t b2 = (uint16_t)(packLow[src[4]] | packHigh[src[5]]);
@@ -813,10 +825,10 @@ void IWRAM_CODE GbaHost::blitFrameTiles(const uint8_t (*framebuffer)[128], int x
 #endif
 }
 
-void IWRAM_FLIP_CODE GbaHost::flipScreen(uint8_t (*framebuffer)[128], uint8_t *palette_map) {
+void IWRAM_FLIP_CODE GbaHost::flipScreen(const uint8_t* framebuffer, int fb_w, int fb_h, uint8_t *palette_map) {
 #if REAL8_GBA_TILEMODE
-    if (tileModeActive) {
-        flipScreenDirty(framebuffer, palette_map, 0, 0, 127, 127);
+    if (tileModeActive && fb_w == 128 && fb_h == 128) {
+        flipScreenDirty(framebuffer, fb_w, fb_h, palette_map, 0, 0, 127, 127);
         return;
     }
 #endif
@@ -824,6 +836,9 @@ void IWRAM_FLIP_CODE GbaHost::flipScreen(uint8_t (*framebuffer)[128], uint8_t *p
         if (debugDirty) drawDebugOverlay();
         return;
     }
+    if (fb_w <= 0 || fb_h <= 0) return;
+    gameW = fb_w;
+    gameH = fb_h;
 
     for (int i = 0; i < 16; ++i) {
         uint8_t idx = palette_map ? palette_map[i] : (uint8_t)i;
@@ -838,9 +853,9 @@ void IWRAM_FLIP_CODE GbaHost::flipScreen(uint8_t (*framebuffer)[128], uint8_t *p
     paletteValid = true;
 
     u16* vram = (u16*)VRAM;
-    const int xOff = 56;
-    const int yOff = 16;
-    blitFrame(vram, framebuffer, xOff, yOff);
+    const int xOff = (240 - fb_w) / 2;
+    const int yOff = (160 - fb_h) / 2;
+    blitFrame(vram, framebuffer, fb_w, fb_h, xOff, yOff);
 
 #ifdef REAL8_GBA_DEBUG_DOT
     BG_PALETTE[30] = RGB5(31, 0, 31);
@@ -850,10 +865,10 @@ void IWRAM_FLIP_CODE GbaHost::flipScreen(uint8_t (*framebuffer)[128], uint8_t *p
     if (debugDirty) drawDebugOverlay();
 }
 
-void IWRAM_FLIP_DIRTY_CODE GbaHost::flipScreenDirty(uint8_t (*framebuffer)[128], uint8_t *palette_map,
+void IWRAM_FLIP_DIRTY_CODE GbaHost::flipScreenDirty(const uint8_t* framebuffer, int fb_w, int fb_h, uint8_t *palette_map,
                               int x0, int y0, int x1, int y1) {
 #if REAL8_GBA_TILEMODE
-    if (tileModeActive) {
+    if (tileModeActive && fb_w == 128 && fb_h == 128) {
         if (!framebuffer) {
             if (debugDirty) drawDebugOverlay();
             return;
@@ -887,7 +902,7 @@ void IWRAM_FLIP_DIRTY_CODE GbaHost::flipScreenDirty(uint8_t (*framebuffer)[128],
             if (y1 > tilesY1) tilesY1 = y1;
         }
 
-        markTilesDirtyRect(x0, y0, x1, y1);
+        markTilesDirtyRect(fb_w, fb_h, x0, y0, x1, y1);
 
         if (debugDirty) drawDebugOverlay();
         return;
@@ -897,6 +912,9 @@ void IWRAM_FLIP_DIRTY_CODE GbaHost::flipScreenDirty(uint8_t (*framebuffer)[128],
         if (debugDirty) drawDebugOverlay();
         return;
     }
+    if (fb_w <= 0 || fb_h <= 0) return;
+    gameW = fb_w;
+    gameH = fb_h;
 
     for (int i = 0; i < 16; ++i) {
         uint8_t idx = palette_map ? palette_map[i] : (uint8_t)i;
@@ -910,11 +928,13 @@ void IWRAM_FLIP_DIRTY_CODE GbaHost::flipScreenDirty(uint8_t (*framebuffer)[128],
     }
     paletteValid = true;
 
-    if (x0 <= 0 && y0 <= 0 && x1 >= 127 && y1 >= 127) {
+    if (x0 <= 0 && y0 <= 0 && x1 >= (fb_w - 1) && y1 >= (fb_h - 1)) {
         u16* vram = (u16*)VRAM;
-        blitFrame(vram, framebuffer, 56, 16);
+        const int xOff = (240 - fb_w) / 2;
+        const int yOff = (160 - fb_h) / 2;
+        blitFrame(vram, framebuffer, fb_w, fb_h, xOff, yOff);
     } else {
-        blitFrameDirty(framebuffer, x0, y0, x1, y1);
+        blitFrameDirty(framebuffer, fb_w, fb_h, x0, y0, x1, y1);
     }
 
 #ifdef REAL8_GBA_DEBUG_DOT
@@ -1095,30 +1115,32 @@ void GbaHost::pushAudio(const int16_t* samples, int count) {
 #endif
 }
 
-void IWRAM_CODE GbaHost::blitFrameDirty(const uint8_t (*framebuffer)[128], int x0, int y0, int x1, int y1) {
+void IWRAM_CODE GbaHost::blitFrameDirty(const uint8_t* framebuffer, int fb_w, int fb_h, int x0, int y0, int x1, int y1) {
     REAL8_PROFILE_HOTSPOT(profileVm, Real8VM::kHotspotBlitDirty);
-    if (!framebuffer) return;
-    if (x1 < 0 || y1 < 0 || x0 > 127 || y0 > 127) {
+    if (!framebuffer || fb_w <= 0 || fb_h <= 0) return;
+    if (x1 < 0 || y1 < 0 || x0 >= fb_w || y0 >= fb_h) {
         // Some draw paths don\'t mark a dirty rect. Fall back to a full blit.
         u16* vram = (u16*)VRAM;
-        blitFrame(vram, framebuffer, 56, 16);
+        const int xOff = (240 - fb_w) / 2;
+        const int yOff = (160 - fb_h) / 2;
+        blitFrame(vram, framebuffer, fb_w, fb_h, xOff, yOff);
         return;
     }
 
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
-    if (x1 > 127) x1 = 127;
-    if (y1 > 127) y1 = 127;
+    if (x1 >= fb_w) x1 = fb_w - 1;
+    if (y1 >= fb_h) y1 = fb_h - 1;
 
     const int stride = 240 / 2;
-    const int xOff = 56;
-    const int yOff = 16;
+    const int xOff = (240 - fb_w) / 2;
+    const int yOff = (160 - fb_h) / 2;
     u16* vram = (u16*)VRAM;
 
     for (int y = y0; y <= y1; ++y) {
         int sx = x0;
         int dx = xOff + x0;
-        const uint8_t* src = &framebuffer[y][x0];
+        const uint8_t* src = framebuffer + y * fb_w + x0;
         u16* dst = vram + ((yOff + y) * stride + (dx >> 1));
 
         if (dx & 1) {

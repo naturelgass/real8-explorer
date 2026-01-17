@@ -1,6 +1,7 @@
 #include <SDL.h>
 #include <SDL_syswm.h> 
 #include <iostream>
+#include <cstdio>
 #include <windows.h> 
 #include <commdlg.h> 
 #include <shlobj.h>
@@ -33,6 +34,7 @@ enum MenuID
     ID_SET_CRT_FILTER,
     ID_SET_INTERPOLATION,
     ID_SET_STRETCH_SCREEN,
+    ID_EXT_EXPORT_LUA,
     ID_EXT_EXPORT_GFX,
     ID_EXT_EXPORT_MAP,
     ID_EXT_EXPORT_VARS,
@@ -79,6 +81,44 @@ std::string OpenImageDialog(HWND hwnd)
     return "";
 }
 
+static std::string GetLoadedCartBaseName(Real8VM* vm)
+{
+    if (!vm) return "cart";
+    std::string name = (!vm->currentCartPath.empty()) ? vm->currentCartPath : vm->currentGameId;
+    if (name.empty()) return "cart";
+    size_t lastSlash = name.find_last_of("/\\");
+    if (lastSlash != std::string::npos) name = name.substr(lastSlash + 1);
+    size_t lastDot = name.find_last_of('.');
+    if (lastDot != std::string::npos) name = name.substr(0, lastDot);
+    if (name.empty()) name = "cart";
+    return name;
+}
+
+std::string SaveLuaCartDialog(HWND hwnd, Real8VM* vm)
+{
+    OPENFILENAMEA ofn;
+    char szFile[260] = {0};
+    std::string suggested = GetLoadedCartBaseName(vm); // + ".p8";
+#if defined(_MSC_VER)
+    strncpy_s(szFile, suggested.c_str(), _TRUNCATE);
+#else
+    std::snprintf(szFile, sizeof(szFile), "%s", suggested.c_str());
+#endif
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = sizeof(szFile);
+    ofn.lpstrFilter = "PICO-8 Text Cart\0*.p8\0All Files\0*.*\0";
+    ofn.nFilterIndex = 1;
+    ofn.lpstrTitle = "Export LUA (p8)";
+    ofn.lpstrDefExt = "p8";
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+    if (GetSaveFileNameA(&ofn) == TRUE) return std::string(ofn.lpstrFile);
+    return "";
+}
+
+
 void ToggleFullscreen(SDL_Window *window, HWND hwnd, HMENU hMenu)
 {
     Uint32 flags = SDL_GetWindowFlags(window);
@@ -116,6 +156,7 @@ void UpdateMenuState(HMENU hMenu, Real8VM *vm, SDL_Window *window, WindowsHost* 
     EnableMenuItem(hMenu, ID_OPT_SAVE_STATE, MF_BYCOMMAND | (gameRunning ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(hMenu, ID_OPT_LOAD_STATE, MF_BYCOMMAND | (vm->hasState() ? MF_ENABLED : MF_GRAYED));
     
+    EnableMenuItem(hMenu, ID_EXT_EXPORT_LUA, MF_BYCOMMAND | (gameRunning ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(hMenu, ID_EXT_EXPORT_GFX, MF_BYCOMMAND | (gameRunning ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(hMenu, ID_EXT_EXPORT_MAP, MF_BYCOMMAND | (gameRunning ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(hMenu, ID_EXT_EXPORT_MUSIC, MF_BYCOMMAND | (gameRunning ? MF_ENABLED : MF_GRAYED));
@@ -193,6 +234,11 @@ LONG WINAPI Real8CrashHandler(EXCEPTION_POINTERS* pExceptionInfo)
         }
         
         crashLog << "-----------------------------\n";
+        crashLog << "Last Cart Path: " << real8_get_last_cart_path() << "\n";
+        crashLog << "Last Lua Phase: " << real8_get_last_lua_phase() << "\n";
+        crashLog << "Last API Call: " << real8_get_last_api_call() << "\n";
+        crashLog << "Last Lua Line: " << real8_get_last_lua_line() << "\n";
+        crashLog << "Last Lua Source: " << real8_get_last_lua_source() << "\n";
         crashLog << "Please share this file with the developer.\n";
         crashLog.close();
     }
@@ -256,6 +302,7 @@ int main(int argc, char *argv[])
     AppendMenu(hEffectMenu, MF_STRING, ID_SET_INTERPOLATION, "Interpolation");
     AppendMenu(hMenuBar, MF_POPUP, (UINT_PTR)hEffectMenu, "Effects");
 
+    AppendMenu(hExtraMenu, MF_STRING, ID_EXT_EXPORT_LUA, "Export LUA");
     AppendMenu(hExtraMenu, MF_STRING, ID_EXT_EXPORT_GFX, "Export GFX");
     AppendMenu(hExtraMenu, MF_STRING, ID_EXT_EXPORT_MAP, "Export MAP");
     AppendMenu(hExtraMenu, MF_STRING, ID_EXT_EXPORT_MUSIC, "Export Music Tracks");
@@ -266,6 +313,20 @@ int main(int argc, char *argv[])
 
     SetMenu(hwnd, hMenuBar);
     SDL_EventState(SDL_SYSWMEVENT, SDL_ENABLE);
+
+    // Ensure the client area is 1:1 (512x512) despite the menu bar.
+    {
+        RECT clientRect{};
+        if (GetClientRect(hwnd, &clientRect)) {
+            int clientW = clientRect.right - clientRect.left;
+            int clientH = clientRect.bottom - clientRect.top;
+            int winW = 0, winH = 0;
+            SDL_GetWindowSize(window, &winW, &winH);
+            int newW = WINDOW_WIDTH + (winW - clientW);
+            int newH = WINDOW_HEIGHT + (winH - clientH);
+            SDL_SetWindowSize(window, newW, newH);
+        }
+    }
 
     SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
 
@@ -475,6 +536,13 @@ int main(int argc, char *argv[])
                                 Real8Tools::SaveSettings(vm, host);
                                 UpdateMenuState(hMenuBar, vm, window, host); 
                                 shell->refreshGameList();
+                                break;
+
+                            case ID_EXT_EXPORT_LUA:
+                                if(!vm->currentGameId.empty()) {
+                                    std::string f = SaveLuaCartDialog(hwnd, vm);
+                                    if(!f.empty()) Real8Tools::ExportLUA(vm, host, f);
+                                }
                                 break;
 
                             case ID_EXT_EXPORT_GFX: 

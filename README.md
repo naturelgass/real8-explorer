@@ -39,6 +39,16 @@ A PICO-8 explorer + emulator front-end for multiple platforms.
 
 ## Features
 
+### REAL-8 extensions
+
+| Feature | Description |
+|---------|-------------|
+| **Dynamic framebuffer modes** | Extended game resolutions: (GBA) 240x160 / (3DS) 320x240 / (SWITCH) 640x360 * 2 (Full screen on each platform) |
+| **Stereo depth pipeline** | Stereo on 3DS or RED/CYAN on rest platforms - per-sprite depth buckets |
+| **Motion sensors** | Accelerometer / Gyroscope readings for 3DS and Switch |
+
+All new features are demonstrated in [PICO EXTENDED](demos/pico_extended.p8)
+
 ### Core experience
 
 | Area | Details |
@@ -189,5 +199,4 @@ This project is licensed under **GPL-3.0** (see `LICENSE`).
 ---
 
 ***REAL-8” started as a backronym (“Real-Time Emulation Analog Layer”), but it stuck***
-
 

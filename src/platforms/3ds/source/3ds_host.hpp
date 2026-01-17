@@ -43,6 +43,7 @@
 #include <malloc.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <cstdarg>
 #include <ctime>
@@ -149,19 +150,18 @@ namespace {
         return lut;
     }
 
-    static inline void swizzleCopyPal8_128(const u8* srcLinear128, u8* dstTiled, bool maskLowNibble) {
+    static inline void swizzleCopyPal8(const u8* srcLinear, u8* dstTiled, int srcW, int srcH, int dstW, bool maskLowNibble) {
         const u8* mort = mortonLut64();
-        constexpr int W = kPicoWidth;
-        constexpr int H = kPicoHeight;
-        constexpr int tilesX = W / 8;
+        if (srcW <= 0 || srcH <= 0) return;
+        const int tilesX = dstW / 8;
         // 8-bit texel: 64 bytes per 8x8 tile
-        for (int ty = 0; ty < H; ty += 8) {
+        for (int ty = 0; ty < srcH; ty += 8) {
             const int tileY = ty >> 3;
-            for (int tx = 0; tx < W; tx += 8) {
+            for (int tx = 0; tx < srcW; tx += 8) {
                 const int tileX = tx >> 3;
                 u8* dstTile = dstTiled + (tileY * tilesX + tileX) * 64;
                 for (int y = 0; y < 8; ++y) {
-                    const u8* srcRow = srcLinear128 + (ty + y) * W + tx;
+                    const u8* srcRow = srcLinear + (ty + y) * srcW + tx;
                     for (int x = 0; x < 8; ++x) {
                         u8 v = srcRow[x];
                         if (maskLowNibble) v &= 0x0F;
@@ -171,19 +171,77 @@ namespace {
             }
         }
     }
-    static inline void swizzleCopyRgb565FromIdx_128(const u8* srcLinear128, u16* dstTiled565, const u16* pal565) {
+    static inline void swizzleCopyPal8Dirty(const u8* srcLinear, u8* dstTiled, int srcW, int srcH, int dstW, bool maskLowNibble,
+                                            int x0, int y0, int x1, int y1) {
         const u8* mort = mortonLut64();
-        constexpr int W = kPicoWidth;
-        constexpr int H = kPicoHeight;
-        constexpr int tilesX = W / 8;
-        // 16-bit texel: 64 u16 per 8x8 tile
-        for (int ty = 0; ty < H; ty += 8) {
+        if (srcW <= 0 || srcH <= 0) return;
+        const int tilesX = dstW / 8;
+        int tx0 = x0 & ~7;
+        int ty0 = y0 & ~7;
+        int tx1 = x1 | 7;
+        int ty1 = y1 | 7;
+        if (tx0 < 0) tx0 = 0;
+        if (ty0 < 0) ty0 = 0;
+        if (tx1 >= srcW) tx1 = srcW - 1;
+        if (ty1 >= srcH) ty1 = srcH - 1;
+        for (int ty = ty0; ty <= ty1; ty += 8) {
             const int tileY = ty >> 3;
-            for (int tx = 0; tx < W; tx += 8) {
+            for (int tx = tx0; tx <= tx1; tx += 8) {
+                const int tileX = tx >> 3;
+                u8* dstTile = dstTiled + (tileY * tilesX + tileX) * 64;
+                for (int y = 0; y < 8; ++y) {
+                    const u8* srcRow = srcLinear + (ty + y) * srcW + tx;
+                    for (int x = 0; x < 8; ++x) {
+                        u8 v = srcRow[x];
+                        if (maskLowNibble) v &= 0x0F;
+                        dstTile[mort[(y<<3) | x]] = v;
+                    }
+                }
+            }
+        }
+    }
+    static inline void swizzleCopyRgb565FromIdx(const u8* srcLinear, u16* dstTiled565, const u16* pal565,
+                                                int srcW, int srcH, int dstW) {
+        const u8* mort = mortonLut64();
+        if (srcW <= 0 || srcH <= 0) return;
+        const int tilesX = dstW / 8;
+        // 16-bit texel: 64 u16 per 8x8 tile
+        for (int ty = 0; ty < srcH; ty += 8) {
+            const int tileY = ty >> 3;
+            for (int tx = 0; tx < srcW; tx += 8) {
                 const int tileX = tx >> 3;
                 u16* dstTile = dstTiled565 + (tileY * tilesX + tileX) * 64;
                 for (int y = 0; y < 8; ++y) {
-                    const u8* srcRow = srcLinear128 + (ty + y) * W + tx;
+                    const u8* srcRow = srcLinear + (ty + y) * srcW + tx;
+                    for (int x = 0; x < 8; ++x) {
+                        u8 c = srcRow[x] & 0x0F;
+                        dstTile[mort[(y<<3) | x]] = pal565[c];
+                    }
+                }
+            }
+        }
+    }
+    static inline void swizzleCopyRgb565FromIdxDirty(const u8* srcLinear, u16* dstTiled565,
+                                                     const u16* pal565, int srcW, int srcH, int dstW,
+                                                     int x0, int y0, int x1, int y1) {
+        const u8* mort = mortonLut64();
+        if (srcW <= 0 || srcH <= 0) return;
+        const int tilesX = dstW / 8;
+        int tx0 = x0 & ~7;
+        int ty0 = y0 & ~7;
+        int tx1 = x1 | 7;
+        int ty1 = y1 | 7;
+        if (tx0 < 0) tx0 = 0;
+        if (ty0 < 0) ty0 = 0;
+        if (tx1 >= srcW) tx1 = srcW - 1;
+        if (ty1 >= srcH) ty1 = srcH - 1;
+        for (int ty = ty0; ty <= ty1; ty += 8) {
+            const int tileY = ty >> 3;
+            for (int tx = tx0; tx <= tx1; tx += 8) {
+                const int tileX = tx >> 3;
+                u16* dstTile = dstTiled565 + (tileY * tilesX + tileX) * 64;
+                for (int y = 0; y < 8; ++y) {
+                    const u8* srcRow = srcLinear + (ty + y) * srcW + tx;
                     for (int x = 0; x < 8; ++x) {
                         u8 c = srcRow[x] & 0x0F;
                         dstTile[mort[(y<<3) | x]] = pal565[c];
@@ -194,6 +252,7 @@ namespace {
     }
 
     void buildGameRect(bool stretch, bool hasWallpaper, int screenW, int screenH,
+                   int gameW, int gameH,
                    int &outX, int &outY, int &outW, int &outH, float &outScale) {
         // We only want the wallpaper visible on the *sides* of the top screen.
         // So we apply padding horizontally, but keep full height (no top/bottom padding).
@@ -207,27 +266,36 @@ namespace {
         if (availH < 1) availH = 1;
 
         if (stretch) {
-            // Force 3x width (128 * 3 = 384) instead of filling the whole top screen width.
-            int targetW = kPicoWidth * 3; // 384
-            if (targetW > screenW) targetW = screenW;
+            if (gameW == kPicoWidth && gameH == kPicoHeight) {
+                // Force 3x width (128 * 3 = 384) instead of filling the whole top screen width.
+                int targetW = gameW * 3; // 384
+                if (targetW > screenW) targetW = screenW;
 
-            outW = targetW;
-            outX = (screenW - outW) / 2;
+                outW = targetW;
+                outX = (screenW - outW) / 2;
 
-            // Keep full height (no top/bottom padding)
+                // Keep full height (no top/bottom padding)
+                outY = padY;
+                outH = screenH - (padY * 2);
+                if (outH < 1) outH = 1;
+
+                outScale = (float)outW / (float)gameW;
+                return;
+            }
+
+            outX = padX;
             outY = padY;
-            outH = screenH - (padY * 2);
-            if (outH < 1) outH = 1;
-
-            outScale = (float)outW / (float)kPicoWidth;
+            outW = availW;
+            outH = availH;
+            outScale = (float)outW / (float)gameW;
             return;
         }
 
-        float scale = std::min((float)availW / (float)kPicoWidth,
-                            (float)availH / (float)kPicoHeight);
+        float scale = std::min((float)availW / (float)gameW,
+                            (float)availH / (float)gameH);
 
-        outW = (int)((float)kPicoWidth * scale);
-        outH = (int)((float)kPicoHeight * scale);
+        outW = (int)((float)gameW * scale);
+        outH = (int)((float)gameH * scale);
         outX = (screenW - outW) / 2;
         outY = (screenH - outH) / 2;
         outScale = scale;
@@ -243,9 +311,8 @@ namespace {
         return true;
     }
 
-    bool writeBmp24(const std::string &path, const uint32_t *pixels) {
-        const int width = kPicoWidth;
-        const int height = kPicoHeight;
+    bool writeBmp24(const std::string &path, const uint32_t *pixels, int width, int height) {
+        if (!pixels || width <= 0 || height <= 0) return false;
         const int rowSize = width * 3;
         const int imageSize = rowSize * height;
         const int fileSize = 14 + 40 + imageSize;
@@ -316,6 +383,13 @@ namespace {
 class ThreeDSHost : public IReal8Host
 {
 private:
+    struct DirtyRect {
+        int x0 = 0;
+        int y0 = 0;
+        int x1 = 0;
+        int y1 = 0;
+        bool valid = false;
+    };
     C3D_Tex *gameTex = nullptr;
     Tex3DS_SubTexture *gameSubtex = nullptr;
     C2D_Image gameImage;
@@ -331,6 +405,9 @@ private:
     C3D_Tex *wallpaperTex = nullptr;
     Tex3DS_SubTexture *wallpaperSubtex = nullptr;
     C2D_Image wallpaperImage;
+    C3D_Tex *scanlineTex = nullptr;
+    Tex3DS_SubTexture *scanlineSubtex = nullptr;
+    C2D_Image scanlineImage;
     C3D_RenderTarget *topTarget = nullptr;
     C3D_RenderTarget *topTargetR = nullptr; // Right-eye target (3D mode)
     C3D_RenderTarget *bottomTarget = nullptr;
@@ -339,12 +416,14 @@ private:
     // Legacy (CPU conversion): indices -> RGB565 into linear buffers, then DMA to tiled VRAM texture.
     u16 *pixelBuffer565Top = nullptr;
     u16 *pixelBuffer565Bottom = nullptr;
-    size_t pixelBufferSize = 0;
+    size_t pixelBufferSizeTop = 0;
+    size_t pixelBufferSizeBottom = 0;
 
     // GPU palette path: upload 8-bit indices, GPU does palette lookup (PAL8 + TLUT).
     u8 *indexBufferTop = nullptr;
     u8 *indexBufferBottom = nullptr;
-    size_t indexBufferSize = 0;
+    size_t indexBufferSizeTop = 0;
+    size_t indexBufferSizeBottom = 0;
 
     // Runtime switch: true when PAL8+TLUT is available and initialized successfully.
     bool useGpuPalette = false;
@@ -355,14 +434,44 @@ private:
     u16 lastPalette565[16] = {};
     bool tlutReady = false;
 #endif
+    u16 cachedPalette565[16] = {};
+    u32 cachedPalette32[16] = {};
+    uint8_t lastPaletteMap[16] = {};
+    bool paletteCacheValid = false;
 
-    uint32_t screenBuffer32[kPicoWidth * kPicoHeight];
+    std::vector<uint32_t> screenBuffer32;
+    int screenW = kPicoWidth;
+    int screenH = kPicoHeight;
+    int topW = kPicoWidth;
+    int topH = kPicoHeight;
+    int bottomW = kPicoWidth;
+    int bottomH = kPicoHeight;
+    int topTexW = kPicoWidth;
+    int topTexH = kPicoHeight;
+    int bottomTexW = kPicoWidth;
+    int bottomTexH = kPicoHeight;
+    bool screenshotPending = false;
+    std::string pendingScreenshotPath;
     u32 *wallpaperBuffer = nullptr;
     size_t wallpaperBufferSize = 0;
     int wallW = 0;
     int wallH = 0;
     int wallTexW = 0;
     int wallTexH = 0;
+    u32 *scanlineBuffer = nullptr;
+    size_t scanlineBufferSize = 0;
+    int scanW = 0;
+    int scanH = 0;
+    int scanTexW = 0;
+    int scanTexH = 0;
+    bool topPreviewBlankHint = false;
+    bool topPreviewHintValid = false;
+    bool stereoBuffersValid = false;
+    float lastStereoSlider = -1.0f;
+    bool lastStereoActive = false;
+    int lastStereoDepth = 0;
+    int lastStereoConv = 0;
+    bool lastStereoSwap = false;
 
     ndspWaveBuf waveBuf[kNumAudioBuffers];
     int16_t *audioBuffer = nullptr;
@@ -385,6 +494,8 @@ private:
     int lastTouchX = 0;
     int lastTouchY = 0;
     uint8_t lastTouchBtn = 0;
+    bool sensorsActive = false;
+    u64 lastSensorUs = 0;
 
     std::string rootPath = "sdmc:/real8";
 
@@ -451,6 +562,236 @@ private:
         }
     }
 
+    void freeGameTextures() {
+        if (pixelBuffer565Top) {
+            linearFree(pixelBuffer565Top);
+            pixelBuffer565Top = nullptr;
+        }
+        if (pixelBuffer565Bottom) {
+            linearFree(pixelBuffer565Bottom);
+            pixelBuffer565Bottom = nullptr;
+        }
+        pixelBufferSizeTop = 0;
+        pixelBufferSizeBottom = 0;
+
+        if (indexBufferTop) {
+            linearFree(indexBufferTop);
+            indexBufferTop = nullptr;
+        }
+        if (indexBufferBottom) {
+            linearFree(indexBufferBottom);
+            indexBufferBottom = nullptr;
+        }
+        indexBufferSizeTop = 0;
+        indexBufferSizeBottom = 0;
+
+        if (gameTexTopR) {
+            C3D_TexDelete(gameTexTopR);
+            linearFree(gameTexTopR);
+            gameTexTopR = nullptr;
+        }
+        if (gameTexTop) {
+            C3D_TexDelete(gameTexTop);
+            linearFree(gameTexTop);
+            gameTexTop = nullptr;
+        }
+        if (gameTex) {
+            C3D_TexDelete(gameTex);
+            linearFree(gameTex);
+            gameTex = nullptr;
+        }
+
+        if (gameSubtex) {
+            linearFree(gameSubtex);
+            gameSubtex = nullptr;
+        }
+        if (gameSubtexBottom) {
+            linearFree(gameSubtexBottom);
+            gameSubtexBottom = nullptr;
+        }
+        if (gameSubtexTop) {
+            linearFree(gameSubtexTop);
+            gameSubtexTop = nullptr;
+        }
+        if (gameSubtexTopR) {
+            linearFree(gameSubtexTopR);
+            gameSubtexTopR = nullptr;
+        }
+
+        gameImage = {};
+        gameImageBottom = {};
+        gameImageTop = {};
+        gameImageTopR = {};
+
+        stereoBuffersValid = false;
+        lastStereoDepth = 0;
+        lastStereoConv = 0;
+        lastStereoSwap = false;
+    }
+
+    bool initGameTextures(int newTopW, int newTopH, int newBottomW, int newBottomH) {
+        if (newTopW <= 0 || newTopH <= 0 || newBottomW <= 0 || newBottomH <= 0) return false;
+        freeGameTextures();
+
+        topW = newTopW;
+        topH = newTopH;
+        bottomW = newBottomW;
+        bottomH = newBottomH;
+        topTexW = nextPow2(topW);
+        topTexH = nextPow2(topH);
+        bottomTexW = nextPow2(bottomW);
+        bottomTexH = nextPow2(bottomH);
+        bottomStaticValid = false;
+
+#if REAL8_3DS_HAS_PAL8_TLUT
+        const GPU_TEXCOLOR texFmt = useGpuPalette ? GPU_PAL8 : GPU_RGB565;
+#else
+        const GPU_TEXCOLOR texFmt = GPU_RGB565;
+#endif
+        auto initTex = [&](C3D_Tex* tex, int w, int h) -> bool {
+#if REAL8_3DS_DIRECT_TEX_UPDATE
+            return C3D_TexInit(tex, w, h, texFmt);
+#else
+            return C3D_TexInitVRAM(tex, w, h, texFmt);
+#endif
+        };
+
+        gameTex = (C3D_Tex*)linearAlloc(sizeof(C3D_Tex));
+        gameTexTop = (C3D_Tex*)linearAlloc(sizeof(C3D_Tex));
+        gameTexTopR = (C3D_Tex*)linearAlloc(sizeof(C3D_Tex));
+        if (!gameTex || !gameTexTop || !gameTexTopR) return false;
+
+        if (!initTex(gameTex, bottomTexW, bottomTexH) ||
+            !initTex(gameTexTop, topTexW, topTexH) ||
+            !initTex(gameTexTopR, topTexW, topTexH)) {
+            return false;
+        }
+
+        C3D_TexSetFilter(gameTex, GPU_NEAREST, GPU_NEAREST);
+        GPU_TEXTURE_FILTER_PARAM topFilter = interpolation ? GPU_LINEAR : GPU_NEAREST;
+        C3D_TexSetFilter(gameTexTop, topFilter, topFilter);
+        C3D_TexSetFilter(gameTexTopR, topFilter, topFilter);
+
+        gameSubtex = (Tex3DS_SubTexture*)linearAlloc(sizeof(Tex3DS_SubTexture));
+        gameSubtexBottom = (Tex3DS_SubTexture*)linearAlloc(sizeof(Tex3DS_SubTexture));
+        gameSubtexTop = (Tex3DS_SubTexture*)linearAlloc(sizeof(Tex3DS_SubTexture));
+        gameSubtexTopR = (Tex3DS_SubTexture*)linearAlloc(sizeof(Tex3DS_SubTexture));
+        if (!gameSubtex || !gameSubtexBottom || !gameSubtexTop || !gameSubtexTopR) return false;
+
+        auto fillSubtex = [](Tex3DS_SubTexture* sub, int w, int h, int texW, int texH) {
+            sub->width = w;
+            sub->height = h;
+            sub->left = 0.0f;
+            sub->top = 1.0f;
+            sub->right = (float)w / (float)texW;
+            sub->bottom = 1.0f - ((float)h / (float)texH);
+        };
+
+        fillSubtex(gameSubtex, bottomW, bottomH, bottomTexW, bottomTexH);
+
+        if (bottomW == kPicoWidth && bottomH == kPicoHeight) {
+            const int bottomCropSrc = kBottomCropPx / kBottomScale;
+            const int bottomSrcHeight = bottomH - bottomCropSrc;
+            fillSubtex(gameSubtexBottom, bottomW, bottomSrcHeight, bottomTexW, bottomTexH);
+        } else {
+            fillSubtex(gameSubtexBottom, bottomW, bottomH, bottomTexW, bottomTexH);
+        }
+
+        fillSubtex(gameSubtexTop, topW, topH, topTexW, topTexH);
+        *gameSubtexTopR = *gameSubtexTop;
+
+        gameImage.tex = gameTex;
+        gameImage.subtex = gameSubtex;
+        gameImageBottom.tex = gameTex;
+        gameImageBottom.subtex = gameSubtexBottom;
+        gameImageTop.tex = gameTexTop;
+        gameImageTop.subtex = gameSubtexTop;
+        gameImageTopR.tex = gameTexTopR;
+        gameImageTopR.subtex = gameSubtexTopR;
+
+        pixelBufferSizeTop = (size_t)(topTexW * topTexH * sizeof(u16));
+        pixelBufferSizeBottom = (size_t)(bottomTexW * bottomTexH * sizeof(u16));
+        pixelBuffer565Top = (u16*)linearAlloc(pixelBufferSizeTop);
+        pixelBuffer565Bottom = (u16*)linearAlloc(pixelBufferSizeBottom);
+
+#if REAL8_3DS_HAS_PAL8_TLUT
+        indexBufferSizeTop = (size_t)(topTexW * topTexH);
+        indexBufferSizeBottom = (size_t)(bottomTexW * bottomTexH);
+        indexBufferTop = (u8*)linearAlloc(indexBufferSizeTop);
+        indexBufferBottom = (u8*)linearAlloc(indexBufferSizeBottom);
+#endif
+
+        if (!pixelBuffer565Top || !pixelBuffer565Bottom) return false;
+#if REAL8_3DS_HAS_PAL8_TLUT
+        if (useGpuPalette && (!indexBufferTop || !indexBufferBottom)) return false;
+#endif
+
+        stereoBuffersValid = false;
+        return true;
+    }
+
+    void ensureGameTextures(int newTopW, int newTopH, int newBottomW, int newBottomH) {
+        if (newTopW == topW && newTopH == topH && newBottomW == bottomW && newBottomH == bottomH &&
+            gameTex && gameTexTop && gameTexTopR) {
+            return;
+        }
+        initGameTextures(newTopW, newTopH, newBottomW, newBottomH);
+    }
+
+    void updateMotionSensors() {
+        if (!debugVMRef || !debugVMRef->ram) return;
+
+        const bool enabled = (debugVMRef->ram[0x5FE0] & 0x01) != 0;
+        if (!enabled) {
+            if (sensorsActive) {
+                HIDUSER_DisableAccelerometer();
+                HIDUSER_DisableGyroscope();
+                sensorsActive = false;
+            }
+            debugVMRef->motion.flags = 0x03; // accel + gyro present, data invalid
+            debugVMRef->motion.dt_us = 0;
+            debugVMRef->motion.accel_x = 0;
+            debugVMRef->motion.accel_y = 0;
+            debugVMRef->motion.accel_z = 0;
+            debugVMRef->motion.gyro_x = 0;
+            debugVMRef->motion.gyro_y = 0;
+            debugVMRef->motion.gyro_z = 0;
+            return;
+        }
+
+        if (!sensorsActive) {
+            HIDUSER_EnableAccelerometer();
+            HIDUSER_EnableGyroscope();
+            sensorsActive = true;
+            lastSensorUs = 0;
+        }
+
+        accelVector accel{};
+        angularRate gyro{};
+        hidAccelRead(&accel);
+        hidGyroRead(&gyro);
+
+        constexpr int kAccelUnitsPerG = 256;
+        constexpr int kGyroUnitsPerDps = 16;
+
+        debugVMRef->motion.accel_x = (int32_t)accel.x * 65536 / kAccelUnitsPerG;
+        debugVMRef->motion.accel_y = (int32_t)accel.y * 65536 / kAccelUnitsPerG;
+        debugVMRef->motion.accel_z = (int32_t)accel.z * 65536 / kAccelUnitsPerG;
+        debugVMRef->motion.gyro_x = (int32_t)gyro.x * 65536 / kGyroUnitsPerDps;
+        debugVMRef->motion.gyro_y = (int32_t)gyro.y * 65536 / kGyroUnitsPerDps;
+        debugVMRef->motion.gyro_z = (int32_t)gyro.z * 65536 / kGyroUnitsPerDps;
+        debugVMRef->motion.flags = 0x07; // accel + gyro present, data valid
+
+        const u64 nowUs = osGetTime() * 1000ULL;
+        if (lastSensorUs == 0) {
+            debugVMRef->motion.dt_us = 0;
+        } else {
+            const u64 delta = nowUs - lastSensorUs;
+            debugVMRef->motion.dt_us = (delta > 0xFFFFFFFFu) ? 0xFFFFFFFFu : (uint32_t)delta;
+        }
+        lastSensorUs = nowUs;
+    }
+
 
     void initGfx() {
         gfxInitDefault();
@@ -464,146 +805,47 @@ private:
         topTarget = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
         topTargetR = C2D_CreateScreenTarget(GFX_TOP, GFX_RIGHT);
         bottomTarget = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
-
-        gameTex = (C3D_Tex*)linearAlloc(sizeof(C3D_Tex));
 #if REAL8_3DS_HAS_PAL8_TLUT
-        // 8-bit indexed texture; palette supplied via TLUT (no per-pixel CPU conversion).
-    #if REAL8_3DS_DIRECT_TEX_UPDATE
-        C3D_TexInit(gameTex, kPicoWidth, kPicoHeight, GPU_PAL8);
-    #else
-        C3D_TexInitVRAM(gameTex, kPicoWidth, kPicoHeight, GPU_PAL8);
-    #endif
-#else
-    #if REAL8_3DS_DIRECT_TEX_UPDATE
-        C3D_TexInit(gameTex, kPicoWidth, kPicoHeight, GPU_RGB565);
-    #else
-        C3D_TexInitVRAM(gameTex, kPicoWidth, kPicoHeight, GPU_RGB565);
-    #endif
-#endif
-        C3D_TexSetFilter(gameTex, GPU_NEAREST, GPU_NEAREST);
-
-        gameSubtex = (Tex3DS_SubTexture*)linearAlloc(sizeof(Tex3DS_SubTexture));
-        gameSubtex->width = kPicoWidth;
-        gameSubtex->height = kPicoHeight;
-        gameSubtex->left = 0.0f;
-        gameSubtex->top = 1.0f;
-        gameSubtex->right = 1.0f;
-        gameSubtex->bottom = 0.0f;
-
-        gameImage.tex = gameTex;
-        gameImage.subtex = gameSubtex;
-
-        gameSubtexBottom = (Tex3DS_SubTexture*)linearAlloc(sizeof(Tex3DS_SubTexture));
-        const int bottomCropSrc = kBottomCropPx / kBottomScale;
-        const int bottomSrcHeight = kPicoHeight - bottomCropSrc;
-        gameSubtexBottom->width = kPicoWidth;
-        gameSubtexBottom->height = bottomSrcHeight;
-        gameSubtexBottom->left = 0.0f;
-        gameSubtexBottom->top = 1.0f;
-        gameSubtexBottom->right = 1.0f;
-        gameSubtexBottom->bottom = 1.0f - ((float)bottomSrcHeight / (float)kPicoHeight);
-
-        gameImageBottom.tex = gameTex;
-        gameImageBottom.subtex = gameSubtexBottom;
-
-        gameTexTop = (C3D_Tex*)linearAlloc(sizeof(C3D_Tex));
-#if REAL8_3DS_HAS_PAL8_TLUT
-    #if REAL8_3DS_DIRECT_TEX_UPDATE
-        C3D_TexInit(gameTexTop, kPicoWidth, kPicoHeight, GPU_PAL8);
-    #else
-        C3D_TexInitVRAM(gameTexTop, kPicoWidth, kPicoHeight, GPU_PAL8);
-    #endif
-#else
-    #if REAL8_3DS_DIRECT_TEX_UPDATE
-        C3D_TexInit(gameTexTop, kPicoWidth, kPicoHeight, GPU_RGB565);
-    #else
-        C3D_TexInitVRAM(gameTexTop, kPicoWidth, kPicoHeight, GPU_RGB565);
-    #endif
-#endif
-        C3D_TexSetFilter(gameTexTop, GPU_NEAREST, GPU_NEAREST);
-
-        gameSubtexTop = (Tex3DS_SubTexture*)linearAlloc(sizeof(Tex3DS_SubTexture));
-        gameSubtexTop->width = kPicoWidth;
-        gameSubtexTop->height = kPicoHeight;
-        gameSubtexTop->left = 0.0f;
-        gameSubtexTop->top = 1.0f;
-        gameSubtexTop->right = 1.0f;
-        gameSubtexTop->bottom = 0.0f;
-
-        gameImageTop.tex = gameTexTop;
-        gameImageTop.subtex = gameSubtexTop;
-
-
-        // Right-eye top texture for stereoscopic 3D
-        gameTexTopR = (C3D_Tex*)linearAlloc(sizeof(C3D_Tex));
-#if REAL8_3DS_HAS_PAL8_TLUT
-    #if REAL8_3DS_DIRECT_TEX_UPDATE
-        C3D_TexInit(gameTexTopR, kPicoWidth, kPicoHeight, GPU_PAL8);
-    #else
-        C3D_TexInitVRAM(gameTexTopR, kPicoWidth, kPicoHeight, GPU_PAL8);
-    #endif
-#else
-    #if REAL8_3DS_DIRECT_TEX_UPDATE
-        C3D_TexInit(gameTexTopR, kPicoWidth, kPicoHeight, GPU_RGB565);
-    #else
-        C3D_TexInitVRAM(gameTexTopR, kPicoWidth, kPicoHeight, GPU_RGB565);
-    #endif
-#endif
-        C3D_TexSetFilter(gameTexTopR, GPU_NEAREST, GPU_NEAREST);
-
-        gameSubtexTopR = (Tex3DS_SubTexture*)linearAlloc(sizeof(Tex3DS_SubTexture));
-        *gameSubtexTopR = *gameSubtexTop; // same UVs/dimensions as the left-eye texture
-        gameImageTopR.tex = gameTexTopR;
-        gameImageTopR.subtex = gameSubtexTopR;
-
-        // Allocate legacy RGB565 upload buffers (used when GPU palette isn't available, and for safety fallback).
-        pixelBufferSize = (size_t)(kPicoWidth * kPicoHeight * sizeof(u16));
-        pixelBuffer565Top = (u16*)linearAlloc(pixelBufferSize);
-        pixelBuffer565Bottom = (u16*)linearAlloc(pixelBufferSize);
-
-#if REAL8_3DS_HAS_PAL8_TLUT
-        indexBufferSize = (size_t)(kPicoWidth * kPicoHeight);
-        indexBufferTop = (u8*)linearAlloc(indexBufferSize);
-        indexBufferBottom = (u8*)linearAlloc(indexBufferSize);
-
-        // Initialize a 256-entry TLUT (we only use entries 0-15, but 256 keeps it simple).
         memset(tlutData, 0, sizeof(tlutData));
         memset(lastPalette565, 0xFF, sizeof(lastPalette565)); // force first upload
         tlutReady = C3D_TlutInit(&gameTlut, 256, GPU_RGB565);
         if (tlutReady) {
             C3D_TlutLoad(&gameTlut, tlutData);
             useGpuPalette = true;
-        } else {            // TLUT init failed. Re-initialize textures back to RGB565 so the legacy path stays correct.
+        } else {
             useGpuPalette = false;
-
-            C3D_TexDelete(gameTex);
-#if REAL8_3DS_DIRECT_TEX_UPDATE
-            C3D_TexInit(gameTex, kPicoWidth, kPicoHeight, GPU_RGB565);
-#else
-            C3D_TexInitVRAM(gameTex, kPicoWidth, kPicoHeight, GPU_RGB565);
-#endif
-            C3D_TexSetFilter(gameTex, GPU_NEAREST, GPU_NEAREST);
-
-            C3D_TexDelete(gameTexTop);
-#if REAL8_3DS_DIRECT_TEX_UPDATE
-            C3D_TexInit(gameTexTop, kPicoWidth, kPicoHeight, GPU_RGB565);
-#else
-            C3D_TexInitVRAM(gameTexTop, kPicoWidth, kPicoHeight, GPU_RGB565);
-#endif
-            C3D_TexSetFilter(gameTexTop, GPU_NEAREST, GPU_NEAREST);
-
-            C3D_TexDelete(gameTexTopR);
-#if REAL8_3DS_DIRECT_TEX_UPDATE
-            C3D_TexInit(gameTexTopR, kPicoWidth, kPicoHeight, GPU_RGB565);
-#else
-            C3D_TexInitVRAM(gameTexTopR, kPicoWidth, kPicoHeight, GPU_RGB565);
-#endif
-            C3D_TexSetFilter(gameTexTopR, GPU_NEAREST, GPU_NEAREST);
         }
 #else
         useGpuPalette = false;
 #endif
 
+        initGameTextures(kPicoWidth, kPicoHeight, kPicoWidth, kPicoHeight);
+
+    }
+
+    void logGfxConfig() {
+#if REAL8_3DS_HAS_PAL8_TLUT
+        const char* pal8 = "enabled";
+        const int tlutReadyVal = tlutReady ? 1 : 0;
+#else
+        const char* pal8 = "disabled";
+        const int tlutReadyVal = 0;
+#endif
+#if REAL8_3DS_DIRECT_TEX_UPDATE
+        const char* direct = "direct";
+#else
+        const char* direct = "vram";
+#endif
+        log("[3DS][GFX] PAL8+TLUT %s, update %s, tlutReady=%d, useGpuPalette=%d",
+            pal8, direct, tlutReadyVal, useGpuPalette ? 1 : 0);
+
+#if !REAL8_3DS_HAS_PAL8_TLUT
+        log("[3DS][GFX] PAL8+TLUT not available; RGB565 fallback in use.");
+#else
+        if (!useGpuPalette) {
+            log("[3DS][GFX] TLUT init failed; RGB565 fallback in use.");
+        }
+#endif
     }
 
     void initAudio() {
@@ -869,25 +1111,11 @@ private:
 
 
     void shutdownGfx() {
-        if (pixelBuffer565Top) {
-            linearFree(pixelBuffer565Top);
-            pixelBuffer565Top = nullptr;
-        }
-        if (pixelBuffer565Bottom) {
-            linearFree(pixelBuffer565Bottom);
-            pixelBuffer565Bottom = nullptr;
-        }
+        freeGameTextures();
 
 #if REAL8_3DS_HAS_PAL8_TLUT
-        if (indexBufferTop) {
-            linearFree(indexBufferTop);
-            indexBufferTop = nullptr;
-        }
-        if (indexBufferBottom) {
-            linearFree(indexBufferBottom);
-            indexBufferBottom = nullptr;
-        }
-        indexBufferSize = 0;
+        indexBufferSizeTop = 0;
+        indexBufferSizeBottom = 0;
 
         if (tlutReady) {
             C3D_TlutDelete(&gameTlut);
@@ -907,6 +1135,24 @@ private:
             linearFree(wallpaperSubtex);
             wallpaperSubtex = nullptr;
         }
+        if (scanlineBuffer) {
+            linearFree(scanlineBuffer);
+            scanlineBuffer = nullptr;
+        }
+        if (scanlineTex) {
+            C3D_TexDelete(scanlineTex);
+            linearFree(scanlineTex);
+            scanlineTex = nullptr;
+        }
+        if (scanlineSubtex) {
+            linearFree(scanlineSubtex);
+            scanlineSubtex = nullptr;
+        }
+        scanlineBufferSize = 0;
+        scanW = 0;
+        scanH = 0;
+        scanTexW = 0;
+        scanTexH = 0;
         if (gameTex) {
             C3D_TexDelete(gameTex);
             linearFree(gameTex);
@@ -968,9 +1214,172 @@ if (gameSubtexTopR) {
 
     void drawScanlines(int x, int y, int w, int h, float z) {
         if (w <= 0 || h <= 0) return;
-        const u32 color = C2D_Color32(0, 0, 0, 80);
-        for (int yy = 0; yy < h; yy += 2) {
-            C2D_DrawRectSolid((float)x, (float)(y + yy), z, (float)w, 1.0f, color);
+        if (!ensureScanlineTexture(w, h)) {
+            const u32 color = C2D_Color32(0, 0, 0, 80);
+            for (int yy = 0; yy < h; yy += 2) {
+                C2D_DrawRectSolid((float)x, (float)(y + yy), z, (float)w, 1.0f, color);
+            }
+            return;
+        }
+
+        C2D_DrawImageAt(scanlineImage, (float)x, (float)y, z, nullptr, 1.0f, 1.0f);
+    }
+
+    bool isLinearVmFramebuffer(const uint8_t* buffer) const {
+        return debugVMRef && debugVMRef->fb_is_linear && buffer == debugVMRef->fb;
+    }
+
+    bool getDirtyRectForBuffer(const uint8_t* buffer, int fb_w, int fb_h, DirtyRect& out) const {
+        if (!debugVMRef || buffer != debugVMRef->fb) return false;
+        int x0 = debugVMRef->dirty_x0;
+        int y0 = debugVMRef->dirty_y0;
+        int x1 = debugVMRef->dirty_x1;
+        int y1 = debugVMRef->dirty_y1;
+        if (x1 < 0 || y1 < 0) return false;
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 >= fb_w) x1 = fb_w - 1;
+        if (y1 >= fb_h) y1 = fb_h - 1;
+        if (x0 > x1 || y0 > y1) return false;
+        out.x0 = x0;
+        out.y0 = y0;
+        out.x1 = x1;
+        out.y1 = y1;
+        out.valid = true;
+        return true;
+    }
+
+    void alignDirtyRectToTiles(DirtyRect& r, int fb_w, int fb_h) const {
+        if (!r.valid) return;
+        r.x0 &= ~7;
+        r.y0 &= ~7;
+        r.x1 |= 7;
+        r.y1 |= 7;
+        if (r.x0 < 0) r.x0 = 0;
+        if (r.y0 < 0) r.y0 = 0;
+        if (r.x1 >= fb_w) r.x1 = fb_w - 1;
+        if (r.y1 >= fb_h) r.y1 = fb_h - 1;
+    }
+
+    bool ensureScanlineTexture(int w, int h) {
+        if (w <= 0 || h <= 0) return false;
+        const int texW = nextPow2(w);
+        const int texH = nextPow2(h);
+        if (scanlineTex && scanlineSubtex && scanlineBuffer &&
+            w == scanW && h == scanH && texW == scanTexW && texH == scanTexH) {
+            return true;
+        }
+
+        if (scanlineBuffer) {
+            linearFree(scanlineBuffer);
+            scanlineBuffer = nullptr;
+        }
+        if (scanlineTex) {
+            C3D_TexDelete(scanlineTex);
+            linearFree(scanlineTex);
+            scanlineTex = nullptr;
+        }
+        if (scanlineSubtex) {
+            linearFree(scanlineSubtex);
+            scanlineSubtex = nullptr;
+        }
+
+        scanlineTex = (C3D_Tex*)linearAlloc(sizeof(C3D_Tex));
+        if (!scanlineTex) return false;
+        C3D_TexInit(scanlineTex, texW, texH, GPU_RGBA8);
+        C3D_TexSetFilter(scanlineTex, GPU_NEAREST, GPU_NEAREST);
+
+        scanlineSubtex = (Tex3DS_SubTexture*)linearAlloc(sizeof(Tex3DS_SubTexture));
+        if (!scanlineSubtex) {
+            C3D_TexDelete(scanlineTex);
+            linearFree(scanlineTex);
+            scanlineTex = nullptr;
+            return false;
+        }
+
+        scanlineSubtex->width = w;
+        scanlineSubtex->height = h;
+        scanlineSubtex->left = 0.0f;
+        scanlineSubtex->top = 1.0f;
+        scanlineSubtex->right = (float)w / (float)texW;
+        scanlineSubtex->bottom = 1.0f - ((float)h / (float)texH);
+
+        scanlineImage.tex = scanlineTex;
+        scanlineImage.subtex = scanlineSubtex;
+
+        scanlineBufferSize = (size_t)(texW * texH * sizeof(u32));
+        scanlineBuffer = (u32*)linearAlloc(scanlineBufferSize);
+        if (!scanlineBuffer) {
+            C3D_TexDelete(scanlineTex);
+            linearFree(scanlineTex);
+            scanlineTex = nullptr;
+            linearFree(scanlineSubtex);
+            scanlineSubtex = nullptr;
+            scanlineBufferSize = 0;
+            return false;
+        }
+
+        scanW = w;
+        scanH = h;
+        scanTexW = texW;
+        scanTexH = texH;
+
+        const u32 lineColor = packAbgr8888(0, 0, 0, 80);
+        for (int yy = 0; yy < texH; ++yy) {
+            const bool inRow = (yy < h);
+            const bool drawLine = inRow && ((yy & 1) == 0);
+            u32* row = scanlineBuffer + (yy * texW);
+            for (int xx = 0; xx < texW; ++xx) {
+                if (!inRow || xx >= w) {
+                    row[xx] = 0;
+                } else {
+                    row[xx] = drawLine ? lineColor : 0;
+                }
+            }
+        }
+
+        GSPGPU_FlushDataCache(scanlineBuffer, scanlineBufferSize);
+        C3D_SyncDisplayTransfer(
+            (u32*)scanlineBuffer, GX_BUFFER_DIM(scanTexW, scanTexH),
+            (u32*)scanlineTex->data, GX_BUFFER_DIM(scanTexW, scanTexH),
+            (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(1) | GX_TRANSFER_RAW_COPY(0) |
+             GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+             GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
+        );
+
+        return true;
+    }
+
+    void updatePaletteLutIfNeeded(const uint8_t* palette_map) {
+        uint8_t fallback[16];
+        if (!palette_map) {
+            for (int i = 0; i < 16; ++i) fallback[i] = (uint8_t)i;
+            palette_map = fallback;
+        }
+
+        if (paletteCacheValid && memcmp(palette_map, lastPaletteMap, 16) == 0) return;
+
+        memcpy(lastPaletteMap, palette_map, 16);
+        paletteCacheValid = true;
+
+        for (int i = 0; i < 16; ++i) {
+            uint8_t p8ID = palette_map[i];
+            const uint8_t *rgb;
+            if (p8ID < 16) rgb = Real8Gfx::PALETTE_RGB[p8ID];
+            else if (p8ID >= 128 && p8ID < 144) rgb = Real8Gfx::PALETTE_RGB[p8ID - 128 + 16];
+            else rgb = Real8Gfx::PALETTE_RGB[p8ID & 0x0F];
+
+            uint8_t r = rgb[0];
+            uint8_t g = rgb[1];
+            uint8_t b = rgb[2];
+
+            // Swap Red and Blue for the game palette path
+            uint8_t tmp = r;
+            r = b;
+            b = tmp;
+
+            cachedPalette565[i] = packBgr565(r, g, b);
+            cachedPalette32[i] = 0xFF000000u | (r << 16) | (g << 8) | b;
         }
     }
 
@@ -989,15 +1398,23 @@ if (gameSubtexTopR) {
         }
     
         // Fast path: upload 8-bit indices and let the GPU do the palette lookup via TLUT.
-        void blitFrameToTexture(uint8_t (*framebuffer)[128], C3D_Tex *destTex,
+        void blitFrameToTexture(const uint8_t* framebuffer, int fb_w, int fb_h, C3D_Tex *destTex,
                                 const uint16_t *paletteLUT565, const uint32_t *paletteLUT32,
-                                bool updateScreenshot, u8 *destIndexBuffer) {
+                                bool updateScreenshot, u8 *destIndexBuffer,
+                                const DirtyRect* dirty = nullptr) {
             // 1) Optional screenshot capture (rare): keep CPU conversion only when needed.
             if (updateScreenshot) {
-                int idx = 0;
-                for (int y = 0; y < kPicoHeight; ++y) {
-                    for (int x = 0; x < kPicoWidth; ++x) {
-                        uint8_t col = framebuffer[y][x] & 0x0F;
+                const size_t pixelCount = (size_t)fb_w * (size_t)fb_h;
+                if (screenBuffer32.size() != pixelCount) {
+                    screenBuffer32.assign(pixelCount, 0);
+                }
+                screenW = fb_w;
+                screenH = fb_h;
+                size_t idx = 0;
+                for (int y = 0; y < fb_h; ++y) {
+                    const uint8_t* srcRow = framebuffer + (size_t)y * (size_t)fb_w;
+                    for (int x = 0; x < fb_w; ++x) {
+                        uint8_t col = srcRow[x] & 0x0F;
                         screenBuffer32[idx++] = paletteLUT32[col];
                     }
                 }
@@ -1007,79 +1424,124 @@ if (gameSubtexTopR) {
 
 #if REAL8_3DS_DIRECT_TEX_UPDATE
             // 3) Write indices directly into the CPU-accessible texture in swizzled (tiled) order.
-            swizzleCopyPal8_128((const u8*)framebuffer, (u8*)destTex->data, /*maskLowNibble=*/true);
-            GSPGPU_FlushDataCache(destTex->data, (size_t)(kPicoWidth * kPicoHeight));
+            if (dirty && dirty->valid) {
+                swizzleCopyPal8Dirty((const u8*)framebuffer, (u8*)destTex->data, fb_w, fb_h, destTex->width,
+                                     /*maskLowNibble=*/true, dirty->x0, dirty->y0, dirty->x1, dirty->y1);
+            } else {
+                swizzleCopyPal8((const u8*)framebuffer, (u8*)destTex->data, fb_w, fb_h, destTex->width, /*maskLowNibble=*/true);
+            }
+            GSPGPU_FlushDataCache(destTex->data, (size_t)destTex->width * (size_t)destTex->height);
             (void)destIndexBuffer;
 #else
             // 3) Copy indices linearly then use GX display transfer to swizzle into VRAM.
-            memcpy(destIndexBuffer, framebuffer, (size_t)(kPicoWidth * kPicoHeight));
-            GSPGPU_FlushDataCache(destIndexBuffer, indexBufferSize);
+            const int destW = (int)destTex->width;
+            const int destH = (int)destTex->height;
+            u8* srcLinear = destIndexBuffer;
+            if (destIndexBuffer && destW == fb_w && destIndexBuffer == (u8*)framebuffer) {
+                srcLinear = (u8*)framebuffer;
+            } else if (destIndexBuffer) {
+                if (dirty && dirty->valid) {
+                    const int w = dirty->x1 - dirty->x0 + 1;
+                    for (int y = dirty->y0; y <= dirty->y1; ++y) {
+                        memcpy(destIndexBuffer + y * destW + dirty->x0,
+                               framebuffer + (size_t)y * (size_t)fb_w + dirty->x0, (size_t)w);
+                    }
+                } else {
+                    for (int y = 0; y < fb_h; ++y) {
+                        memcpy(destIndexBuffer + y * destW,
+                               framebuffer + (size_t)y * (size_t)fb_w, (size_t)fb_w);
+                    }
+                }
+                srcLinear = destIndexBuffer;
+            } else {
+                return;
+            }
+            GSPGPU_FlushDataCache(srcLinear, (size_t)destW * (size_t)destH);
             C3D_SyncDisplayTransfer(
-                (u32*)destIndexBuffer, GX_BUFFER_DIM(kPicoWidth, kPicoHeight),
-                (u32*)destTex->data, GX_BUFFER_DIM(kPicoWidth, kPicoHeight),
+                (u32*)srcLinear, GX_BUFFER_DIM(destW, destH),
+                (u32*)destTex->data, GX_BUFFER_DIM(destW, destH),
                 (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(1) | GX_TRANSFER_RAW_COPY(1) |
                  GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_I8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_I8) |
                  GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
             );
 #endif
         }
+
     #endif // REAL8_3DS_HAS_PAL8_TLUT
     
         // Legacy path: CPU converts indices -> RGB565 and uploads a 16-bit texture.
-        void blitFrameToTexture(uint8_t (*framebuffer)[128], C3D_Tex *destTex,
+        void blitFrameToTexture(const uint8_t* framebuffer, int fb_w, int fb_h, C3D_Tex *destTex,
                                 const uint16_t *paletteLUT565, const uint32_t *paletteLUT32,
-                                bool updateScreenshot, u16 *destBuffer565) {
+                                bool updateScreenshot, u16 *destBuffer565,
+                                const DirtyRect* dirty = nullptr) {
 #if REAL8_3DS_DIRECT_TEX_UPDATE
             // Write RGB565 directly into the CPU-accessible texture in swizzled (tiled) order.
             // Screenshot conversion (rare) stays linear for simplicity.
             if (updateScreenshot) {
-                int idx = 0;
-                for (int y = 0; y < kPicoHeight; ++y) {
-                    for (int x = 0; x < kPicoWidth; ++x) {
-                        uint8_t col = framebuffer[y][x] & 0x0F;
+                const size_t pixelCount = (size_t)fb_w * (size_t)fb_h;
+                if (screenBuffer32.size() != pixelCount) {
+                    screenBuffer32.assign(pixelCount, 0);
+                }
+                screenW = fb_w;
+                screenH = fb_h;
+                size_t idx = 0;
+                for (int y = 0; y < fb_h; ++y) {
+                    const uint8_t* srcRow = framebuffer + (size_t)y * (size_t)fb_w;
+                    for (int x = 0; x < fb_w; ++x) {
+                        uint8_t col = srcRow[x] & 0x0F;
                         screenBuffer32[idx++] = paletteLUT32[col];
                     }
                 }
             }
             // Swizzled write for the texture.
-            const u8* mort = mortonLut64();
-            constexpr int W = kPicoWidth;
-            constexpr int H = kPicoHeight;
-            constexpr int tilesX = W / 8;
-            u16* dst = (u16*)destTex->data;
-            for (int ty = 0; ty < H; ty += 8) {
-                const int tileY = ty >> 3;
-                for (int tx = 0; tx < W; tx += 8) {
-                    const int tileX = tx >> 3;
-                    u16* dstTile = dst + (tileY * tilesX + tileX) * 64;
-                    for (int y = 0; y < 8; ++y) {
-                        const u8* srcRow = &framebuffer[ty + y][tx];
-                        for (int x = 0; x < 8; ++x) {
-                            u8 c = srcRow[x] & 0x0F;
-                            dstTile[mort[(y<<3) | x]] = paletteLUT565[c];
-                        }
-                    }
-                }
+            if (dirty && dirty->valid) {
+                swizzleCopyRgb565FromIdxDirty((const u8*)framebuffer, (u16*)destTex->data,
+                                              paletteLUT565, fb_w, fb_h, destTex->width,
+                                              dirty->x0, dirty->y0, dirty->x1, dirty->y1);
+            } else {
+                swizzleCopyRgb565FromIdx((const u8*)framebuffer, (u16*)destTex->data, paletteLUT565, fb_w, fb_h, destTex->width);
             }
-            GSPGPU_FlushDataCache(destTex->data, (size_t)(kPicoWidth * kPicoHeight * sizeof(u16)));
+            GSPGPU_FlushDataCache(destTex->data, (size_t)destTex->width * (size_t)destTex->height * sizeof(u16));
 #else
-            int idx = 0;
-            for (int y = 0; y < kPicoHeight; ++y) {
-                for (int x = 0; x < kPicoWidth; ++x) {
-                    uint8_t col = framebuffer[y][x] & 0x0F;
-                    uint16_t rgb565 = paletteLUT565[col];
-                    destBuffer565[idx] = rgb565;
-                    if (updateScreenshot) {
-                        screenBuffer32[idx] = paletteLUT32[col];
+            const int destW = (int)destTex->width;
+            const int destH = (int)destTex->height;
+            if (dirty && dirty->valid && !updateScreenshot) {
+                for (int y = dirty->y0; y <= dirty->y1; ++y) {
+                    const int row = y * destW;
+                    for (int x = dirty->x0; x <= dirty->x1; ++x) {
+                        uint8_t col = framebuffer[(size_t)y * (size_t)fb_w + x] & 0x0F;
+                        destBuffer565[row + x] = paletteLUT565[col];
                     }
-                    idx++;
+                }
+            } else {
+                const size_t pixelCount = (size_t)fb_w * (size_t)fb_h;
+                if (updateScreenshot) {
+                    if (screenBuffer32.size() != pixelCount) {
+                        screenBuffer32.assign(pixelCount, 0);
+                    }
+                    screenW = fb_w;
+                    screenH = fb_h;
+                }
+                size_t idx = 0;
+                for (int y = 0; y < fb_h; ++y) {
+                    const uint8_t* srcRow = framebuffer + (size_t)y * (size_t)fb_w;
+                    const int row = y * destW;
+                    for (int x = 0; x < fb_w; ++x) {
+                        uint8_t col = srcRow[x] & 0x0F;
+                        uint16_t rgb565 = paletteLUT565[col];
+                        destBuffer565[row + x] = rgb565;
+                        if (updateScreenshot) {
+                            screenBuffer32[idx] = paletteLUT32[col];
+                        }
+                        idx++;
+                    }
                 }
             }
-    
-            GSPGPU_FlushDataCache(destBuffer565, pixelBufferSize);
+
+            GSPGPU_FlushDataCache(destBuffer565, (size_t)destW * (size_t)destH * sizeof(u16));
             C3D_SyncDisplayTransfer(
-                (u32*)destBuffer565, GX_BUFFER_DIM(kPicoWidth, kPicoHeight),
-                (u32*)destTex->data, GX_BUFFER_DIM(kPicoWidth, kPicoHeight),
+                (u32*)destBuffer565, GX_BUFFER_DIM(destW, destH),
+                (u32*)destTex->data, GX_BUFFER_DIM(destW, destH),
                 (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(1) | GX_TRANSFER_RAW_COPY(0) |
                  GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) |
                  GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
@@ -1090,20 +1552,15 @@ if (gameSubtexTopR) {
     // When browsing directories, the shell may give a dedicated top buffer.
     // If no preview exists, that top buffer is usually cleared to 0 (all pixels 0).
     // In that case we should not draw the top preview texture, so wallpaper/skin stays visible.
-    bool isBlankTopPreview(uint8_t (*topbuffer)[128], uint8_t (*bottombuffer)[128]) const {
+    bool isBlankTopPreview(const uint8_t* topbuffer, const uint8_t* bottombuffer) const {
         // Normal gameplay path uses the same framebuffer for both (flipScreen() calls flipScreens(fb,fb,...))
         // Never treat that as "missing preview".
         if (topbuffer == bottombuffer) return false;
-
-        for (int y = 0; y < kPicoHeight; ++y) {
-            for (int x = 0; x < kPicoWidth; ++x) {
-                if ((topbuffer[y][x] & 0x0F) != 0) return false;
-            }
-        }
-        return true;
+        if (!topPreviewHintValid) return false;
+        return topPreviewBlankHint;
     }
 
-public:
+    public:
     Real8VM *debugVMRef = nullptr;
     bool crt_filter = false;
     bool interpolation = false;
@@ -1111,6 +1568,7 @@ public:
 
     bool bottomStaticValid = false;
     bool lastInGameSingleScreen = false;
+    bool lastBottomHasWallpaper = false;
 
     ThreeDSHost() {
         initGfx();
@@ -1119,6 +1577,7 @@ public:
         // ndspInit() may need RomFS mounted when DSP firmware is bundled with the app (romfs:/dspfirm.cdc).
         // Initializing FS (and RomFS) first lets audio work out-of-the-box on installs without sdmc:/3ds/dspfirm.cdc.
         initFs();
+        logGfxConfig();
         initAudio();
 
         initNetwork();
@@ -1127,11 +1586,36 @@ public:
     ~ThreeDSHost() {
         shutdownAudio();
         shutdownNetwork();
+        if (sensorsActive) {
+            HIDUSER_DisableAccelerometer();
+            HIDUSER_DisableGyroscope();
+            sensorsActive = false;
+        }
         shutdownGfx();
     }
 
     const char *getPlatform() override { return "3DS"; }
     std::string getClipboardText() override { return ""; }
+
+    void setTopPreviewBlankHint(bool blank) override {
+        topPreviewBlankHint = blank;
+        topPreviewHintValid = true;
+    }
+
+    void clearTopPreviewBlankHint() override {
+        topPreviewHintValid = false;
+    }
+
+    void* allocLinearFramebuffer(size_t bytes, size_t align) override {
+        (void)align;
+        void* ptr = linearAlloc(bytes);
+        if (ptr) std::memset(ptr, 0, bytes);
+        return ptr;
+    }
+
+    void freeLinearFramebuffer(void* ptr) override {
+        if (ptr) linearFree(ptr);
+    }
 
     // Raw 3DS key state helpers (used by main loop / host controls)
     u32 getKeysHeldRaw() const { return m_keysHeld; }
@@ -1151,6 +1635,13 @@ public:
         if (gameTex) {
             C3D_TexSetFilter(gameTex, GPU_NEAREST, GPU_NEAREST);
         }
+    }
+
+    void onFramebufferResize(int fb_w, int fb_h) override {
+        if (fb_w <= 0 || fb_h <= 0) return;
+        ensureGameTextures(fb_w, fb_h, fb_w, fb_h);
+        bottomStaticValid = false;
+        stereoBuffersValid = false;
     }
 
     void waitForDebugEvent() override {
@@ -1182,35 +1673,24 @@ public:
         if (file.is_open()) file << url;
     }
 
-    void flipScreen(uint8_t (*framebuffer)[128], uint8_t *palette_map) override {
-        flipScreens(framebuffer, framebuffer, palette_map);
+    void flipScreen(const uint8_t* framebuffer, int fb_w, int fb_h, uint8_t *palette_map) override {
+        flipScreens(framebuffer, fb_w, fb_h, framebuffer, fb_w, fb_h, palette_map);
     }
 
-    void flipScreens(uint8_t (*topbuffer)[128], uint8_t (*bottombuffer)[128], uint8_t *palette_map) override {
-        uint16_t paletteLUT565[16];
-        uint32_t paletteLUT32[16];
-
-        for (int i = 0; i < 16; ++i) {
-            uint8_t p8ID = palette_map[i];
-            const uint8_t *rgb;
-            if (p8ID < 16) rgb = Real8Gfx::PALETTE_RGB[p8ID];
-            else if (p8ID >= 128 && p8ID < 144) rgb = Real8Gfx::PALETTE_RGB[p8ID - 128 + 16];
-            else rgb = Real8Gfx::PALETTE_RGB[p8ID & 0x0F];
-
-            uint8_t r = rgb[0];
-            uint8_t g = rgb[1];
-            uint8_t b = rgb[2];
-
-            // Swap Red and Blue for the game palette path
-            uint8_t tmp = r;
-            r = b;
-            b = tmp;
-
-            paletteLUT565[i] = packBgr565(r, g, b);
-            paletteLUT32[i] = 0xFF000000u | (r << 16) | (g << 8) | b;
-        }
+    void flipScreens(const uint8_t* topbuffer, int top_w, int top_h,
+                     const uint8_t* bottombuffer, int bottom_w, int bottom_h,
+                     uint8_t *palette_map) override {
+        updatePaletteLutIfNeeded(palette_map);
+        updateMotionSensors();
+        if (!topbuffer || !bottombuffer) return;
+        if (top_w <= 0 || top_h <= 0 || bottom_w <= 0 || bottom_h <= 0) return;
+        ensureGameTextures(top_w, top_h, bottom_w, bottom_h);
+        if (!gameTex || !gameTexTop || !gameTexTopR || !gameSubtex || !gameSubtexBottom || !gameSubtexTop || !gameSubtexTopR) return;
+        const bool wantScreenshot = screenshotPending;
+        bool capturedThisFrame = false;
 
         const bool inGameSingleScreen = (topbuffer == bottombuffer);
+        const int mode = (debugVMRef ? debugVMRef->r8_vmode_cur : 0);
 
         if (inGameSingleScreen != lastInGameSingleScreen) {
             bottomStaticValid = false;
@@ -1223,55 +1703,156 @@ public:
         }
 
 
-        // Stereoscopic 3D (top screen): if enabled in the VM and the 3D slider is up,
-        // render separate left/right eye images from vm->stereo_layers using bucket-based parallax.
-        const float stereoSlider = osGet3DSliderState();
-        const bool stereoActive =
+        uint8_t st_flags = 0;
+        uint8_t st_mode = 3;
+        int8_t st_depth = 0;
+        int8_t st_conv = 0;
+        if (debugVMRef && debugVMRef->ram) {
+            st_flags = debugVMRef->ram[0x5F80];
+            st_mode = debugVMRef->ram[0x5F81];
+            st_depth = (int8_t)debugVMRef->ram[0x5F82];
+            st_conv = (int8_t)debugVMRef->ram[0x5F83];
+        }
+        const bool stereoEnable = (st_flags & 0x01) != 0;
+        const bool swapEyes = (st_flags & 0x02) != 0;
+
+        constexpr int kConvPxPerLevel = 1;
+
+        int depthLevel = st_depth;
+        if (st_mode == 3 && depthLevel == 0) depthLevel = 1;
+        const int convPx = st_conv * kConvPxPerLevel;
+
+        const bool stereoCapable =
             (inGameSingleScreen &&
-             debugVMRef && debugVMRef->stereoscopic && !debugVMRef->isShellUI &&
+             debugVMRef && !debugVMRef->isShellUI &&
              debugVMRef->stereo_layers != nullptr &&
-             topTargetR != nullptr && gameTexTopR != nullptr &&
-             stereoSlider > 0.01f);
+             topTargetR != nullptr && gameTexTopR != nullptr);
+
+        // Stereoscopic 3D (top screen): if enabled in the VM and the 3D slider is up,
+        // render separate left/right eye images from vm->stereo_layers using bucket-based depth.
+        const float stereoSlider = osGet3DSliderState();
+        bool stereoActive = false;
+        if (st_mode == 3) {
+            stereoActive = stereoCapable && debugVMRef->stereoscopic && stereoSlider > 0.01f;
+        } else if (st_mode == 1 && stereoEnable) {
+            stereoActive = stereoCapable && stereoSlider > 0.01f;
+        }
 
         // When 3D is disabled, the system duplicates the left framebuffer to the right.
         gfxSet3D(stereoActive);
 
         if (stereoActive) {
-            static uint8_t eyeL[128][128];
-            static uint8_t eyeR[128][128];
-            static uint8_t zL[128 * 128];
-            static uint8_t zR[128 * 128];
+            static std::vector<uint8_t> eyeL;
+            static std::vector<uint8_t> eyeR;
+            static std::vector<uint8_t> zL;
+            static std::vector<uint8_t> zR;
 
-            std::memset(eyeL, 0, sizeof(eyeL));
-            std::memset(eyeR, 0, sizeof(eyeR));
-            std::memset(zL, 0, sizeof(zL));
-            std::memset(zR, 0, sizeof(zR));
+            const size_t pixelCount = (size_t)top_w * (size_t)top_h;
+            if (eyeL.size() != pixelCount) {
+                eyeL.assign(pixelCount, 0);
+                eyeR.assign(pixelCount, 0);
+                zL.assign(pixelCount, 0);
+                zR.assign(pixelCount, 0);
+                stereoBuffersValid = false;
+            }
 
-            constexpr float kPxPerBucket = 1.0f; // 1 source pixel per bucket at max slider
+            constexpr float kPxPerBucket = 1.0f; // base pixels per bucket
+            const float bucketScale = (float)depthLevel * stereoSlider * kPxPerBucket;
+            const int maxShiftClamp = (int)ceilf(fabsf((float)Real8VM::STEREO_BUCKET_MAX * bucketScale) + (float)std::abs(convPx));
+            bool fullClear = !stereoBuffersValid || !lastStereoActive ||
+                (lastStereoSlider < 0.0f || fabsf(stereoSlider - lastStereoSlider) > 0.001f) ||
+                (depthLevel != lastStereoDepth) || (convPx != lastStereoConv) || (swapEyes != lastStereoSwap);
+
+            int srcX0 = 0;
+            int srcY0 = 0;
+            int srcX1 = top_w - 1;
+            int srcY1 = top_h - 1;
+
+            int clearX0 = 0;
+            int clearY0 = 0;
+            int clearX1 = top_w - 1;
+            int clearY1 = top_h - 1;
+
+            if (!fullClear && debugVMRef) {
+                int dx0 = debugVMRef->dirty_x0;
+                int dy0 = debugVMRef->dirty_y0;
+                int dx1 = debugVMRef->dirty_x1;
+                int dy1 = debugVMRef->dirty_y1;
+
+                if (dx1 < 0 || dy1 < 0) {
+                    fullClear = true;
+                } else {
+                    if (dx0 < 0) dx0 = 0;
+                    if (dy0 < 0) dy0 = 0;
+                    if (dx1 >= top_w) dx1 = top_w - 1;
+                    if (dy1 >= top_h) dy1 = top_h - 1;
+                    if (dx0 > dx1 || dy0 > dy1) {
+                        fullClear = true;
+                    } else {
+                        srcX0 = dx0;
+                        srcY0 = dy0;
+                        srcX1 = dx1;
+                        srcY1 = dy1;
+
+                        int maxShift = maxShiftClamp;
+                        if (maxShift < 0) maxShift = 0;
+                        clearX0 = srcX0 - maxShift;
+                        clearX1 = srcX1 + maxShift;
+                        if (clearX0 < 0) clearX0 = 0;
+                        if (clearX1 >= top_w) clearX1 = top_w - 1;
+                        clearY0 = srcY0;
+                        clearY1 = srcY1;
+                    }
+                }
+            }
+
+            DirtyRect stereoDirty;
+            if (fullClear) {
+                std::fill(eyeL.begin(), eyeL.end(), 0);
+                std::fill(eyeR.begin(), eyeR.end(), 0);
+                std::fill(zL.begin(), zL.end(), 0);
+                std::fill(zR.begin(), zR.end(), 0);
+            } else {
+                const int clearW = clearX1 - clearX0 + 1;
+                for (int y = clearY0; y <= clearY1; ++y) {
+                    std::memset(eyeL.data() + (size_t)y * (size_t)top_w + clearX0, 0, (size_t)clearW);
+                    std::memset(eyeR.data() + (size_t)y * (size_t)top_w + clearX0, 0, (size_t)clearW);
+                    std::memset(zL.data() + (size_t)y * (size_t)top_w + clearX0, 0, (size_t)clearW);
+                    std::memset(zR.data() + (size_t)y * (size_t)top_w + clearX0, 0, (size_t)clearW);
+                }
+                stereoDirty.x0 = clearX0;
+                stereoDirty.y0 = clearY0;
+                stereoDirty.x1 = clearX1;
+                stereoDirty.y1 = clearY1;
+                stereoDirty.valid = true;
+                alignDirtyRectToTiles(stereoDirty, top_w, top_h);
+            }
+
             for (int li = 0; li < Real8VM::STEREO_LAYER_COUNT; ++li) {
                 const int bucket = li - Real8VM::STEREO_BUCKET_BIAS;
-                int shift = (int)lroundf((float)bucket * stereoSlider * kPxPerBucket);
-                if (shift < -Real8VM::STEREO_BUCKET_MAX) shift = -Real8VM::STEREO_BUCKET_MAX;
-                if (shift >  Real8VM::STEREO_BUCKET_MAX) shift =  Real8VM::STEREO_BUCKET_MAX;
+                int shift = (int)lroundf((float)bucket * bucketScale) + convPx;
+                if (swapEyes) shift = -shift;
+                if (shift < -maxShiftClamp) shift = -maxShiftClamp;
+                if (shift >  maxShiftClamp) shift =  maxShiftClamp;
                 const uint8_t zval = (uint8_t)(bucket < 0 ? -bucket : bucket); // |bucket| in 0..7
 
-                for (int y = 0; y < kPicoHeight; ++y) {
-                    const uint8_t* src_row = debugVMRef->stereo_layers[li * kPicoHeight + y];
-                    for (int x = 0; x < kPicoWidth; ++x) {
+                for (int y = srcY0; y <= srcY1; ++y) {
+                    const uint8_t* src_row = debugVMRef->stereo_layer_row(li, y);
+                    for (int x = srcX0; x <= srcX1; ++x) {
                         uint8_t src = src_row[x];
                         if (src == 0xFF) continue;
                         src &= 0x0F;
 
                         const int lx = x + shift;
-                        if ((unsigned)lx < (unsigned)kPicoWidth) {
-                            const int i = y * kPicoWidth + lx;
-                            if (zval >= zL[i]) { zL[i] = zval; eyeL[y][lx] = src; }
+                        if ((unsigned)lx < (unsigned)top_w) {
+                            const size_t i = (size_t)y * (size_t)top_w + (size_t)lx;
+                            if (zval >= zL[i]) { zL[i] = zval; eyeL[i] = src; }
                         }
 
                         const int rx = x - shift;
-                        if ((unsigned)rx < (unsigned)kPicoWidth) {
-                            const int i = y * kPicoWidth + rx;
-                            if (zval >= zR[i]) { zR[i] = zval; eyeR[y][rx] = src; }
+                        if ((unsigned)rx < (unsigned)top_w) {
+                            const size_t i = (size_t)y * (size_t)top_w + (size_t)rx;
+                            if (zval >= zR[i]) { zR[i] = zval; eyeR[i] = src; }
                         }
                     }
                 }
@@ -1280,50 +1861,101 @@ public:
 #if REAL8_3DS_HAS_PAL8_TLUT
             if (useGpuPalette) {
                 // Use separate CPU buffers for the two uploads to avoid any chance of overlap.
-                blitFrameToTexture(eyeL, gameTexTop,  paletteLUT565, paletteLUT32, true,  indexBufferTop);
-                blitFrameToTexture(eyeR, gameTexTopR, paletteLUT565, paletteLUT32, false, indexBufferBottom);
+                blitFrameToTexture(eyeL.data(), top_w, top_h, gameTexTop,  cachedPalette565, cachedPalette32, wantScreenshot,  indexBufferTop,
+                                   stereoDirty.valid ? &stereoDirty : nullptr);
+                blitFrameToTexture(eyeR.data(), top_w, top_h, gameTexTopR, cachedPalette565, cachedPalette32, false, indexBufferBottom,
+                                   stereoDirty.valid ? &stereoDirty : nullptr);
             } else
 #endif
             {
-                blitFrameToTexture(eyeL, gameTexTop,  paletteLUT565, paletteLUT32, true,  pixelBuffer565Top);
-                blitFrameToTexture(eyeR, gameTexTopR, paletteLUT565, paletteLUT32, false, pixelBuffer565Bottom);
+                blitFrameToTexture(eyeL.data(), top_w, top_h, gameTexTop,  cachedPalette565, cachedPalette32, wantScreenshot,  pixelBuffer565Top,
+                                   stereoDirty.valid ? &stereoDirty : nullptr);
+                blitFrameToTexture(eyeR.data(), top_w, top_h, gameTexTopR, cachedPalette565, cachedPalette32, false, pixelBuffer565Bottom,
+                                   stereoDirty.valid ? &stereoDirty : nullptr);
             }
+            if (wantScreenshot) capturedThisFrame = true;
+            stereoBuffersValid = true;
+            lastStereoSlider = stereoSlider;
+            lastStereoDepth = depthLevel;
+            lastStereoConv = convPx;
+            lastStereoSwap = swapEyes;
         } else {
 
         if (inGameSingleScreen) {
             // Update top texture and screenshot buffer from the game framebuffer.
+            DirtyRect dirtyTop;
+            if (getDirtyRectForBuffer(topbuffer, top_w, top_h, dirtyTop)) {
+                alignDirtyRectToTiles(dirtyTop, top_w, top_h);
+            }
             #if REAL8_3DS_HAS_PAL8_TLUT
             if (useGpuPalette) {
-                blitFrameToTexture(topbuffer, gameTexTop, paletteLUT565, paletteLUT32, true, indexBufferTop);
+                u8* topIndexSrc = indexBufferTop;
+                if (isLinearVmFramebuffer(topbuffer) && gameTexTop &&
+                    gameTexTop->width == top_w && gameTexTop->height == top_h) {
+                    topIndexSrc = (u8*)topbuffer;
+                }
+                blitFrameToTexture(topbuffer, top_w, top_h, gameTexTop, cachedPalette565, cachedPalette32, wantScreenshot, topIndexSrc,
+                                   dirtyTop.valid ? &dirtyTop : nullptr);
             } else
 #endif
             {
-                blitFrameToTexture(topbuffer, gameTexTop, paletteLUT565, paletteLUT32, true, pixelBuffer565Top);
+                blitFrameToTexture(topbuffer, top_w, top_h, gameTexTop, cachedPalette565, cachedPalette32, wantScreenshot, pixelBuffer565Top,
+                                   dirtyTop.valid ? &dirtyTop : nullptr);
             }
+            if (wantScreenshot) capturedThisFrame = true;
         } else {
             // Normal: top preview + bottom UI
             if (!topPreviewBlank) {
+                DirtyRect dirtyTop;
+                if (getDirtyRectForBuffer(topbuffer, top_w, top_h, dirtyTop)) {
+                    alignDirtyRectToTiles(dirtyTop, top_w, top_h);
+                }
                 #if REAL8_3DS_HAS_PAL8_TLUT
                 if (useGpuPalette) {
-                    blitFrameToTexture(topbuffer, gameTexTop, paletteLUT565, paletteLUT32, false, indexBufferTop);
+                    u8* topIndexSrc = indexBufferTop;
+                    if (isLinearVmFramebuffer(topbuffer) && gameTexTop &&
+                        gameTexTop->width == top_w && gameTexTop->height == top_h) {
+                        topIndexSrc = (u8*)topbuffer;
+                    }
+                    blitFrameToTexture(topbuffer, top_w, top_h, gameTexTop, cachedPalette565, cachedPalette32, false, topIndexSrc,
+                                       dirtyTop.valid ? &dirtyTop : nullptr);
                 } else
 #endif
                 {
-                    blitFrameToTexture(topbuffer, gameTexTop, paletteLUT565, paletteLUT32, false, pixelBuffer565Top);
+                    blitFrameToTexture(topbuffer, top_w, top_h, gameTexTop, cachedPalette565, cachedPalette32, false, pixelBuffer565Top,
+                                       dirtyTop.valid ? &dirtyTop : nullptr);
                 }
             }
             #if REAL8_3DS_HAS_PAL8_TLUT
             if (useGpuPalette) {
-                blitFrameToTexture(bottombuffer, gameTex, paletteLUT565, paletteLUT32, true, indexBufferBottom);
+                u8* bottomIndexSrc = indexBufferBottom;
+                if (isLinearVmFramebuffer(bottombuffer) && gameTex &&
+                    gameTex->width == bottom_w && gameTex->height == bottom_h) {
+                    bottomIndexSrc = (u8*)bottombuffer;
+                }
+                DirtyRect dirtyBottom;
+                if (getDirtyRectForBuffer(bottombuffer, bottom_w, bottom_h, dirtyBottom)) {
+                    alignDirtyRectToTiles(dirtyBottom, bottom_w, bottom_h);
+                }
+                blitFrameToTexture(bottombuffer, bottom_w, bottom_h, gameTex, cachedPalette565, cachedPalette32, wantScreenshot, bottomIndexSrc,
+                                   dirtyBottom.valid ? &dirtyBottom : nullptr);
             } else
 #endif
             {
-                blitFrameToTexture(bottombuffer, gameTex, paletteLUT565, paletteLUT32, true, pixelBuffer565Bottom);
+                DirtyRect dirtyBottom;
+                if (getDirtyRectForBuffer(bottombuffer, bottom_w, bottom_h, dirtyBottom)) {
+                    alignDirtyRectToTiles(dirtyBottom, bottom_w, bottom_h);
+                }
+                blitFrameToTexture(bottombuffer, bottom_w, bottom_h, gameTex, cachedPalette565, cachedPalette32, wantScreenshot, pixelBuffer565Bottom,
+                                   dirtyBottom.valid ? &dirtyBottom : nullptr);
             }
+            if (wantScreenshot) capturedThisFrame = true;
         }
 
         
         }
+
+        lastStereoActive = stereoActive;
 
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 
@@ -1333,7 +1965,19 @@ public:
         bool topStretch = debugVMRef && debugVMRef->stretchScreen;
         bool topHasWallpaper = hasWallpaper && (!debugVMRef || (debugVMRef->showSkin && !topStretch));
         bool bottomHasWallpaper = hasWallpaper && bottomWallpaperVisible;
-        buildGameRect(topStretch, topHasWallpaper, kTopWidth, kTopHeight, tx, ty, tw, th, tscale);
+        const int logicalTopW = topStretch ? kTopWidth : kBottomWidth;
+        if (mode == 1 || mode == 2) {
+            tw = top_w;
+            th = top_h;
+            tx = (logicalTopW - tw) / 2;
+            ty = (kTopHeight - th) / 2;
+            tscale = 1.0f;
+        } else {
+            buildGameRect(topStretch, topHasWallpaper, logicalTopW, kTopHeight, top_w, top_h, tx, ty, tw, th, tscale);
+        }
+        if (logicalTopW != kTopWidth) {
+            tx += (kTopWidth - logicalTopW) / 2;
+        }
 
         auto drawTopScene = [&](C3D_RenderTarget* tgt, const C2D_Image& img) {
             C3D_RenderTargetClear(tgt, C3D_CLEAR_ALL, kClearColor, 0);
@@ -1350,12 +1994,14 @@ public:
             C2D_DrawImageAt(wallpaperImage, dstX, dstY, 0.0f, nullptr, scale, scale);
         }
 
-            float tscaleX = (float)tw / (float)kPicoWidth;
+            const float tscaleX = (float)tw / (float)top_w;
+            const float drawX = (float)tx;
+            const float drawY = (float)ty;
 
         // Use the "2x (minus 16px)" vertical mapping whenever the final height is the full
         // top-screen height (240). This keeps the game full-height even when the skin/wallpaper
         // is enabled, so the wallpaper only shows on the left/right.
-        const bool useTallScale = (th == kTopHeight);
+        const bool useTallScale = (top_w == kPicoWidth && top_h == kPicoHeight && th == kTopHeight);
 
         // Bind the TLUT palette right before drawing the paletted game texture.
 #if REAL8_3DS_HAS_PAL8_TLUT
@@ -1368,16 +2014,16 @@ public:
 
             if (!useTallScale) {
                 // Fallback: uniform scaling
-                float tscaleY = (float)th / (float)kPicoHeight;
-                C2D_DrawImageAt(img, (float)tx, (float)ty, 0.5f, nullptr, tscaleX, tscaleY);
+                float tscaleY = (float)th / (float)top_h;
+                C2D_DrawImageAt(img, drawX, drawY, 0.5f, nullptr, tscaleX, tscaleY);
             } else {
                 // Special vertical mapping:
                 // - First 16 source rows are NOT doubled (1x)
                 // - Remaining rows are doubled (2x) when th==240 -> fits 240 (16 + 112*2 = 240)
 
                 const int kNoDoubleRows = 16;
-                const int srcW = kPicoWidth;   // 128
-                const int srcH = kPicoHeight;  // 128
+                const int srcW = top_w;   // 128
+                const int srcH = top_h;  // 128
                 const int topH = kNoDoubleRows;        // 16
                 const int botH = srcH - topH;          // 112
 
@@ -1401,7 +2047,7 @@ public:
 
                 C2D_Image imgTop = img;
                 imgTop.subtex = &subTop;
-                C2D_DrawImageAt(imgTop, (float)tx, (float)ty, 0.5f, nullptr, tscaleX, 1.0f);
+                C2D_DrawImageAt(imgTop, drawX, drawY, 0.5f, nullptr, tscaleX, 1.0f);
 
                 Tex3DS_SubTexture subBot;
                 subBot.width  = srcW;
@@ -1413,7 +2059,7 @@ public:
 
                 C2D_Image imgBot = img;
                 imgBot.subtex = &subBot;
-                C2D_DrawImageAt(imgBot, (float)tx, (float)ty + dstTopH, 0.5f, nullptr, tscaleX, scaleYBot);
+                C2D_DrawImageAt(imgBot, drawX, drawY + dstTopH, 0.5f, nullptr, tscaleX, scaleYBot);
             }
 
             if (crt_filter) {
@@ -1430,39 +2076,86 @@ public:
             drawTopScene(topTargetR, gameImageTopR);
         }
 
-        C3D_RenderTargetClear(bottomTarget, C3D_CLEAR_ALL, kClearColor, 0);
-        C2D_SceneBegin(bottomTarget);
-        const int bx = (kBottomWidth - kBottomGameSize) / 2;
-        const int by = kBottomPad;
-        const int bw = kBottomGameSize;
-        const int bh = kBottomVisibleHeight;
-        if (bottomHasWallpaper && wallW > 0 && wallH > 0) {
-            float scaleW = (float)kBottomWidth / (float)wallW;
-            float scaleH = (float)kBottomHeight / (float)wallH;
-            float scale = (scaleW > scaleH) ? scaleW : scaleH;
-            float drawW = (float)wallW * scale;
-            float drawH = (float)wallH * scale;
-            float dstX = ((float)kBottomWidth - drawW) * 0.5f;
-            float dstY = ((float)kBottomHeight - drawH) * 0.5f;
-            C2D_DrawImageAt(wallpaperImage, dstX, dstY, 0.0f, nullptr, scale, scale);
+        if (bottomHasWallpaper != lastBottomHasWallpaper) {
+            bottomStaticValid = false;
+            lastBottomHasWallpaper = bottomHasWallpaper;
         }
-        float bscaleX = (float)kBottomGameSize / (float)kPicoWidth;
-        float bscaleY = (float)kBottomGameSize / (float)kPicoHeight;
 
-        // Bind TLUT palette for the bottom game blit.
+        if (inGameSingleScreen) {
+            if (!bottomStaticValid) {
+                C3D_RenderTargetClear(bottomTarget, C3D_CLEAR_ALL, kClearColor, 0);
+                C2D_SceneBegin(bottomTarget);
+                if (bottomHasWallpaper && wallW > 0 && wallH > 0) {
+                    float scaleW = (float)kBottomWidth / (float)wallW;
+                    float scaleH = (float)kBottomHeight / (float)wallH;
+                    float scale = (scaleW > scaleH) ? scaleW : scaleH;
+                    float drawW = (float)wallW * scale;
+                    float drawH = (float)wallH * scale;
+                    float dstX = ((float)kBottomWidth - drawW) * 0.5f;
+                    float dstY = ((float)kBottomHeight - drawH) * 0.5f;
+                    C2D_DrawImageAt(wallpaperImage, dstX, dstY, 0.0f, nullptr, scale, scale);
+                }
+                bottomStaticValid = true;
+            }
+        } else {
+            C3D_RenderTargetClear(bottomTarget, C3D_CLEAR_ALL, kClearColor, 0);
+            C2D_SceneBegin(bottomTarget);
+            int bx = 0;
+            int by = 0;
+            if (bottomHasWallpaper && wallW > 0 && wallH > 0) {
+                float scaleW = (float)kBottomWidth / (float)wallW;
+                float scaleH = (float)kBottomHeight / (float)wallH;
+                float scale = (scaleW > scaleH) ? scaleW : scaleH;
+                float drawW = (float)wallW * scale;
+                float drawH = (float)wallH * scale;
+                float dstX = ((float)kBottomWidth - drawW) * 0.5f;
+                float dstY = ((float)kBottomHeight - drawH) * 0.5f;
+                C2D_DrawImageAt(wallpaperImage, dstX, dstY, 0.0f, nullptr, scale, scale);
+            }
+            float bscaleX = 1.0f;
+            float bscaleY = 1.0f;
+            if (bottom_w == kPicoWidth && bottom_h == kPicoHeight) {
+                bx = (kBottomWidth - kBottomGameSize) / 2;
+                by = kBottomPad;
+                bscaleX = (float)kBottomGameSize / (float)bottom_w;
+                bscaleY = (float)kBottomGameSize / (float)bottom_h;
+            } else if (mode == 1 || mode == 2) {
+                bx = (kBottomWidth - bottom_w) / 2;
+                by = (kBottomHeight - bottom_h) / 2;
+                bscaleX = 1.0f;
+                bscaleY = 1.0f;
+            } else {
+                float scale = std::min((float)kBottomWidth / (float)bottom_w, (float)kBottomHeight / (float)bottom_h);
+                int drawW = (int)((float)bottom_w * scale);
+                int drawH = (int)((float)bottom_h * scale);
+                bx = (kBottomWidth - drawW) / 2;
+                by = (kBottomHeight - drawH) / 2;
+                bscaleX = scale;
+                bscaleY = scale;
+            }
+            // Bind TLUT palette for the bottom game blit.
 #if REAL8_3DS_HAS_PAL8_TLUT
-        if (useGpuPalette && tlutReady) {
-            C3D_TlutBind(0, &gameTlut);
-        }
+            if (useGpuPalette && tlutReady) {
+                C3D_TlutBind(0, &gameTlut);
+            }
 #endif
 
-        if (!inGameSingleScreen) {
             C2D_DrawImageAt(gameImageBottom, (float)bx, (float)by, 0.5f, nullptr, bscaleX, bscaleY);
         }
 
         // Flush once after all targets have been drawn this frame.
         C2D_Flush();
         C3D_FrameEnd(0);
+
+        if (screenshotPending && capturedThisFrame) {
+            if (writeBmp24(pendingScreenshotPath, screenBuffer32.data(), screenW, screenH)) {
+                log("[3DS] Screenshot saved: %s", pendingScreenshotPath.c_str());
+            } else {
+                log("[3DS] Screenshot failed.");
+            }
+            screenshotPending = false;
+            pendingScreenshotPath.clear();
+        }
         
     }
 
@@ -1622,22 +2315,40 @@ public:
             touchPosition touch;
             hidTouchRead(&touch);
 
-            const int bx = (kBottomWidth - kBottomGameSize) / 2;
-            const int by = kBottomPad;
-            const int bw = kBottomGameSize;
-            const int bh = kBottomVisibleHeight;
+            const int gameW = (bottomW > 0) ? bottomW : kPicoWidth;
+            const int gameH = (bottomH > 0) ? bottomH : kPicoHeight;
+            int bx = 0;
+            int by = 0;
+            int bw = 0;
+            int bh = 0;
+            float scaleX = 1.0f;
+            float scaleY = 1.0f;
+            if (gameW == kPicoWidth && gameH == kPicoHeight) {
+                bx = (kBottomWidth - kBottomGameSize) / 2;
+                by = kBottomPad;
+                bw = kBottomGameSize;
+                bh = kBottomVisibleHeight;
+                scaleX = (float)kBottomGameSize / (float)gameW;
+                scaleY = (float)kBottomGameSize / (float)gameH;
+            } else {
+                float scale = std::min((float)kBottomWidth / (float)gameW, (float)kBottomHeight / (float)gameH);
+                bw = (int)((float)gameW * scale);
+                bh = (int)((float)gameH * scale);
+                bx = (kBottomWidth - bw) / 2;
+                by = (kBottomHeight - bh) / 2;
+                scaleX = scale;
+                scaleY = scale;
+            }
 
             if (touch.px >= bx && touch.px < (bx + bw) && touch.py >= by && touch.py < (by + bh)) {
                 float relX = (float)(touch.px - bx);
                 float relY = (float)(touch.py - by);
-                float scaleX = (float)kBottomGameSize / (float)kPicoWidth;
-                float scaleY = (float)kBottomGameSize / (float)kPicoHeight;
                 int mx = (int)(relX / scaleX);
                 int my = (int)(relY / scaleY);
                 if (mx < 0) mx = 0;
-                if (mx > 127) mx = 127;
+                if (mx >= gameW) mx = gameW - 1;
                 if (my < 0) my = 0;
-                if (my > 127) my = 127;
+                if (my >= gameH) my = gameH - 1;
                 lastTouchX = mx;
                 lastTouchY = my;
                 lastTouchBtn = 1;
@@ -1706,9 +2417,45 @@ public:
 
 
     NetworkInfo getNetworkInfo() override {
-        if (!networkReady) return {false, "", "Offline", 0.0f};
+        // NOTE:
+        //  - `networkReady` only tells us that SOC/curl are initialized.
+        //  - The shell needs a "can I show repo games?" answer even when the network stack is toggled off
+        //    (e.g. after exiting a game on 3DS).
+        //
+        // On 3DS we treat `connected` as "Wi‑Fi associated" (ACU_GetWifiStatus != 0). This is the best
+        // low-cost signal we have without performing an external probe.
+        bool connected = false;
+
+    #if REAL8_HAS_ACU
+        u32 wifi = 0;
+
+        // ACU can be used even when SOC/curl are not active. If AC isn't already initialized, init it
+        // temporarily just for this query to avoid leaking handles when `networkReady` is false.
+        bool tempAc = false;
+        if (!acReady) {
+            Result rcInit = acInit();
+            if (R_SUCCEEDED(rcInit)) {
+                tempAc = true;
+            }
+        }
+
+        if (acReady || tempAc) {
+            Result rcWifi = ACU_GetWifiStatus(&wifi);
+            connected = R_SUCCEEDED(rcWifi) && (wifi != 0);
+        }
+
+        if (tempAc) {
+            acExit();
+        }
+    #else
+        connected = false;
+    #endif
+
+        if (!connected) return {false, "", "Offline", 0.0f};
         return {true, "", "Online", 0.0f};
     }
+
+
 
     bool downloadFile(const char *url, const char *savePath) override {
         if (!url || !savePath) return false;
@@ -1852,11 +2599,9 @@ public:
                  t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
                  t->tm_hour, t->tm_min, t->tm_sec);
 
-        if (writeBmp24(buf, screenBuffer32)) {
-            log("[3DS] Screenshot saved: %s", buf);
-        } else {
-            log("[3DS] Screenshot failed.");
-        }
+        pendingScreenshotPath = buf;
+        screenshotPending = true;
+        log("[3DS] Screenshot queued: %s", buf);
     }
 
     void drawWallpaper(const uint8_t *pixels, int w, int h) override {
@@ -1950,6 +2695,7 @@ public:
         wallH = 0;
         wallTexW = 0;
         wallTexH = 0;
+        bottomStaticValid = false;
     }
     void updateOverlay() override {}
 };
