@@ -43,7 +43,7 @@ A PICO-8 explorer + emulator front-end for multiple platforms.
 
 | Feature | Description |
 |---------|-------------|
-| **Dynamic framebuffer modes** | Extended game resolutions: (GBA) 240x160 / (3DS) 320x240 / (SWITCH) 640x360 * 2 (Full screen on each platform) |
+| **Framebuffer modes** | Extended game resolutions: (GBA) 240x160 / (3DS) 320x240 / (SWITCH) 640x360 * 2 (Full screen on each platform) |
 | **Stereo depth pipeline** | Stereo on 3DS or RED/CYAN on rest platforms - per-sprite depth buckets |
 | **Motion sensors** | Accelerometer / Gyroscope readings for 3DS and Switch |
 
