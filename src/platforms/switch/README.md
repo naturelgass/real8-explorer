@@ -12,6 +12,7 @@ REAL-8 Explorer for Nintendo Switch is the libnx host for the Real8 VM + Shell. 
 - [SD card layout](#sd-card-layout)
 - [Build requirements](#build-requirements)
 - [Toolchain setup (devkitPro)](#toolchain-setup-devkitpro)
+- [Build steps (Makefile)](#build-steps-makefile)
 - [Build steps (CMake)](#build-steps-cmake)
 - [Usage](#usage)
 - [Screenshots](#screenshots)
@@ -116,16 +117,88 @@ pacman -Syu
 export DEVKITPRO=/c/devkitPro
 ```
 
+## Build steps (Makefile)
+
+From the Switch platform folder:
+
+```sh
+cd /d/Workspace/REAL8-Explorer/src/platforms/switch
+make
+```
+
+The output `Real8Switch.nro` is generated in the current folder.
+
 ## Build steps (CMake)
 
 From the repository root:
 
 ```sh
-cmake -S src/platforms/switch -B build/switch -G "Unix Makefiles" -DCMAKE_TOOLCHAIN_FILE=/c/devkitPro/cmake/Switch.cmake
-cmake --build build/switch
+cmake -S /d/Workspace/REAL8-Explorer/src/platforms/switch \
+      -B /d/Workspace/REAL8-Explorer/src/platforms/switch/build \
+      -G "Unix Makefiles" \
+      -DCMAKE_TOOLCHAIN_FILE=/c/devkitPro/cmake/Switch.cmake
+cmake --build /d/Workspace/REAL8-Explorer/src/platforms/switch/build
 ```
 
 The output `Real8Switch.nro` is generated in `build/switch`.
+
+## Standalone cart build (no Shell)
+
+Pass a cart path at configure time to embed it in ROMFS and boot straight into the game:
+
+```sh
+cd /d/Workspace/REAL8-Explorer/src/platforms/switch
+make game.p8.png
+```
+
+Or with CMake:
+
+```sh
+cmake -S /d/Workspace/REAL8-Explorer/src/platforms/switch \
+      -B /d/Workspace/REAL8-Explorer/src/platforms/switch/build \
+      -G "Unix Makefiles" \
+      -DCMAKE_TOOLCHAIN_FILE=/c/devkitPro/cmake/Switch.cmake \
+      -DREAL8_SWITCH_STANDALONE_CART=game.p8.png
+cmake --build /d/Workspace/REAL8-Explorer/src/platforms/switch/build
+```
+
+The output NRO is named after the cart (for example, `game.nro`) and launches directly into the game. Omit `REAL8_SWITCH_STANDALONE_CART` to build the normal Shell-based app.
+
+## Tools GUI
+
+Build the Windows GUI for generating standalone carts:
+
+```sh
+cd /d/Workspace/REAL8-Explorer/src/platforms/switch
+make tools
+```
+
+`make tools` builds a template NRO and embeds it into the GUI executable. The GUI uses that embedded
+template when generating standalone games, so it does not need devkitPro or CMake at runtime.
+
+If you prefer to build the tools with CMake, make sure a `Real8Switch_template.nro` exists in this
+folder (run `make template` once to generate it) before configuring the tools build:
+
+```sh
+cmake -S /d/Workspace/REAL8-Explorer/src/platforms/switch \
+      -B /d/Workspace/REAL8-Explorer/src/platforms/switch/build \
+      -G "Unix Makefiles" \
+      -DCMAKE_TOOLCHAIN_FILE=/c/devkitPro/cmake/Switch.cmake
+cmake --build /d/Workspace/REAL8-Explorer/src/platforms/switch/build --target tools
+```
+
+The GUI executable is generated under `build/tools`.
+
+If CMake cannot find a host C++ compiler, point it at the devkitPro MSYS2 tools:
+
+```sh
+export REAL8_TOOLS_CMAKE_ARGS="-DCMAKE_CXX_COMPILER=$DEVKITPRO/msys2/mingw64/bin/g++.exe -DCMAKE_MAKE_PROGRAM=$DEVKITPRO/msys2/mingw64/bin/mingw32-make.exe"
+cmake -S /d/Workspace/REAL8-Explorer/src/platforms/switch \
+      -B /d/Workspace/REAL8-Explorer/src/platforms/switch/build \
+      -G "Unix Makefiles" \
+      -DCMAKE_TOOLCHAIN_FILE=/c/devkitPro/cmake/Switch.cmake
+cmake --build /d/Workspace/REAL8-Explorer/src/platforms/switch/build --target tools
+```
 
 ## Usage
 

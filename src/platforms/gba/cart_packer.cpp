@@ -12,7 +12,7 @@
 
 class PackerHost : public IReal8Host {
 public:
-    const char* getPlatform() override { return "Packer"; }
+    const char* getPlatform() const override { return "Packer"; }
 
     void setNetworkActive(bool active) override { (void)active; }
     void setWifiCredentials(const char* ssid, const char* pass) override {

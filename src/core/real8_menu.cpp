@@ -64,6 +64,16 @@ bool isRepoSupportedPlatform(const char* platform)
         (std::strcmp(platform, "3DS") == 0);
 }
 
+bool isVblankMenuSupported(const Real8VM* vm)
+{
+    if (!vm) return false;
+    const IReal8Host* host = vm->getHost();
+    if (!host) return false;
+    const char* platform = host->getPlatform();
+    return (std::strcmp(platform, "Switch") == 0) ||
+        (std::strcmp(platform, "3DS") == 0);
+}
+
 struct ScrollWindow {
     int firstVisible = 0;
     int visibleItems = 0;
@@ -137,6 +147,9 @@ void BuildInGameMenu(Real8VM* vm, std::vector<std::string>& inGameOptions, int& 
     inGameOptions.push_back("SFX");
 
     // [CHANGED] Keep the label simple; we handle the "ON/OFF" visually in render()
+    if (isVblankMenuSupported(vm)) {
+        inGameOptions.push_back("SKIP VBLANK");
+    }
     inGameOptions.push_back("SHOW FPS");
 
     // Stereo/anaglyph rendering toggle (moved here from the Settings menu).
@@ -304,6 +317,13 @@ InGameResult UpdateInGameMenu(Real8VM* vm,
             int savedSel = inGameMenuSelection;
             BuildInGameMenu(vm, inGameOptions, inGameMenuSelection);
             inGameMenuSelection = savedSel;
+        }
+        else if (action == "SKIP VBLANK") {
+            if (host) {
+                const bool fastForwardEnabled = host->isFastForwardHeld();
+                host->setFastForwardHeld(!fastForwardEnabled);
+                Real8Tools::SaveSettings(vm, host);
+            }
         }
         else if (action == "STEREO SCR") {
             const bool enabled = isStereoMenuEnabled(vm);
@@ -509,6 +529,12 @@ void RenderInGameMenu(Real8VM* vm,
         }
         else if (inGameOptions[idx] == "SFX") {
             drawVolume(vm->volume_sfx, oy);
+        }
+        else if (inGameOptions[idx] == "SKIP VBLANK") {
+            const bool enabled = host ? host->isFastForwardHeld() : false;
+            const char* status = enabled ? "ON" : "OFF";
+            int statusCol = enabled ? 11 : 8;
+            drawRightStatus(status, oy, statusCol);
         }
         // SHOW FPS status (visual ON/OFF)
         else if (inGameOptions[idx] == "SHOW FPS") {

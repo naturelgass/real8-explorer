@@ -496,6 +496,7 @@ private:
     uint8_t lastTouchBtn = 0;
     bool sensorsActive = false;
     u64 lastSensorUs = 0;
+    bool fastForwardOverride = false;
 
     std::string rootPath = "sdmc:/real8";
 
@@ -1594,7 +1595,7 @@ if (gameSubtexTopR) {
         shutdownGfx();
     }
 
-    const char *getPlatform() override { return "3DS"; }
+    const char *getPlatform() const override { return "3DS"; }
     std::string getClipboardText() override { return ""; }
 
     void setTopPreviewBlankHint(bool blank) override {
@@ -2018,23 +2019,28 @@ if (gameSubtexTopR) {
                 C2D_DrawImageAt(img, drawX, drawY, 0.5f, nullptr, tscaleX, tscaleY);
             } else {
                 // Special vertical mapping:
-                // - First 16 source rows are NOT doubled (1x)
-                // - Remaining rows are doubled (2x) when th==240 -> fits 240 (16 + 112*2 = 240)
+                // - First 8 source rows are NOT doubled (1x)
+                // - Middle rows are doubled (2x)
+                // - Last 8 source rows are NOT doubled (1x)
+                // Fits th==240: 8 + (112*2) + 8 = 240
 
-                const int kNoDoubleRows = 16;
+                const int kNoDoubleRows = 8;
                 const int srcW = top_w;   // 128
                 const int srcH = top_h;  // 128
-                const int topH = kNoDoubleRows;        // 16
-                const int botH = srcH - topH;          // 112
+                const int topH = kNoDoubleRows;         // 8
+                const int botH = kNoDoubleRows;         // 8
+                const int midH = srcH - topH - botH;    // 112
 
-                const float dstTopH = (float)topH;     // 16 pixels tall
-                float dstBotH = (float)th - dstTopH;   // 224 when th==240
-                if (dstBotH < 1.0f) dstBotH = 1.0f;
+                const float dstTopH = (float)topH;      // 8 pixels tall
+                const float dstBotH = (float)botH;      // 8 pixels tall
+                float dstMidH = (float)th - dstTopH - dstBotH; // 224 when th==240
+                if (dstMidH < 1.0f) dstMidH = 1.0f;
 
-                const float scaleYBot = dstBotH / (float)botH;
+                const float scaleYMid = dstMidH / (float)midH;
 
                 const float vTopFull = 1.0f;
-                const float vSplit   = 1.0f - ((float)topH / (float)srcH); // 0.875
+                const float vTopSplit = 1.0f - ((float)topH / (float)srcH); // 0.9375
+                const float vBotSplit = (float)botH / (float)srcH;          // 0.0625
                 const float vBotFull = 0.0f;
 
                 Tex3DS_SubTexture subTop;
@@ -2043,23 +2049,35 @@ if (gameSubtexTopR) {
                 subTop.left   = 0.0f;
                 subTop.right  = 1.0f;
                 subTop.top    = vTopFull;
-                subTop.bottom = vSplit;
+                subTop.bottom = vTopSplit;
 
                 C2D_Image imgTop = img;
                 imgTop.subtex = &subTop;
                 C2D_DrawImageAt(imgTop, drawX, drawY, 0.5f, nullptr, tscaleX, 1.0f);
+
+                Tex3DS_SubTexture subMid;
+                subMid.width  = srcW;
+                subMid.height = midH;
+                subMid.left   = 0.0f;
+                subMid.right  = 1.0f;
+                subMid.top    = vTopSplit;
+                subMid.bottom = vBotSplit;
+
+                C2D_Image imgMid = img;
+                imgMid.subtex = &subMid;
+                C2D_DrawImageAt(imgMid, drawX, drawY + dstTopH, 0.5f, nullptr, tscaleX, scaleYMid);
 
                 Tex3DS_SubTexture subBot;
                 subBot.width  = srcW;
                 subBot.height = botH;
                 subBot.left   = 0.0f;
                 subBot.right  = 1.0f;
-                subBot.top    = vSplit;
+                subBot.top    = vBotSplit;
                 subBot.bottom = vBotFull;
 
                 C2D_Image imgBot = img;
                 imgBot.subtex = &subBot;
-                C2D_DrawImageAt(imgBot, drawX, drawY + dstTopH, 0.5f, nullptr, tscaleX, scaleYBot);
+                C2D_DrawImageAt(imgBot, drawX, drawY + dstTopH + dstMidH, 0.5f, nullptr, tscaleX, 1.0f);
             }
 
             if (crt_filter) {
@@ -2193,7 +2211,11 @@ if (gameSubtexTopR) {
     }
 
     bool isFastForwardHeld() override {
-        return (m_keysHeld & KEY_R) != 0;
+        return fastForwardOverride || ((m_keysHeld & KEY_R) != 0);
+    }
+
+    void setFastForwardHeld(bool held) override {
+        fastForwardOverride = held;
     }
 
     std::vector<uint8_t> loadFile(const char *path) override {

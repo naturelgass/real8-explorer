@@ -120,6 +120,7 @@ private:
     bool optShowLuaErrors = true; 
     bool optPauseLogs = false; 
     bool optClearOnStep = false; 
+    bool fastForwardOverride = false;
 
     // Internal buffer for the Repo Dialog
     static char* s_repoBuffer;
@@ -1181,7 +1182,7 @@ public:
     bool crt_filter = false;
     bool interpolation = false;
 
-    const char *getPlatform() override { return "Windows"; }
+    const char *getPlatform() const override { return "Windows"; }
 
     std::string getClipboardText() override {
         if (SDL_HasClipboardText()) {
@@ -1921,6 +1922,13 @@ public:
 
     unsigned long getMillis() override { return SDL_GetTicks(); }
     void delayMs(int ms) override { SDL_Delay(ms); }
+    bool isFastForwardHeld() override { return fastForwardOverride; }
+    void setFastForwardHeld(bool held) override {
+        fastForwardOverride = held;
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+        if (renderer) SDL_RenderSetVSync(renderer, held ? SDL_FALSE : SDL_TRUE);
+#endif
+    }
 
     std::vector<uint8_t> loadFile(const char *path) override
     {

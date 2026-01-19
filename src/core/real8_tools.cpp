@@ -137,6 +137,7 @@ void Real8Tools::LoadSettings(Real8VM* vm, IReal8Host* host)
     // Libretro handles settings via Core Options (retro_variables), not files.
     if (strcmp(host->getPlatform(), "Libretro") == 0) return;
     const bool is3ds = (strcmp(host->getPlatform(), "3DS") == 0);
+    const bool isSwitch = (strcmp(host->getPlatform(), "Switch") == 0);
 
     if (!vm || !host) return;
     std::vector<uint8_t> data = host->loadFile("/config.dat");
@@ -147,6 +148,11 @@ void Real8Tools::LoadSettings(Real8VM* vm, IReal8Host* host)
 
         if (is3ds) {
             vm->showSkin = (REAL8_TOP_NOBACK == 0);
+            vm->crt_filter = (REAL8_CRTFILTER != 0);
+            vm->interpolation = (REAL8_INTERPOL8 != 0);
+            vm->stretchScreen = (REAL8_STRETCHED != 0);
+        } else if (isSwitch) {
+            vm->showSkin = true;
             vm->crt_filter = (REAL8_CRTFILTER != 0);
             vm->interpolation = (REAL8_INTERPOL8 != 0);
             vm->stretchScreen = (REAL8_STRETCHED != 0);
@@ -181,6 +187,10 @@ void Real8Tools::LoadSettings(Real8VM* vm, IReal8Host* host)
         uint8_t flags2 = data[offset];
         vm->showRepoGames = (flags2 & (1 << 0));
         vm->stretchScreen = (flags2 & (1 << 2));
+        if (is3ds || isSwitch) {
+            const bool skipVblank = (flags2 & (1 << 3)) != 0;
+            host->setFastForwardHeld(skipVblank);
+        }
         offset++;
     }
 
@@ -219,6 +229,7 @@ void Real8Tools::SaveSettings(Real8VM* vm, IReal8Host* host)
     if (!vm || !host) return;
 
     const bool is3ds = (strcmp(host->getPlatform(), "3DS") == 0);
+    const bool isSwitch = (strcmp(host->getPlatform(), "Switch") == 0);
 
     uint8_t flags = 0;
     if (vm->showRepoSnap) flags |= (1 << 0);
@@ -240,14 +251,24 @@ void Real8Tools::SaveSettings(Real8VM* vm, IReal8Host* host)
     uint8_t flags2 = 0;
     if (vm->showRepoGames) flags2 |= (1 << 0);
     if (vm->stretchScreen) flags2 |= (1 << 2);
+    uint8_t existingFlags2 = 0;
     if (is3ds) {
-        uint8_t existingFlags2 = 0;
         std::vector<uint8_t> existing = host->loadFile("/config.dat");
         if (readConfigFlags2(existing, existingFlags2)) {
             if (existingFlags2 & (1 << 1)) flags2 |= (1 << 1);
         } else if (REAL8_BOTTOM_NOBACK != 0) {
             flags2 |= (1 << 1);
         }
+    } else {
+        std::vector<uint8_t> existing = host->loadFile("/config.dat");
+        if (readConfigFlags2(existing, existingFlags2)) {
+            if (existingFlags2 & (1 << 1)) flags2 |= (1 << 1);
+        }
+    }
+    if (is3ds || isSwitch) {
+        if (host->isFastForwardHeld()) flags2 |= (1 << 3);
+    } else if (existingFlags2 & (1 << 3)) {
+        flags2 |= (1 << 3);
     }
     buffer.push_back(flags2);
 

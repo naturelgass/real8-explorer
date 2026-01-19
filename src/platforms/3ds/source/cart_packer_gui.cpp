@@ -38,6 +38,7 @@ namespace {
     const int kIdToggleInterpol8 = 1014;
     const int kIdToggleTopNoBack = 1015;
     const int kIdToggleBottomNoBack = 1016;
+    const int kIdToggleSkipVblank = 1017;
 
     const UINT kIdSpinnerTimer = 2001;
     const UINT kMsgBuildDone = WM_APP + 1;
@@ -58,6 +59,7 @@ namespace {
     HWND g_toggleInterpol8 = nullptr;
     HWND g_toggleTopNoBack = nullptr;
     HWND g_toggleBottomNoBack = nullptr;
+    HWND g_toggleSkipVblank = nullptr;
     HWND g_bannerImage = nullptr;
     HWND g_browseIconButton = nullptr;
     HWND g_browseBannerButton = nullptr;
@@ -88,9 +90,10 @@ namespace {
         int interpol8;
         int topNoBack;
         int bottomNoBack;
+        int skipVblank;
     };
 
-    const StartupFlags kDefaultStartupFlags = { 0, 0, 0, 0, 0 };
+    const StartupFlags kDefaultStartupFlags = { 0, 0, 0, 0, 0, 0 };
 
     struct BuildParams {
         HWND hwnd;
@@ -112,7 +115,7 @@ namespace {
 
     class PackerHost : public IReal8Host {
     public:
-        const char* getPlatform() override { return "PicoTo3DS"; }
+        const char* getPlatform() const override { return "PicoTo3DS"; }
 
         void setNetworkActive(bool active) override { (void)active; }
         void setWifiCredentials(const char* ssid, const char* pass) override { (void)ssid; (void)pass; }
@@ -1107,6 +1110,7 @@ SystemControlInfo:
         setCheckboxState(g_toggleInterpol8, flags.interpol8);
         setCheckboxState(g_toggleTopNoBack, flags.topNoBack);
         setCheckboxState(g_toggleBottomNoBack, flags.bottomNoBack);
+        setCheckboxState(g_toggleSkipVblank, flags.skipVblank);
     }
 
     static StartupFlags readStartupFlagsFromUi() {
@@ -1116,6 +1120,7 @@ SystemControlInfo:
         flags.interpol8 = getCheckboxState(g_toggleInterpol8);
         flags.topNoBack = getCheckboxState(g_toggleTopNoBack);
         flags.bottomNoBack = getCheckboxState(g_toggleBottomNoBack);
+        flags.skipVblank = getCheckboxState(g_toggleSkipVblank);
         return flags;
     }
 
@@ -1124,7 +1129,8 @@ SystemControlInfo:
                flags.crtFilter == 0 &&
                flags.interpol8 == 0 &&
                flags.topNoBack == 0 &&
-               flags.bottomNoBack == 0;
+               flags.bottomNoBack == 0 &&
+               flags.skipVblank == kDefaultStartupFlags.skipVblank;
     }
 
     static void appendU32LE(std::vector<uint8_t>& out, uint32_t v) {
@@ -1147,6 +1153,7 @@ SystemControlInfo:
         flags2 |= (1 << 0);
         if (flags.bottomNoBack) flags2 |= (1 << 1);
         if (flags.stretched) flags2 |= (1 << 2);
+        if (flags.skipVblank) flags2 |= (1 << 3);
 
         data.push_back(flags1);
         appendU32LE(data, 0);
@@ -2487,6 +2494,11 @@ SystemControlInfo:
                                                     toggleXMid, toggleYStart + toggleRowHeight + toggleRowGap,
                                                     toggleColumnWidth, toggleRowHeight,
                                                     hwnd, (HMENU)kIdToggleBottomNoBack, GetModuleHandleA(nullptr), nullptr);
+            g_toggleSkipVblank = CreateWindowExA(0, "BUTTON", "Skip VBlank",
+                                                    WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                                    toggleXRight, toggleYStart + toggleRowHeight + toggleRowGap,
+                                                    toggleColumnWidth, toggleRowHeight,
+                                                    hwnd, (HMENU)kIdToggleSkipVblank, GetModuleHandleA(nullptr), nullptr);
 
             applyStartupFlags(kDefaultStartupFlags);
 

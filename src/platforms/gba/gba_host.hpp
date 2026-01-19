@@ -11,7 +11,7 @@ public:
     GbaHost();
     ~GbaHost() override = default;
 
-    const char* getPlatform() override { return "GBA"; }
+    const char* getPlatform() const override { return "GBA"; }
 
     void waitForVBlank();
 

@@ -101,7 +101,7 @@ namespace {
 
     class PackerHost : public IReal8Host {
     public:
-        const char* getPlatform() override { return "Pico2GBA"; }
+        const char* getPlatform() const override { return "Pico2GBA"; }
 
         void setNetworkActive(bool active) override { (void)active; }
         void setWifiCredentials(const char* ssid, const char* pass) override { (void)ssid; (void)pass; }

@@ -28,7 +28,7 @@ namespace z8 {
         virtual ~LibretroHost() {}
 
         // Identify as Libretro so Real8VM takes the optimized path
-        const char *getPlatform() override { return "Libretro"; }
+        const char *getPlatform() const override { return "Libretro"; }
 
         // --- Context Management (New) ---
         // Called by retro_load_game to set the working directory

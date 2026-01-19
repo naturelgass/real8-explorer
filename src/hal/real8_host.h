@@ -33,7 +33,7 @@ public:
 
     virtual std::string getClipboardText() { return ""; }
     
-    virtual const char *getPlatform() { return "Generic"; }
+    virtual const char *getPlatform() const { return "Generic"; }
 
     virtual void setConsoleState(bool active) {}
     virtual bool isConsoleOpen() { return false; }
@@ -118,6 +118,7 @@ virtual bool flipScreenRGB565Dirty(const uint16_t* rgb565, int w, int h,
     virtual void log(const char *fmt, ...) = 0;
     virtual void delayMs(int ms) = 0;
     virtual bool isFastForwardHeld() { return false; }
+    virtual void setFastForwardHeld(bool held) { (void)held; }
 
     // --- File System ---
     virtual std::vector<uint8_t> loadFile(const char *path) = 0;

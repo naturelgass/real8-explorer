@@ -50,6 +50,7 @@ private:
     bool sensorActive = false;
     bool sensorAvailable = false;
     u64 lastSensorUs = 0;
+    bool fastForwardOverride = false;
 
     // Helper for scaling logic
     void calculateGameRect(int winW, int winH, SDL_Rect *outRect, float *outScale)
@@ -215,7 +216,13 @@ private:
 
         for (const auto& e : bundled) {
             fs::path dst = cfgDir / e.name;
-            if (fs::exists(dst)) continue;
+            bool forceCopy = false;
+#ifdef REAL8_SWITCH_STANDALONE
+            if (strcmp(e.name, "wallpaper.png") == 0) {
+                forceCopy = true;
+            }
+#endif
+            if (!forceCopy && fs::exists(dst)) continue;
 
             if (!romfsMounted) {
                 log("[Switch] ROMFS not mounted; cannot seed %s", e.name);
@@ -235,7 +242,7 @@ public:
     bool crt_filter = false;
     bool interpolation = false;
 
-    const char *getPlatform() override { return "Switch"; }
+    const char *getPlatform() const override { return "Switch"; }
     
     std::string getClipboardText() override { return ""; } // No system clipboard on Switch
 
@@ -626,6 +633,13 @@ public:
     void delayMs(int ms) override {
         if (ms <= 0) return;
         svcSleepThread((s64)ms * 1000000LL);
+    }
+    bool isFastForwardHeld() override { return fastForwardOverride; }
+    void setFastForwardHeld(bool held) override {
+        fastForwardOverride = held;
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+        if (renderer) SDL_RenderSetVSync(renderer, held ? SDL_FALSE : SDL_TRUE);
+#endif
     }
     
     void log(const char *fmt, ...) override {

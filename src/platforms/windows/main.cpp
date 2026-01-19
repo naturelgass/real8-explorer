@@ -595,7 +595,7 @@ int main(int argc, char *argv[])
             // But generally, shell->update() calls vm->show_frame().
             
             // Minor optimization: Sleep if we processed frames fast
-            if (accumulator < FIXED_STEP) {
+            if (accumulator < FIXED_STEP && !host->isFastForwardHeld()) {
                 SDL_Delay(1);
             }
         }

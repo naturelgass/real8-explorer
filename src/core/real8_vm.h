@@ -126,6 +126,7 @@ public:
   // --------------------------------------------------------------------------
   lua_State* getLuaState() { return L; }
   IReal8Host* getHost() { return host; }
+  const IReal8Host* getHost() const { return host; }
   bool skipDirtyRect = false;
   bool isLibretroPlatform = false;
   bool isGbaPlatform = false;
