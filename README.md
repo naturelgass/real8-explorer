@@ -124,10 +124,10 @@ See [GBA README](src/platforms/gba/README.md) for build steps, memory layout, an
   </tr>
 </table>
 
-## Toolchains (quick)
+## Toolchains
 
 ### Windows (SDL)
-- Toolchain: MSVC or MinGW
+- Toolchain: MinGW
 - Dependencies: SDL2
 
 ### Nintendo Switch (libnx)
