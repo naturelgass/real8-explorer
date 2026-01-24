@@ -179,27 +179,6 @@ template when generating standalone games, so it does not need devkitPro or CMak
 If you prefer to build the tools with CMake, make sure a `Real8Switch_template.nro` exists in this
 folder (run `make template` once to generate it) before configuring the tools build:
 
-```sh
-cmake -S /d/Workspace/REAL8-Explorer/src/platforms/switch \
-      -B /d/Workspace/REAL8-Explorer/src/platforms/switch/build \
-      -G "Unix Makefiles" \
-      -DCMAKE_TOOLCHAIN_FILE=/c/devkitPro/cmake/Switch.cmake
-cmake --build /d/Workspace/REAL8-Explorer/src/platforms/switch/build --target tools
-```
-
-The GUI executable is generated under `build/tools`.
-
-If CMake cannot find a host C++ compiler, point it at the devkitPro MSYS2 tools:
-
-```sh
-export REAL8_TOOLS_CMAKE_ARGS="-DCMAKE_CXX_COMPILER=$DEVKITPRO/msys2/mingw64/bin/g++.exe -DCMAKE_MAKE_PROGRAM=$DEVKITPRO/msys2/mingw64/bin/mingw32-make.exe"
-cmake -S /d/Workspace/REAL8-Explorer/src/platforms/switch \
-      -B /d/Workspace/REAL8-Explorer/src/platforms/switch/build \
-      -G "Unix Makefiles" \
-      -DCMAKE_TOOLCHAIN_FILE=/c/devkitPro/cmake/Switch.cmake
-cmake --build /d/Workspace/REAL8-Explorer/src/platforms/switch/build --target tools
-```
-
 ## Usage
 
 ### Load local carts

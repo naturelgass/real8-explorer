@@ -124,7 +124,7 @@ make template CART_TEMPLATE_CAPACITY=524288
 # (Optional) To increase the cart slot size
 ```
 
-Place REAL8_GBA_template.gba next to pico2gba.exe (or browse to it in Step 1), select a .p8.png, hit Generate → it outputs a .gba.
+Place REAL8_GBA_template.gba next to Pico2GBA.exe (or browse to it in Step 1), select a .p8.png, hit Generate → it outputs a .gba.
 
 
 ```sh
@@ -132,14 +132,10 @@ cd src/platforms/gba
 make tools
 ```
 
-2. Launch `build/pico2gba.exe`.
-3. Fill in the app steps:
-   - Step 1: select `mingw32-make.exe` (from MSYS2/MinGW).
-   - Step 2: select the `devkitPro` folder (the one that contains `devkitARM`).
-   - Step 3: select the GBA Makefile folder (`src/platforms/gba`).
-   - Step 4: select your `.p8.png` cart.
-4. Optional: adjust feature toggles (Audio, Fast Lua, Skip VBlank, Profile GBA, Baseline JIT, JIT in IWRAM). Defaults are pulled from the Makefile.
-5. Click **Generate**.
+1. Launch `build/Pico2GBA.exe`.
+2. Select PICO-8 game file and optional Skin/Background.
+3. Optional: adjust feature toggles (Audio, Fast Lua, Skip VBlank, Profile GBA).
+4. Click **Generate**.
 
 Outputs:
 - The ROM is written next to your cart as `cartname.gba`.
@@ -147,5 +143,5 @@ Outputs:
 - Last-used paths are cached in `build/pico2gba.ini`.
 
 ### Pico2GBA GUI Dialog
-![REAL-8 - Pico2GBA](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8-Pico2GBA-GUI.png)
+![REAL-8 - Pico2GBA](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Pico2GBA.png)
 
