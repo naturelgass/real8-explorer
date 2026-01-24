@@ -31,8 +31,6 @@ namespace {
 #endif
 
     EWRAM_DATA alignas(4) uint8_t gba_ram[0x8000];
-    REAL8_GBA_FB_SECTION alignas(4) uint8_t gba_fb[128][128];
-
     REAL8_GBA_STATE_SECTION static GameData g_game;
     REAL8_GBA_STATE_SECTION static GbaHost g_host;
     EWRAM_DATA static Real8VM g_vm(&g_host);
@@ -442,8 +440,6 @@ int main(void) {
     host.renderDebugOverlay();
 
     vm.ram = gba_ram;
-    vm.fb = &gba_fb[0][0];
-    vm.fb_is_linear = true;
     vm.setRomView(nullptr, 0, true);
 
     host.log("[BOOT] initMemory");

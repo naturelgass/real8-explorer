@@ -436,6 +436,20 @@ static int l_stat(lua_State *L)
     case 141: // Raw requested mode byte (debug)
         lua_pushinteger(L, (vm && vm->ram) ? vm->ram[0x5FE1] : 0);
         return 1;
+#if defined(__GBA__)
+    case 142:
+    case 143:
+    case 144:
+    case 145:
+    case 146:
+    case 147:
+        lua_pushnumber(L, 0);
+        return 1;
+    case 148:
+    case 149:
+        lua_pushinteger(L, 0);
+        return 1;
+#else
     case 142: // Accel X (Q16.16)
         lua_pushnumber(L, vm ? lua_Number::frombits(vm->motion.accel_x) : lua_Number(0));
         return 1;
@@ -460,6 +474,7 @@ static int l_stat(lua_State *L)
     case 149: // dt_us since last sample
         lua_pushinteger(L, vm ? (int)vm->motion.dt_us : 0);
         return 1;
+#endif
     case 150: // Framebuffer width
         lua_pushinteger(L, vm ? vm->fb_w : 0);
         return 1;

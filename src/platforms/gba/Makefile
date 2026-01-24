@@ -123,7 +123,7 @@ HOSTCC ?= g++
 HOSTCXXFLAGS := -O2 -std=gnu++17 -I. -I../../core -I../../hal -I../../../lib/lodePNG
 CART_PACKER := $(BUILD)/cart_packer$(EXEEXT)
 CART_PACKER_SRCS := cart_packer.cpp ../../core/real8_cart.cpp ../../core/real8_compression.cpp ../../../lib/lodePNG/lodePNG.cpp
-CART_PACKER_GUI := $(BUILD)/pico2gba$(EXEEXT)
+CART_PACKER_GUI := $(BUILD)/Pico2GBA$(EXEEXT)
 CART_PACKER_GUI_SRCS := cart_packer_gui.cpp ../../core/real8_cart.cpp ../../core/real8_compression.cpp ../../../lib/lodePNG/lodePNG.cpp
 
 # Choose which .rc file to feed into windres for pico2gba.exe
@@ -186,7 +186,7 @@ CFLAGS_BASE += -DREAL8_GBA_SKIP_VBLANK=$(REAL8_GBA_SKIP_VBLANK)
 REAL8_PROFILE_GBA ?= 0
 CFLAGS_BASE += -DREAL8_PROFILE_GBA=$(REAL8_PROFILE_GBA)
 
-LUA_GBA_BASELINE_JIT ?= 1
+LUA_GBA_BASELINE_JIT ?= 0
 ifeq ($(LUA_GBA_BASELINE_JIT),1)
   CFLAGS_BASE += -DLUA_GBA_BASELINE_JIT
   CFLAGS_BASE += -DLUA_GBA_JIT_MAX_OPS=8192

@@ -60,6 +60,9 @@ public:
     void clearWallpaper() override;
     void updateOverlay() override;
 
+    void* allocLinearFramebuffer(size_t bytes, size_t align) override;
+    void freeLinearFramebuffer(void* ptr) override;
+
     void renderDebugOverlay();
     void showJitFailureMessage(const char* text, int ms);
 

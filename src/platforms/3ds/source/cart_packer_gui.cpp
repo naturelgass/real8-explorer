@@ -2632,10 +2632,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
         return 1;
     }
 
+    std::string title = std::string("PicoTo3DS v") + " v" + IReal8Host::REAL8_VERSION + " by @natureglass";
     HWND hwnd = CreateWindowExA(
         0,
         className,
-        "PicoTo3DS v1.0 by @natureglass",
+        title.c_str(),
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT,
         CW_USEDEFAULT,

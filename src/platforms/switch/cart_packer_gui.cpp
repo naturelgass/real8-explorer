@@ -1664,10 +1664,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int cmdShow) {
         return 1;
     }
 
+    std::string title = std::string("Pico2Switch v") + " v" + IReal8Host::REAL8_VERSION + " by @natureglass";
     HWND hwnd = CreateWindowExA(
         WS_EX_CONTROLPARENT,
         className,
-        "Pico2Switch v1.0 by @natureglass",
+        title.c_str(),
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT,
         CW_USEDEFAULT,

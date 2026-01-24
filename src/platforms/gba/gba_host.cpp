@@ -286,6 +286,9 @@ namespace {
 #define IWRAM_CODE __attribute__((section(".iwram"), long_call))
 #define EWRAM_DATA __attribute__((section(".ewram")))
 
+    constexpr size_t kGbaLinearFbBytes = 240u * 160u;
+    static EWRAM_DATA alignas(0x80) uint8_t g_linearFramebuffer[kGbaLinearFbBytes];
+
 #ifndef REAL8_GBA_IWRAM_INPUT
 #define REAL8_GBA_IWRAM_INPUT 1
 #endif
@@ -1198,6 +1201,21 @@ void GbaHost::clearWallpaper() {
 }
 
 void GbaHost::updateOverlay() {
+}
+
+void* GbaHost::allocLinearFramebuffer(size_t bytes, size_t align) {
+    if (bytes == 0 || bytes > kGbaLinearFbBytes) {
+        return nullptr;
+    }
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(g_linearFramebuffer);
+    if (align != 0u && (addr & (align - 1u)) != 0u) {
+        return nullptr;
+    }
+    return g_linearFramebuffer;
+}
+
+void GbaHost::freeLinearFramebuffer(void* ptr) {
+    (void)ptr;
 }
 
 void GbaHost::renderDebugOverlay() {

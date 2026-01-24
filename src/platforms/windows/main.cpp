@@ -256,7 +256,8 @@ int main(int argc, char *argv[])
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) return 1;
 
-    SDL_Window *window = SDL_CreateWindow("Real-8 Explorer", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WINDOW_WIDTH, WINDOW_HEIGHT, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+    std::string title = std::string(IReal8Host::REAL8_APPNAME) + " v" + IReal8Host::REAL8_VERSION + " by @natureglass";
+    SDL_Window *window = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WINDOW_WIDTH, WINDOW_HEIGHT, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     if (!window) return 1;
 
     SDL_SysWMinfo wmInfo;

@@ -492,14 +492,18 @@ void Real8Shell::update()
                 if (vm->reset_requested) {
                     // vm->runFrame handles internal Lua reset logic usually,
                     // but if it propagates up here:
+                    std::string requestedPath = vm->next_cart_path;
                     vm->rebootVM();
-                    if (!vm->next_cart_path.empty()) {
-                        targetGame.path = vm->next_cart_path;
-                        sysState = STATE_LOADING;
-                    } else {
-                        // Reload current
-                        sysState = STATE_LOADING;
+                    if (!requestedPath.empty()) {
+                        targetGame = {};
+                        targetGame.path = requestedPath;
+                        size_t slash = targetGame.path.find_last_of("/\\");
+                        targetGame.displayName = (slash == std::string::npos) ? targetGame.path : targetGame.path.substr(slash + 1);
+                        targetGame.isRemote = false;
+                        targetGame.isFolder = false;
+                        targetGame.isFavorite = false;
                     }
+                    sysState = STATE_LOADING;
                     vm->reset_requested = false;
                 }
             }

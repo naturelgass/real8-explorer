@@ -266,6 +266,7 @@ public:
   uint8_t r8_vmode_req = 0;
   uint8_t r8_vmode_cur = 0;
 
+#if !defined(__GBA__)
   struct MotionState {
     int32_t accel_x = 0;
     int32_t accel_y = 0;
@@ -277,6 +278,7 @@ public:
     uint32_t dt_us = 0;
   };
   MotionState motion;
+#endif
 
   void setRomView(const uint8_t* data, size_t size, bool readOnly);
   bool ensureWritableRom();
