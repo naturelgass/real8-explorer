@@ -84,11 +84,14 @@ ifeq ($(OS),Windows_NT)
   EMBED_TEMPLATE ?= 1
   TEMPLATE_RCDATA_ID ?= 301
   TEMPLATE_ELF_RCDATA_ID ?= 302
+  LOGO_RCDATA_ID ?= 303
   TEMPLATE_EMBED_RC := $(BUILD)/template_embed.rc
   TEMPLATE_EMBED_RES := $(BUILD)/template_embed_res.o
   TEMPLATE_3DSX_ABS := $(abspath $(TEMPLATE_3DSX))
   TEMPLATE_ELF_ABS := $(abspath $(TEMPLATE_ELF))
   PICO_ICON_ICO_ABS := $(abspath $(PICO_ICON_ICO))
+  LOGO_PNG := $(TOPDIR)/banner/REAL8-banner.png
+  LOGO_PNG_ABS := $(abspath $(LOGO_PNG))
 endif
 
 CART_PACKER_GUI_EXTRA_RES :=
@@ -448,7 +451,7 @@ $(CART_PACKER_GUI): $(CART_PACKER_GUI_SRCS) $(CART_PACKER_GUI_EXTRA_RES)
 	$(HOSTCC) $(HOSTCXXFLAGS) -o $@ $^ $(HOSTGUI_LDFLAGS)
 
 ifeq ($(EMBED_TEMPLATE),1)
-$(TEMPLATE_EMBED_RC): $(TEMPLATE_3DSX) $(TEMPLATE_ELF) $(PICO_ICON_ICO)
+$(TEMPLATE_EMBED_RC): $(TEMPLATE_3DSX) $(TEMPLATE_ELF) $(PICO_ICON_ICO) $(LOGO_PNG)
 	@mkdir -p $(BUILD)
 	@TEMPLATE_3DSX_PATH="$$(cygpath -m "$(TEMPLATE_3DSX_ABS)" 2>/dev/null || echo "$(TEMPLATE_3DSX_ABS)")"; \
 	  TEMPLATE_3DSX_PATH="$${TEMPLATE_3DSX_PATH//\\//}"; \
@@ -456,9 +459,12 @@ $(TEMPLATE_EMBED_RC): $(TEMPLATE_3DSX) $(TEMPLATE_ELF) $(PICO_ICON_ICO)
 	  TEMPLATE_ELF_PATH="$${TEMPLATE_ELF_PATH//\\//}"; \
 	  ICON_PATH="$$(cygpath -m "$(PICO_ICON_ICO_ABS)" 2>/dev/null || echo "$(PICO_ICON_ICO_ABS)")"; \
 	  ICON_PATH="$${ICON_PATH//\\//}"; \
+	  LOGO_PATH="$$(cygpath -m "$(LOGO_PNG_ABS)" 2>/dev/null || echo "$(LOGO_PNG_ABS)")"; \
+	  LOGO_PATH="$${LOGO_PATH//\\//}"; \
 	  printf "%s\n" "$(TEMPLATE_RCDATA_ID) RCDATA \"$$TEMPLATE_3DSX_PATH\"" > $@; \
 	  printf "%s\n" "$(TEMPLATE_ELF_RCDATA_ID) RCDATA \"$$TEMPLATE_ELF_PATH\"" >> $@; \
-	  printf "%s\n" "1 ICON \"$$ICON_PATH\"" >> $@
+	  printf "%s\n" "1 ICON \"$$ICON_PATH\"" >> $@; \
+	  printf "%s\n" "$(LOGO_RCDATA_ID) RCDATA \"$$LOGO_PATH\"" >> $@
 
 $(TEMPLATE_EMBED_RES): $(TEMPLATE_EMBED_RC)
 	@mkdir -p $(BUILD)

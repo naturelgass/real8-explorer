@@ -45,6 +45,10 @@ namespace {
 
     const int kTemplate3dsxResourceId = 301;
     const int kTemplateElfResourceId = 302;
+    const int kLogoPngResourceId = 303;
+    const char* kTitlePlaceholder = "My game name";
+    const char* kPublisherPlaceholder = "REAL-8";
+    const char* kTitleIdPlaceholder = "CTR-P-1234";
 
     HWND g_iconEdit = nullptr;
     HWND g_bannerEdit = nullptr;
@@ -80,6 +84,9 @@ namespace {
     char g_titleText[128] = "";
     char g_titleIdText[32] = "";
     char g_publisherText[128] = "";
+    bool g_titlePlaceholderActive = false;
+    bool g_titleIdPlaceholderActive = false;
+    bool g_publisherPlaceholderActive = false;
 
     bool g_building = false;
     HANDLE g_buildThread = nullptr;
@@ -464,6 +471,10 @@ namespace {
 
     static bool loadEmbeddedTemplateElf(std::vector<uint8_t>& out, std::string& err) {
         return loadEmbeddedTemplateResource(kTemplateElfResourceId, out, "template ELF", err);
+    }
+
+    static bool loadEmbeddedLogoPng(std::vector<uint8_t>& out, std::string& err) {
+        return loadEmbeddedTemplateResource(kLogoPngResourceId, out, "logo PNG", err);
     }
 
     static bool buildCartBlobFromPng(const char* cartPath, std::vector<uint8_t>& outBlob, std::string& err) {
@@ -1082,6 +1093,31 @@ SystemControlInfo:
         return false;
     }
 
+    static void setPlaceholder(HWND edit, const char* text, bool& active) {
+        if (!edit || !text) return;
+        SetWindowTextA(edit, text);
+        active = true;
+        SendMessageA(edit, EM_SETSEL, 0, 0);
+        InvalidateRect(edit, nullptr, TRUE);
+    }
+
+    static void clearPlaceholder(HWND edit, bool& active) {
+        if (!edit) return;
+        SetWindowTextA(edit, "");
+        active = false;
+        InvalidateRect(edit, nullptr, TRUE);
+    }
+
+    static void ensurePlaceholder(HWND edit, const char* text, bool& active) {
+        if (!edit || !text) return;
+        if (active) return;
+        char buf[256] = "";
+        GetWindowTextA(edit, buf, sizeof(buf));
+        if (buf[0] == '\0') {
+            setPlaceholder(edit, text, active);
+        }
+    }
+
     static void syncTitleFields() {
         if (g_titleEdit) {
             GetWindowTextA(g_titleEdit, g_titleText, sizeof(g_titleText));
@@ -1092,6 +1128,9 @@ SystemControlInfo:
         if (g_publisherEdit) {
             GetWindowTextA(g_publisherEdit, g_publisherText, sizeof(g_publisherText));
         }
+        if (g_titlePlaceholderActive) g_titleText[0] = '\0';
+        if (g_titleIdPlaceholderActive) g_titleIdText[0] = '\0';
+        if (g_publisherPlaceholderActive) g_publisherText[0] = '\0';
     }
 
     static void setCheckboxState(HWND checkbox, int value) {
@@ -1382,12 +1421,11 @@ SystemControlInfo:
         return GetSysColor(COLOR_WINDOW);
     }
 
-    static HBITMAP loadPngBitmap(const char* pngPath, int maxW, int maxH, COLORREF bgColor, int* outW, int* outH, std::string& err) {
-        unsigned char* image = nullptr;
-        unsigned w = 0, h = 0;
-        unsigned error = lodepng_decode32_file(&image, &w, &h, pngPath);
-        if (error || !image) {
-            err = std::string("Failed to decode banner PNG: ") + pngPath;
+    static HBITMAP createBitmapFromRgba(const unsigned char* image, unsigned w, unsigned h,
+                                        int maxW, int maxH, COLORREF bgColor,
+                                        int* outW, int* outH, std::string& err) {
+        if (!image || w == 0 || h == 0) {
+            err = "Invalid banner image data.";
             return nullptr;
         }
 
@@ -1417,7 +1455,6 @@ SystemControlInfo:
         void* bits = nullptr;
         HBITMAP bmp = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
         if (!bmp || !bits) {
-            free(image);
             err = "Failed to create banner bitmap.";
             if (bmp) DeleteObject(bmp);
             return nullptr;
@@ -1461,6 +1498,40 @@ SystemControlInfo:
             }
         }
 
+        return bmp;
+    }
+
+    static HBITMAP loadPngBitmap(const char* pngPath, int maxW, int maxH, COLORREF bgColor,
+                                 int* outW, int* outH, std::string& err) {
+        unsigned char* image = nullptr;
+        unsigned w = 0, h = 0;
+        unsigned error = lodepng_decode32_file(&image, &w, &h, pngPath);
+        if (error || !image) {
+            err = std::string("Failed to decode banner PNG: ") + pngPath;
+            return nullptr;
+        }
+
+        HBITMAP bmp = createBitmapFromRgba(image, w, h, maxW, maxH, bgColor, outW, outH, err);
+        free(image);
+        return bmp;
+    }
+
+    static HBITMAP loadPngBitmapFromMemory(const uint8_t* pngData, size_t pngSize, int maxW, int maxH,
+                                           COLORREF bgColor, int* outW, int* outH, std::string& err) {
+        if (!pngData || pngSize == 0) {
+            err = "Embedded banner PNG is empty.";
+            return nullptr;
+        }
+
+        unsigned char* image = nullptr;
+        unsigned w = 0, h = 0;
+        unsigned error = lodepng_decode32(&image, &w, &h, pngData, pngSize);
+        if (error || !image) {
+            err = "Failed to decode embedded banner PNG.";
+            return nullptr;
+        }
+
+        HBITMAP bmp = createBitmapFromRgba(image, w, h, maxW, maxH, bgColor, outW, outH, err);
         free(image);
         return bmp;
     }
@@ -1823,9 +1894,9 @@ SystemControlInfo:
         SetWindowTextA(g_audioEdit, "");
         SetWindowTextA(g_wallpaperEdit, "");
         SetWindowTextA(g_cartEdit, "");
-        SetWindowTextA(g_titleEdit, "");
-        SetWindowTextA(g_titleIdEdit, "");
-        SetWindowTextA(g_publisherEdit, "");
+        setPlaceholder(g_titleEdit, kTitlePlaceholder, g_titlePlaceholderActive);
+        setPlaceholder(g_titleIdEdit, kTitleIdPlaceholder, g_titleIdPlaceholderActive);
+        setPlaceholder(g_publisherEdit, kPublisherPlaceholder, g_publisherPlaceholderActive);
         applyStartupFlags(kDefaultStartupFlags);
         updateGenerateEnabled();
     }
@@ -2252,6 +2323,7 @@ SystemControlInfo:
         if (_stricmp(g_titleIdText, productCode.c_str()) != 0) {
             snprintf(g_titleIdText, sizeof(g_titleIdText), "%s", productCode.c_str());
             SetWindowTextA(g_titleIdEdit, g_titleIdText);
+            g_titleIdPlaceholderActive = false;
         }
 
         bool templateOk = hasEmbeddedTemplate3dsx();
@@ -2331,14 +2403,27 @@ SystemControlInfo:
             int bannerDisplayWidth = rightColumnWidth;
             int bannerX = rightColumnX;
 
-            char bannerPath[MAX_PATH] = "";
-            if (buildDefaultBannerImagePath(bannerPath, sizeof(bannerPath))) {
-                std::string bannerErr;
-                COLORREF bgColor = getWindowBackgroundColor(hwnd);
-                g_bannerBitmap = loadPngBitmap(bannerPath, rightColumnWidth, bannerMaxHeight, bgColor,
-                                               &bannerDisplayWidth, &bannerDisplayHeight, bannerErr);
+            std::string bannerErr;
+            COLORREF bgColor = getWindowBackgroundColor(hwnd);
+            std::vector<uint8_t> bannerBytes;
+            if (hasEmbeddedTemplateResource(kLogoPngResourceId) &&
+                loadEmbeddedLogoPng(bannerBytes, bannerErr)) {
+                g_bannerBitmap = loadPngBitmapFromMemory(bannerBytes.data(), bannerBytes.size(),
+                                                         rightColumnWidth, bannerMaxHeight, bgColor,
+                                                         &bannerDisplayWidth, &bannerDisplayHeight, bannerErr);
                 if (g_bannerBitmap && bannerDisplayWidth < rightColumnWidth) {
                     bannerX = rightColumnX + (rightColumnWidth - bannerDisplayWidth) / 2;
+                }
+            }
+
+            if (!g_bannerBitmap) {
+                char bannerPath[MAX_PATH] = "";
+                if (buildDefaultBannerImagePath(bannerPath, sizeof(bannerPath))) {
+                    g_bannerBitmap = loadPngBitmap(bannerPath, rightColumnWidth, bannerMaxHeight, bgColor,
+                                                   &bannerDisplayWidth, &bannerDisplayHeight, bannerErr);
+                    if (g_bannerBitmap && bannerDisplayWidth < rightColumnWidth) {
+                        bannerX = rightColumnX + (rightColumnWidth - bannerDisplayWidth) / 2;
+                    }
                 }
             }
 
@@ -2355,7 +2440,7 @@ SystemControlInfo:
             CreateWindowExA(
                 0,
                 "STATIC",
-                "Game Title (required)",
+                "Game Title",
                 WS_CHILD | WS_VISIBLE,
                 kPadding,
                 y,
@@ -2368,6 +2453,9 @@ SystemControlInfo:
             y += 18;
             g_titleEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                           kPadding, y, leftColumnWidth, 24, hwnd, (HMENU)kIdTitleEdit, GetModuleHandleA(nullptr), nullptr);
+            if (g_titleEdit) {
+                setPlaceholder(g_titleEdit, kTitlePlaceholder, g_titlePlaceholderActive);
+            }
             y += 24 + titleRowGap;
 
             CreateWindowExA(
@@ -2386,6 +2474,9 @@ SystemControlInfo:
             y += 18;
             g_publisherEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                               kPadding, y, leftColumnWidth, 24, hwnd, (HMENU)kIdPublisherEdit, GetModuleHandleA(nullptr), nullptr);
+            if (g_publisherEdit) {
+                setPlaceholder(g_publisherEdit, kPublisherPlaceholder, g_publisherPlaceholderActive);
+            }
             y += 24 + kRowGap;
 
             CreateWindowExA(
@@ -2404,6 +2495,9 @@ SystemControlInfo:
             y += 18;
             g_titleIdEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                             kPadding, y, leftColumnWidth, 24, hwnd, (HMENU)kIdTitleIdEdit, GetModuleHandleA(nullptr), nullptr);
+            if (g_titleIdEdit) {
+                setPlaceholder(g_titleIdEdit, kTitleIdPlaceholder, g_titleIdPlaceholderActive);
+            }
             y += 24 + kRowGap;
 
             g_bannerImage = CreateWindowExA(0, "STATIC", "", WS_CHILD | WS_VISIBLE | SS_BITMAP,
@@ -2436,7 +2530,7 @@ SystemControlInfo:
                                                    buttonX, y, kButtonWidth, 24, hwnd, (HMENU)kIdBrowseBanner, GetModuleHandleA(nullptr), nullptr);
             y += 24 + kRowGap;
 
-            CreateWindowExA(0, "STATIC", "(Optional) Select game background 400x240 size", WS_CHILD | WS_VISIBLE,
+            CreateWindowExA(0, "STATIC", "Select game background 400x240 size (Optional) ", WS_CHILD | WS_VISIBLE,
                             kPadding, y, rect.right - (kPadding * 2), 16, hwnd, nullptr, GetModuleHandleA(nullptr), nullptr);
             y += 18;
             g_wallpaperEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
@@ -2566,12 +2660,46 @@ SystemControlInfo:
             } else if (id == kIdGenerate) {
                 handleGenerate(hwnd);
             } else if (id == kIdTitleEdit || id == kIdTitleIdEdit || id == kIdPublisherEdit) {
-                if (HIWORD(wParam) == EN_CHANGE) {
+                const int code = HIWORD(wParam);
+                if (id == kIdTitleEdit) {
+                    if (code == EN_SETFOCUS && g_titlePlaceholderActive) {
+                        clearPlaceholder(g_titleEdit, g_titlePlaceholderActive);
+                    } else if (code == EN_KILLFOCUS) {
+                        ensurePlaceholder(g_titleEdit, kTitlePlaceholder, g_titlePlaceholderActive);
+                    }
+                } else if (id == kIdTitleIdEdit) {
+                    if (code == EN_SETFOCUS && g_titleIdPlaceholderActive) {
+                        clearPlaceholder(g_titleIdEdit, g_titleIdPlaceholderActive);
+                    } else if (code == EN_KILLFOCUS) {
+                        ensurePlaceholder(g_titleIdEdit, kTitleIdPlaceholder, g_titleIdPlaceholderActive);
+                    }
+                } else if (id == kIdPublisherEdit) {
+                    if (code == EN_SETFOCUS && g_publisherPlaceholderActive) {
+                        clearPlaceholder(g_publisherEdit, g_publisherPlaceholderActive);
+                    } else if (code == EN_KILLFOCUS) {
+                        ensurePlaceholder(g_publisherEdit, kPublisherPlaceholder, g_publisherPlaceholderActive);
+                    }
+                }
+
+                if (code == EN_CHANGE || code == EN_SETFOCUS || code == EN_KILLFOCUS) {
                     syncTitleFields();
                     updateGenerateEnabled();
                 }
             }
             break;
+        }
+        case WM_CTLCOLOREDIT: {
+            HDC hdc = (HDC)wParam;
+            HWND ctl = (HWND)lParam;
+            if ((ctl == g_titleEdit && g_titlePlaceholderActive) ||
+                (ctl == g_titleIdEdit && g_titleIdPlaceholderActive) ||
+                (ctl == g_publisherEdit && g_publisherPlaceholderActive)) {
+                SetTextColor(hdc, RGB(0x88, 0x88, 0x88));
+            } else {
+                SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
+            }
+            SetBkColor(hdc, GetSysColor(COLOR_WINDOW));
+            return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
         }
         case WM_TIMER: {
             if (wParam == kIdSpinnerTimer && g_building && g_spinner) {

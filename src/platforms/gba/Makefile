@@ -322,7 +322,7 @@ $(TEMPLATE_EMBED_RES): $(TEMPLATE_EMBED_RC)
 	$(WINDRES) -I. -i $< -O coff -o $@
 
 
-$(CART_PACKER_GUI_RES): $(CART_PACKER_GUI_RC_INPUT) icon.ico
+$(CART_PACKER_GUI_RES): $(CART_PACKER_GUI_RC_INPUT) icon.ico REAL8-banner.png
 	$(call MKDIR_P,$(BUILD))
 	$(WINDRES) -I. -i $< -O coff -o $@
 endif

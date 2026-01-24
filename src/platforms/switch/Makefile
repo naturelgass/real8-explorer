@@ -132,6 +132,9 @@ TEMPLATE_BUILD := build-template
 TEMPLATE_NRO := $(TOPDIR)/$(TEMPLATE_TARGET).nro
 TEMPLATE_NRO_ABS := $(abspath $(TEMPLATE_NRO))
 TEMPLATE_RCDATA_ID ?= 301
+LOGO_PNG := $(TOPDIR)/REAL8-banner.png
+LOGO_PNG_ABS := $(abspath $(LOGO_PNG))
+LOGO_RCDATA_ID ?= 302
 WINDRES ?= windres
 TOOLS_RC := $(TOOLS_DIR)/Pico2Switch.rc
 TOOLS_RES := $(TOOLS_DIR)/Pico2Switch_res.o
@@ -254,14 +257,17 @@ $(ICON_ICO): $(PNG2ICO) $(ICON_PNG)
 	@[ -d $(TOOLS_DIR) ] || mkdir -p $(TOOLS_DIR)
 	@$(PNG2ICO) "$(ICON_PNG)" "$@"
 
-$(TOOLS_RC): $(ICON_ICO) $(TEMPLATE_NRO)
+$(TOOLS_RC): $(ICON_ICO) $(TEMPLATE_NRO) $(LOGO_PNG)
 	@[ -d $(TOOLS_DIR) ] || mkdir -p $(TOOLS_DIR)
 	@ICON_PATH="$$(cygpath -m "$(ICON_ICO_ABS)" 2>/dev/null || echo "$(ICON_ICO_ABS)")"; \
 	  ICON_PATH="$${ICON_PATH//\\//}"; \
 	  TEMPLATE_PATH="$$(cygpath -m "$(TEMPLATE_NRO_ABS)" 2>/dev/null || echo "$(TEMPLATE_NRO_ABS)")"; \
 	  TEMPLATE_PATH="$${TEMPLATE_PATH//\\//}"; \
+	  LOGO_PATH="$$(cygpath -m "$(LOGO_PNG_ABS)" 2>/dev/null || echo "$(LOGO_PNG_ABS)")"; \
+	  LOGO_PATH="$${LOGO_PATH//\\//}"; \
 	  printf "%s\n" "1 ICON \"$$ICON_PATH\"" > $@; \
-	  printf "%s\n" "$(TEMPLATE_RCDATA_ID) RCDATA \"$$TEMPLATE_PATH\"" >> $@
+	  printf "%s\n" "$(TEMPLATE_RCDATA_ID) RCDATA \"$$TEMPLATE_PATH\"" >> $@; \
+	  printf "%s\n" "$(LOGO_RCDATA_ID) RCDATA \"$$LOGO_PATH\"" >> $@
 
 $(TOOLS_RES): $(TOOLS_RC)
 	@[ -d $(TOOLS_DIR) ] || mkdir -p $(TOOLS_DIR)

@@ -46,6 +46,7 @@ namespace {
 
     const UINT kMsgBuildDone = WM_APP + 1;
     const int kTemplateNroResourceId = 301;
+    const int kLogoPngResourceId = 302;
 
     HWND g_titleEdit = nullptr;
     HWND g_publisherEdit = nullptr;
@@ -304,6 +305,10 @@ namespace {
         return loadEmbeddedTemplateResource(kTemplateNroResourceId, out, "template NRO", err);
     }
 
+    static bool loadEmbeddedLogoPng(std::vector<uint8_t>& out, std::string& err) {
+        return loadEmbeddedTemplateResource(kLogoPngResourceId, out, "logo PNG", err);
+    }
+
     static std::string trimWhitespace(const std::string& s) {
         size_t start = 0;
         while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) {
@@ -385,13 +390,11 @@ namespace {
         return g_windowBgColor;
     }
 
-    static HBITMAP loadPngBitmap(const char* pngPath, int maxW, int maxH, COLORREF bgColor,
-                                 int* outW, int* outH, std::string& err) {
-        unsigned char* image = nullptr;
-        unsigned w = 0, h = 0;
-        unsigned error = lodepng_decode32_file(&image, &w, &h, pngPath);
-        if (error || !image) {
-            err = std::string("Failed to decode logo PNG: ") + pngPath;
+    static HBITMAP createBitmapFromRgba(const unsigned char* image, unsigned w, unsigned h,
+                                        int maxW, int maxH, COLORREF bgColor,
+                                        int* outW, int* outH, std::string& err) {
+        if (!image || w == 0 || h == 0) {
+            err = "Invalid logo image data.";
             return nullptr;
         }
 
@@ -421,7 +424,6 @@ namespace {
         void* bits = nullptr;
         HBITMAP bmp = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
         if (!bmp || !bits) {
-            free(image);
             err = "Failed to create logo bitmap.";
             if (bmp) DeleteObject(bmp);
             return nullptr;
@@ -465,6 +467,40 @@ namespace {
             }
         }
 
+        return bmp;
+    }
+
+    static HBITMAP loadPngBitmap(const char* pngPath, int maxW, int maxH, COLORREF bgColor,
+                                 int* outW, int* outH, std::string& err) {
+        unsigned char* image = nullptr;
+        unsigned w = 0, h = 0;
+        unsigned error = lodepng_decode32_file(&image, &w, &h, pngPath);
+        if (error || !image) {
+            err = std::string("Failed to decode logo PNG: ") + pngPath;
+            return nullptr;
+        }
+
+        HBITMAP bmp = createBitmapFromRgba(image, w, h, maxW, maxH, bgColor, outW, outH, err);
+        free(image);
+        return bmp;
+    }
+
+    static HBITMAP loadPngBitmapFromMemory(const uint8_t* pngData, size_t pngSize, int maxW, int maxH,
+                                           COLORREF bgColor, int* outW, int* outH, std::string& err) {
+        if (!pngData || pngSize == 0) {
+            err = "Embedded logo PNG is empty.";
+            return nullptr;
+        }
+
+        unsigned char* image = nullptr;
+        unsigned w = 0, h = 0;
+        unsigned error = lodepng_decode32(&image, &w, &h, pngData, pngSize);
+        if (error || !image) {
+            err = "Failed to decode embedded logo PNG.";
+            return nullptr;
+        }
+
+        HBITMAP bmp = createBitmapFromRgba(image, w, h, maxW, maxH, bgColor, outW, outH, err);
         free(image);
         return bmp;
     }
@@ -1499,11 +1535,21 @@ namespace {
 
             int logoW = 0;
             int logoH = 0;
-            char logoPath[MAX_PATH] = "";
-            if (findLogoPath(logoPath, sizeof(logoPath))) {
-                std::string logoErr;
-                g_logoBitmap = loadPngBitmap(logoPath, rightColW, 120, getWindowBackgroundColor(),
-                                             &logoW, &logoH, logoErr);
+            std::string logoErr;
+            std::vector<uint8_t> logoBytes;
+            if (hasEmbeddedTemplateResource(kLogoPngResourceId) &&
+                loadEmbeddedLogoPng(logoBytes, logoErr)) {
+                g_logoBitmap = loadPngBitmapFromMemory(logoBytes.data(), logoBytes.size(),
+                                                       rightColW, 120, getWindowBackgroundColor(),
+                                                       &logoW, &logoH, logoErr);
+            }
+
+            if (!g_logoBitmap) {
+                char logoPath[MAX_PATH] = "";
+                if (findLogoPath(logoPath, sizeof(logoPath))) {
+                    g_logoBitmap = loadPngBitmap(logoPath, rightColW, 120, getWindowBackgroundColor(),
+                                                 &logoW, &logoH, logoErr);
+                }
             }
 
             if (logoW < 1) logoW = rightColW;
