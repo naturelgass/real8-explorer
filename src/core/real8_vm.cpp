@@ -46,6 +46,10 @@ static char g_last_cart_path[512] = {0};
 static int g_last_lua_line = 0;
 static char g_last_lua_source[256] = {0};
 
+namespace {
+    static inline bool supports_bottom_screen(const Real8VM* vm);
+}
+
 void real8_set_last_api_call(const char* name)
 {
     g_last_api_call = name ? name : "none";
@@ -381,6 +385,10 @@ Real8VM::~Real8VM()
         }
         fb = nullptr;
     }
+    if (fb_bottom) {
+        P8_FREE(fb_bottom);
+        fb_bottom = nullptr;
+    }
     if (depth_fb) { P8_FREE(depth_fb); depth_fb = nullptr; }
     if (stereo_layers) { P8_FREE(stereo_layers); stereo_layers = nullptr; }
 #endif
@@ -461,6 +469,15 @@ bool Real8VM::initMemory()
     r8_flags = ram ? ram[0x5FE0] : 0;
     r8_vmode_req = ram ? ram[0x5FE1] : 0;
     applyVideoMode(r8_vmode_req, /*force=*/true);
+    bottom_vmode_req = ram ? ram[BOTTOM_VMODE_REQ_ADDR] : 0;
+    if (supports_bottom_screen(this) && bottom_vmode_req == 0) {
+        bottom_vmode_req = BOTTOM_VMODE_DEFAULT;
+    }
+    applyBottomVideoMode(bottom_vmode_req, /*force=*/true);
+    if (ram) {
+        ram[Real8VM::BOTTOM_GPIO_ADDR] = (uint8_t)(ram[Real8VM::BOTTOM_GPIO_ADDR] & 0x03);
+        applyBottomScreenFlags(ram[Real8VM::BOTTOM_GPIO_ADDR]);
+    }
     return fb != nullptr;
 }
 
@@ -489,6 +506,12 @@ namespace {
             case 3: out_w = 640; out_h = 360; break;
             default: out_w = 128; out_h = 128; break;
         }
+    }
+
+    static inline bool supports_bottom_screen(const Real8VM* vm) {
+        if (!vm || !vm->host) return false;
+        const char* platform = vm->host->getPlatform();
+        return platform && std::strcmp(platform, "3DS") == 0;
     }
 }
 
@@ -606,6 +629,120 @@ void Real8VM::applyVideoMode(uint8_t requested_mode, bool force)
 
     if (need_realloc && host) {
         host->onFramebufferResize(fb_w, fb_h);
+    }
+
+    if (size_changed || need_realloc) {
+        applyBottomScreenFlags(bottom_screen_flags);
+    }
+}
+
+void Real8VM::applyBottomVideoMode(uint8_t requested_mode, bool force)
+{
+    const uint8_t prev_req = bottom_vmode_req;
+    const uint8_t prev_cur = bottom_vmode_cur;
+    const int prev_w = bottom_fb_w;
+    const int prev_h = bottom_fb_h;
+
+    uint8_t req = clamp_mode_u8(requested_mode);
+    uint8_t cur = clamp_mode_for_platform(this, req);
+
+    int new_w = bottom_fb_w;
+    int new_h = bottom_fb_h;
+    mode_to_size(cur, new_w, new_h);
+
+    const bool size_changed = (new_w != prev_w || new_h != prev_h);
+    const bool mode_changed = (prev_req != req || prev_cur != cur);
+    const bool need_realloc = size_changed || !fb_bottom;
+    const bool need_clear = force || mode_changed || size_changed;
+
+    bottom_vmode_req = req;
+    bottom_vmode_cur = cur;
+    if (ram) {
+        ram[BOTTOM_VMODE_REQ_ADDR] = bottom_vmode_req;
+        ram[BOTTOM_VMODE_CUR_ADDR] = bottom_vmode_cur;
+    }
+
+    bottom_fb_w = new_w;
+    bottom_fb_h = new_h;
+
+    if (!supports_bottom_screen(this)) {
+        return;
+    }
+
+    if (bottom_screen_enabled || draw_target_bottom || fb_bottom) {
+        if (need_realloc) {
+            if (fb_bottom) {
+                P8_FREE(fb_bottom);
+                fb_bottom = nullptr;
+            }
+            if (bottom_fb_w > 0 && bottom_fb_h > 0) {
+                const size_t fb_bytes = (size_t)bottom_fb_w * (size_t)bottom_fb_h;
+                fb_bottom = (uint8_t*)calloc(fb_bytes, 1);
+            }
+        }
+
+        if (!fb_bottom) {
+            bottom_screen_enabled = false;
+            draw_target_bottom = false;
+            return;
+        }
+
+        if (need_clear) {
+            const size_t fb_bytes = (size_t)bottom_fb_w * (size_t)bottom_fb_h;
+            std::memset(fb_bottom, 0, fb_bytes);
+        }
+
+        if (draw_target_bottom) {
+            gpu.clip(0, 0, draw_w(), draw_h());
+        }
+
+        if (bottom_screen_enabled) {
+            bottom_dirty = true;
+        }
+    }
+}
+
+void Real8VM::applyBottomScreenFlags(uint8_t flags)
+{
+    const uint8_t clamped = (uint8_t)(flags & 0x03);
+    bottom_screen_flags = clamped;
+    if (ram) ram[BOTTOM_GPIO_ADDR] = clamped;
+
+    if (!supports_bottom_screen(this)) {
+        bottom_screen_enabled = false;
+        draw_target_bottom = false;
+        return;
+    }
+
+    const bool prev_draw_target = draw_target_bottom;
+    bottom_screen_enabled = (clamped & BOTTOM_FLAG_ENABLE) != 0;
+    draw_target_bottom = (clamped & BOTTOM_FLAG_DRAW) != 0;
+
+    if (bottom_screen_enabled || draw_target_bottom || fb_bottom) {
+        if (!fb_bottom) {
+            if (bottom_fb_w <= 0 || bottom_fb_h <= 0) {
+                bottom_fb_w = BOTTOM_FIXED_W;
+                bottom_fb_h = BOTTOM_FIXED_H;
+            }
+            if (bottom_fb_w > 0 && bottom_fb_h > 0) {
+                const size_t fb_bytes = (size_t)bottom_fb_w * (size_t)bottom_fb_h;
+                fb_bottom = (uint8_t*)calloc(fb_bytes, 1);
+            }
+        }
+    }
+
+    if (!fb_bottom) {
+        bottom_screen_enabled = false;
+        draw_target_bottom = false;
+        return;
+    }
+
+    if (prev_draw_target != draw_target_bottom) {
+        gpu.clip(0, 0, draw_w(), draw_h());
+    }
+
+    if (bottom_screen_enabled) {
+        bottom_dirty = true;
     }
 }
 
@@ -726,6 +863,8 @@ void Real8VM::rebootVM()
     clear_menu_items();
     r8_flags = 0;
     applyVideoMode(0, /*force=*/true);
+    bottom_vmode_req = supports_bottom_screen(this) ? BOTTOM_VMODE_DEFAULT : 0;
+    applyBottomVideoMode(bottom_vmode_req, /*force=*/true);
     gbaLog("[BOOT] REBOOT CORE OK");
 
     // Reset Hardware
@@ -816,7 +955,10 @@ void Real8VM::runFrame()
 {
     const bool isLibretro = isLibretroPlatform;
     const bool isGba = isGbaPlatform;
-    if (ram) ram[0x5FE2] = r8_vmode_cur;
+    if (ram) {
+        ram[0x5FE2] = r8_vmode_cur;
+        ram[BOTTOM_VMODE_CUR_ADDR] = bottom_vmode_cur;
+    }
 #if !defined(__GBA__) || REAL8_GBA_ENABLE_AUDIO
     const bool gbaAudioDisabled = isGba && kGbaAudioDisabledDefault;
 #endif
@@ -1564,10 +1706,25 @@ return; // Libretro frontend handles the actual flip
 
     if (!host) return;
 
-    // If nothing drew since last present, don't re-upload/re-render.
-    if (dirty_x1 < 0 || dirty_y1 < 0) {
-        return;
+    if (ram && ram[BOTTOM_GPIO_ADDR] != bottom_screen_flags) {
+        applyBottomScreenFlags(ram[BOTTOM_GPIO_ADDR]);
     }
+
+    // If nothing drew since last present, don't re-upload/re-render.
+    const bool bottom_active = supports_bottom_screen(this) && bottom_screen_enabled && fb_bottom &&
+                               (!alt_fb || draw_target_bottom);
+    const bool bottom_needs_present = bottom_active && bottom_dirty;
+    if (dirty_x1 < 0 || dirty_y1 < 0) {
+        if (!bottom_needs_present) return;
+    }
+
+    const uint8_t* top_buffer = alt_fb ? alt_fb : fb;
+    const int top_w = alt_fb ? alt_fb_w : fb_w;
+    const int top_h = alt_fb ? alt_fb_h : fb_h;
+    const uint8_t* bottom_buffer = bottom_active ? fb_bottom : fb;
+    const int bottom_w = bottom_active ? bottom_fb_w : fb_w;
+    const int bottom_h = bottom_active ? bottom_fb_h : fb_h;
+    const bool use_dual_present = (alt_fb != nullptr) || bottom_active;
 
     uint8_t final_palette[16];
     uint8_t *palette_map = nullptr;
@@ -1624,19 +1781,20 @@ return; // Libretro frontend handles the actual flip
         int sx1 = dirty_x1 + kStereoMaxShift; if (sx1 > (fb_w - 1)) sx1 = fb_w - 1;
         int sy1 = dirty_y1; if (sy1 > (fb_h - 1)) sy1 = fb_h - 1;
 
-        if (alt_fb) {
-            host->flipScreens(alt_fb, alt_fb_w, alt_fb_h, fb, fb_w, fb_h, palette_map);
+        if (use_dual_present) {
+            host->flipScreens(top_buffer, top_w, top_h, bottom_buffer, bottom_w, bottom_h, palette_map);
         } else {
             host->flipScreenDirty(fb, fb_w, fb_h, palette_map, sx0, sy0, sx1, sy1);
         }
 
         dirty_x0 = fb_w; dirty_y0 = fb_h; dirty_x1 = -1; dirty_y1 = -1;
+        if (bottom_active) bottom_dirty = false;
         return;
     }
 
     if (!stereo_active) {
-        if (alt_fb) {
-            host->flipScreens(alt_fb, alt_fb_w, alt_fb_h, fb, fb_w, fb_h, palette_map);
+        if (use_dual_present) {
+            host->flipScreens(top_buffer, top_w, top_h, bottom_buffer, bottom_w, bottom_h, palette_map);
         } else {
             host->flipScreenDirty(fb, fb_w, fb_h, palette_map, dirty_x0, dirty_y0, dirty_x1, dirty_y1);
         }
@@ -1766,12 +1924,13 @@ return; // Libretro frontend handles the actual flip
     }
 #else
     // GBA build: stereoscopic output disabled to save IWRAM.
-    if (alt_fb) {
-        host->flipScreens(alt_fb, alt_fb_w, alt_fb_h, fb, fb_w, fb_h, palette_map);
+    if (use_dual_present) {
+        host->flipScreens(top_buffer, top_w, top_h, bottom_buffer, bottom_w, bottom_h, palette_map);
     } else {
         host->flipScreenDirty(fb, fb_w, fb_h, palette_map, dirty_x0, dirty_y0, dirty_x1, dirty_y1);
     }
 #endif
+    if (bottom_active) bottom_dirty = false;
     dirty_x0 = fb_w; dirty_y0 = fb_h; dirty_x1 = -1; dirty_y1 = -1;
 
 }
@@ -1846,6 +2005,8 @@ bool Real8VM::loadState()
     if (ram) {
         memcpy(ram, data.data(), 0x8000);
         applyVideoMode(ram[0x5FE1], /*force=*/true);
+        applyBottomVideoMode(ram[BOTTOM_VMODE_REQ_ADDR], /*force=*/true);
+        applyBottomScreenFlags(ram[Real8VM::BOTTOM_GPIO_ADDR]);
         if (screen_ram) memcpy(screen_ram, &ram[0x6000], 0x2000);
         for (int i = 0; i < 0x2000; i++) screenByteToFB(i, ram[0x6000 + i]);
         for(int i=0; i<16; i++) { 
@@ -1980,6 +2141,8 @@ bool Real8VM::unserialize(const void* data, size_t size) {
     memcpy(ram, ptr, 0x8000); 
     ptr += 0x8000;
     applyVideoMode(ram[0x5FE1], /*force=*/true);
+    applyBottomVideoMode(ram[BOTTOM_VMODE_REQ_ADDR], /*force=*/true);
+    applyBottomScreenFlags(ram[Real8VM::BOTTOM_GPIO_ADDR]);
 
     // 2. Restore Cart Data
     memcpy(cart_data_ram, ptr, sizeof(cart_data_ram)); 

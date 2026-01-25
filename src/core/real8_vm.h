@@ -120,6 +120,8 @@ public:
   // Stereoscopic depth buffer (optional)
   void clearDepthBuffer(uint8_t bucket = 0);
   void applyVideoMode(uint8_t requested_mode, bool force = false);
+  void applyBottomVideoMode(uint8_t requested_mode, bool force = false);
+  void applyBottomScreenFlags(uint8_t flags);
 
   // --------------------------------------------------------------------------
   // STATE & CONFIG
@@ -199,6 +201,20 @@ public:
 
 #endif
 
+  // --------------------------------------------------------------------------
+  // BOTTOM SCREEN FLAGS (GPIO 0x5F84)
+  // --------------------------------------------------------------------------
+  static constexpr uint16_t BOTTOM_GPIO_ADDR = 0x5F84;
+  static constexpr uint8_t BOTTOM_FLAG_ENABLE = 0x01;
+  static constexpr uint8_t BOTTOM_FLAG_DRAW = 0x02;
+  static constexpr int BOTTOM_FIXED_W = 320;
+  static constexpr int BOTTOM_FIXED_H = 240;
+  static constexpr uint16_t BOTTOM_VMODE_REQ_ADDR = 0x5FE3;
+  static constexpr uint16_t BOTTOM_VMODE_CUR_ADDR = 0x5FE4;
+  static constexpr uint8_t BOTTOM_VMODE_DEFAULT = 2;
+  bool isBottomScreenEnabled() const { return bottom_screen_enabled; }
+  bool isDrawingBottom() const { return draw_target_bottom && fb_bottom; }
+
   bool showRepoSnap = true;
   bool showSkin = false;
   bool showRepoGames = false;
@@ -243,6 +259,13 @@ public:
   int fb_h = PICO_HEIGHT;
   uint8_t *fb = nullptr;
   bool fb_is_linear = false;
+  uint8_t *fb_bottom = nullptr;
+  int bottom_fb_w = BOTTOM_FIXED_W;
+  int bottom_fb_h = BOTTOM_FIXED_H;
+  uint8_t bottom_screen_flags = 0;
+  bool bottom_screen_enabled = false;
+  bool draw_target_bottom = false;
+  bool bottom_dirty = false;
   uint8_t *alt_fb = nullptr;
   int alt_fb_w = PICO_WIDTH;
   int alt_fb_h = PICO_HEIGHT;
@@ -265,6 +288,8 @@ public:
   uint8_t r8_flags = 0;
   uint8_t r8_vmode_req = 0;
   uint8_t r8_vmode_cur = 0;
+  uint8_t bottom_vmode_req = BOTTOM_VMODE_DEFAULT;
+  uint8_t bottom_vmode_cur = BOTTOM_VMODE_DEFAULT;
 
 #if !defined(__GBA__)
   struct MotionState {
@@ -347,6 +372,22 @@ public:
     fb_row(y)[x] = v & 0x0F;
     fb_row(y)[x + 1] = (v >> 4) & 0x0F;
     mark_dirty_rect(x, y, x + 1, y);
+  }
+  inline uint8_t* draw_fb() { return isDrawingBottom() ? fb_bottom : fb; }
+  inline const uint8_t* draw_fb() const { return isDrawingBottom() ? fb_bottom : fb; }
+  inline int draw_w() const { return isDrawingBottom() ? bottom_fb_w : fb_w; }
+  inline int draw_h() const { return isDrawingBottom() ? bottom_fb_h : fb_h; }
+  inline uint8_t* draw_fb_row(int y) {
+    uint8_t* buf = draw_fb();
+    return buf ? (buf + (size_t)y * (size_t)draw_w()) : nullptr;
+  }
+  inline const uint8_t* draw_fb_row(int y) const {
+    const uint8_t* buf = draw_fb();
+    return buf ? (buf + (size_t)y * (size_t)draw_w()) : nullptr;
+  }
+  inline void mark_draw_dirty_rect(int x0, int y0, int x1, int y1) {
+    if (isDrawingBottom()) { bottom_dirty = true; return; }
+    mark_dirty_rect(x0, y0, x1, y1);
   }
   void mark_dirty_rect(int x0, int y0, int x1, int y1);
   int watch_addr = -1; 

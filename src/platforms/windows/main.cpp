@@ -2,6 +2,8 @@
 #include <SDL_syswm.h> 
 #include <iostream>
 #include <cstdio>
+#include <cctype>
+#include <vector>
 #include <windows.h> 
 #include <commdlg.h> 
 #include <shlobj.h>
@@ -39,6 +41,7 @@ enum MenuID
     ID_EXT_EXPORT_MAP,
     ID_EXT_EXPORT_VARS,
     ID_EXT_EXPORT_MUSIC,
+    ID_EXT_EXPORT_GAMECARD,
     ID_EXT_REALTIME_MODS,
     ID_SET_SHOW_CONSOLE
 };
@@ -118,6 +121,266 @@ std::string SaveLuaCartDialog(HWND hwnd, Real8VM* vm)
     return "";
 }
 
+std::string BrowseFolder(HWND hwnd);
+
+static std::string JoinPath(const std::string& dir, const std::string& file)
+{
+    if (dir.empty()) return file;
+    char last = dir.back();
+    if (last == '\\' || last == '/') return dir + file;
+    return dir + "\\" + file;
+}
+
+static bool EndsWithNoCase(const std::string& value, const std::string& suffix)
+{
+    if (value.size() < suffix.size()) return false;
+    size_t offset = value.size() - suffix.size();
+    for (size_t i = 0; i < suffix.size(); ++i) {
+        char a = (char)tolower((unsigned char)value[offset + i]);
+        char b = (char)tolower((unsigned char)suffix[i]);
+        if (a != b) return false;
+    }
+    return true;
+}
+
+static std::string SanitizeFileName(const std::string& name)
+{
+    std::string out;
+    out.reserve(name.size());
+    for (char c : name) {
+        unsigned char uc = (unsigned char)c;
+        if (uc < 32 || c == '<' || c == '>' || c == ':' || c == '"' || c == '/' || c == '\\' || c == '|' || c == '?' || c == '*') {
+            out.push_back('_');
+        } else {
+            out.push_back(c);
+        }
+    }
+    while (!out.empty() && (out.back() == ' ' || out.back() == '.')) {
+        out.pop_back();
+    }
+    if (out.empty()) out = "cart";
+    return out;
+}
+
+static std::string GetDlgItemTextString(HWND hWnd, int id)
+{
+    int len = GetWindowTextLengthA(GetDlgItem(hWnd, id));
+    std::string text(len, '\0');
+    if (len > 0) {
+        GetWindowTextA(GetDlgItem(hWnd, id), text.data(), len + 1);
+    }
+    return text;
+}
+
+struct GamecardDialogState {
+    Real8VM* vm = nullptr;
+    WindowsHost* host = nullptr;
+    std::string defaultTitle;
+    bool exported = false;
+    HFONT font = NULL;
+};
+
+static const int kCartTemplateResourceId = 201;
+
+enum {
+    ID_GC_TITLE = 9101,
+    ID_GC_AUTHOR,
+    ID_GC_COVER,
+    ID_GC_BROWSE,
+    ID_GC_RESET,
+    ID_GC_EXPORT
+};
+
+static bool LoadEmbeddedResource(int resourceId, std::vector<uint8_t>& out)
+{
+    HRSRC r = FindResourceA(NULL, MAKEINTRESOURCEA(resourceId), RT_RCDATA);
+    if (!r) return false;
+    DWORD size = SizeofResource(NULL, r);
+    if (size == 0) return false;
+    HGLOBAL h = LoadResource(NULL, r);
+    if (!h) return false;
+    void* p = LockResource(h);
+    if (!p) return false;
+    const uint8_t* bytes = static_cast<const uint8_t*>(p);
+    out.assign(bytes, bytes + size);
+    return true;
+}
+
+static LRESULT CALLBACK GamecardDialogProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    GamecardDialogState* state = (GamecardDialogState*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+
+    switch (message) {
+    case WM_CREATE:
+    {
+        CREATESTRUCT* cs = (CREATESTRUCT*)lParam;
+        state = (GamecardDialogState*)cs->lpCreateParams;
+        SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)state);
+
+        state->font = CreateFont(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+                                 DEFAULT_PITCH | FF_SWISS, "Segoe UI");
+
+        const int pad = 10;
+        const int labelW = 140;
+        const int editH = 22;
+        const int editW = 260;
+        const int btnW = 80;
+        int y = pad;
+
+        CreateWindow("STATIC", "Game Title:", WS_CHILD | WS_VISIBLE,
+                     pad, y, labelW, editH, hWnd, NULL, NULL, NULL);
+        HWND hTitleEdit = CreateWindowEx(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                         pad, y + editH + 2, editW + btnW + pad, editH, hWnd, (HMENU)(UINT_PTR)ID_GC_TITLE, NULL, NULL);
+        y += editH + 10 + editH;
+
+        CreateWindow("STATIC", "Publisher / Author:", WS_CHILD | WS_VISIBLE,
+                     pad, y, labelW + 40, editH, hWnd, NULL, NULL, NULL);
+        HWND hAuthorEdit = CreateWindowEx(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                          pad, y + editH + 2, editW + btnW + pad, editH, hWnd, (HMENU)(UINT_PTR)ID_GC_AUTHOR, NULL, NULL);
+        y += editH + 10 + editH;
+
+        CreateWindow("STATIC", "Cover Art:", WS_CHILD | WS_VISIBLE,
+                     pad, y, labelW, editH, hWnd, NULL, NULL, NULL);
+        HWND hCoverEdit = CreateWindowEx(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+                                         pad, y + editH + 2, editW, editH, hWnd, (HMENU)(UINT_PTR)ID_GC_COVER, NULL, NULL);
+        HWND hBrowseBtn = CreateWindow("BUTTON", "Browse", WS_CHILD | WS_VISIBLE,
+                                       pad + editW + pad, y + editH + 2, btnW, editH, hWnd, (HMENU)(UINT_PTR)ID_GC_BROWSE, NULL, NULL);
+        y += editH + 18 + editH;
+
+        HWND hResetBtn = CreateWindow("BUTTON", "Reset", WS_CHILD | WS_VISIBLE,
+                                      pad, y, btnW, editH + 4, hWnd, (HMENU)(UINT_PTR)ID_GC_RESET, NULL, NULL);
+        HWND hExportBtn = CreateWindow("BUTTON", "Export", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                                       pad + editW + pad, y, btnW, editH + 4, hWnd, (HMENU)(UINT_PTR)ID_GC_EXPORT, NULL, NULL);
+
+        if (state && !state->defaultTitle.empty()) {
+            SetWindowTextA(hTitleEdit, state->defaultTitle.c_str());
+            SendMessage(hTitleEdit, EM_SETSEL, 0, -1);
+        }
+
+        if (state && state->font) {
+            SendMessage(hTitleEdit, WM_SETFONT, (WPARAM)state->font, TRUE);
+            SendMessage(hAuthorEdit, WM_SETFONT, (WPARAM)state->font, TRUE);
+            SendMessage(hCoverEdit, WM_SETFONT, (WPARAM)state->font, TRUE);
+            SendMessage(hBrowseBtn, WM_SETFONT, (WPARAM)state->font, TRUE);
+            SendMessage(hResetBtn, WM_SETFONT, (WPARAM)state->font, TRUE);
+            SendMessage(hExportBtn, WM_SETFONT, (WPARAM)state->font, TRUE);
+        }
+
+        SetFocus(hTitleEdit);
+        return 0;
+    }
+    case WM_COMMAND:
+    {
+        int id = LOWORD(wParam);
+        if (!state) return 0;
+
+        if (id == ID_GC_BROWSE) {
+            std::string path = OpenImageDialog(hWnd);
+            if (!path.empty()) {
+                SetDlgItemTextA(hWnd, ID_GC_COVER, path.c_str());
+            }
+            return 0;
+        }
+        if (id == ID_GC_RESET) {
+            SetDlgItemTextA(hWnd, ID_GC_TITLE, "");
+            SetDlgItemTextA(hWnd, ID_GC_AUTHOR, "");
+            SetDlgItemTextA(hWnd, ID_GC_COVER, "");
+            return 0;
+        }
+        if (id == ID_GC_EXPORT) {
+            std::string title = GetDlgItemTextString(hWnd, ID_GC_TITLE);
+            std::string author = GetDlgItemTextString(hWnd, ID_GC_AUTHOR);
+            std::string cover = GetDlgItemTextString(hWnd, ID_GC_COVER);
+
+            if (title.empty()) {
+                MessageBoxA(hWnd, "Please enter a Game Title.", "Missing Title", MB_OK | MB_ICONWARNING);
+                return 0;
+            }
+
+            std::string folder = BrowseFolder(hWnd);
+            if (folder.empty()) return 0;
+
+            std::string safeTitle = SanitizeFileName(title);
+            if (safeTitle.empty()) safeTitle = "cart";
+            std::string fileName = safeTitle;
+            if (!EndsWithNoCase(fileName, ".p8.png")) fileName += ".p8.png";
+
+            std::string outputPath = JoinPath(folder, fileName);
+            std::vector<uint8_t> templatePng;
+            if (!LoadEmbeddedResource(kCartTemplateResourceId, templatePng)) {
+                MessageBoxA(hWnd, "Embedded cart template not found.", "Missing Template", MB_OK | MB_ICONERROR);
+                return 0;
+            }
+
+            bool ok = Real8Tools::ExportGamecard(state->vm, state->host, outputPath, title, author, cover, templatePng);
+            if (!ok) {
+                MessageBoxA(hWnd, "Export failed. Check logs.txt for details.", "Export Failed", MB_OK | MB_ICONERROR);
+                return 0;
+            }
+
+            state->exported = true;
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        break;
+    }
+    case WM_DESTROY:
+        if (state && state->font) {
+            DeleteObject(state->font);
+            state->font = NULL;
+        }
+        return 0;
+    case WM_CLOSE:
+        DestroyWindow(hWnd);
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProc(hWnd, message, wParam, lParam);
+}
+
+static bool ShowGamecardExportDialog(HWND parent, Real8VM* vm, WindowsHost* host)
+{
+    const char* className = "Real8GamecardExport";
+    WNDCLASS wc = {0};
+    wc.lpfnWndProc = GamecardDialogProc;
+    wc.hInstance = GetModuleHandle(NULL);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.lpszClassName = className;
+    RegisterClass(&wc);
+
+    GamecardDialogState state;
+    state.vm = vm;
+    state.host = host;
+    state.defaultTitle = GetLoadedCartBaseName(vm);
+
+    HWND hWnd = CreateWindowEx(WS_EX_DLGMODALFRAME, className, "Export Gamecard",
+                               WS_VISIBLE | WS_SYSMENU | WS_CAPTION,
+                               300, 300, 400, 260,
+                               parent, NULL, GetModuleHandle(NULL), (LPVOID)&state);
+    if (!hWnd) {
+        UnregisterClass(className, GetModuleHandle(NULL));
+        return false;
+    }
+
+    EnableWindow(parent, FALSE);
+    MSG msg;
+    while (IsWindow(hWnd)) {
+        if (GetMessage(&msg, NULL, 0, 0)) {
+            if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
+                DestroyWindow(hWnd);
+            }
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+    }
+    EnableWindow(parent, TRUE);
+    SetForegroundWindow(parent);
+    UnregisterClass(className, GetModuleHandle(NULL));
+    return state.exported;
+}
+
 
 void ToggleFullscreen(SDL_Window *window, HWND hwnd, HMENU hMenu)
 {
@@ -160,6 +423,7 @@ void UpdateMenuState(HMENU hMenu, Real8VM *vm, SDL_Window *window, WindowsHost* 
     EnableMenuItem(hMenu, ID_EXT_EXPORT_GFX, MF_BYCOMMAND | (gameRunning ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(hMenu, ID_EXT_EXPORT_MAP, MF_BYCOMMAND | (gameRunning ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(hMenu, ID_EXT_EXPORT_MUSIC, MF_BYCOMMAND | (gameRunning ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(hMenu, ID_EXT_EXPORT_GAMECARD, MF_BYCOMMAND | (gameRunning ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(hMenu, ID_EXT_REALTIME_MODS, MF_BYCOMMAND | (gameRunning ? MF_ENABLED : MF_GRAYED));
 }
 
@@ -307,6 +571,7 @@ int main(int argc, char *argv[])
     AppendMenu(hExtraMenu, MF_STRING, ID_EXT_EXPORT_GFX, "Export GFX");
     AppendMenu(hExtraMenu, MF_STRING, ID_EXT_EXPORT_MAP, "Export MAP");
     AppendMenu(hExtraMenu, MF_STRING, ID_EXT_EXPORT_MUSIC, "Export Music Tracks");
+    AppendMenu(hExtraMenu, MF_STRING, ID_EXT_EXPORT_GAMECARD, "Export Gamecard");
     AppendMenu(hExtraMenu, MF_SEPARATOR, 0, NULL);
     AppendMenu(hExtraMenu, MF_STRING, ID_EXT_REALTIME_MODS, "RealTime Modding");
     AppendMenu(hExtraMenu, MF_STRING, ID_SET_SHOW_CONSOLE, "Debug Console");
@@ -565,6 +830,15 @@ int main(int argc, char *argv[])
                                     std::string f=BrowseFolder(hwnd); 
                                     if(!f.empty()) Real8Tools::ExportMusic(vm, host, f); // FIXED
                                 } 
+                                break;
+                            case ID_EXT_EXPORT_GAMECARD:
+                                if (!vm->currentGameId.empty()) {
+                                    bool wasPaused = vm->debug.paused;
+                                    vm->debug.paused = true;
+                                    vm->debug.step_mode = false;
+                                    ShowGamecardExportDialog(hwnd, vm, host);
+                                    if (!wasPaused) vm->debug.paused = false;
+                                }
                                 break;
                         }
                     }

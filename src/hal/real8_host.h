@@ -23,7 +23,7 @@ class IReal8Host
 {
 public:
 
-    static constexpr const char *REAL8_APPNAME = "REAL-8 EXPLORER";
+    static constexpr const char *REAL8_APPNAME = "Real8 EXPLORER";
     static constexpr const char *REAL8_VERSION = "1.1.0";
     static constexpr const char *DEFAULT_GAMES_REPOSITORY = "https://raw.githubusercontent.com/naturelgass/real8games/main/gameslist.json";
     

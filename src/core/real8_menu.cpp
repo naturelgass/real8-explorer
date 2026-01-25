@@ -13,12 +13,12 @@ static bool s_menuSavedShowSkin = false;
 
 int getScreenW(const Real8VM* vm)
 {
-    return (vm && vm->fb_w > 0) ? vm->fb_w : 128;
+    return (vm && vm->draw_w() > 0) ? vm->draw_w() : 128;
 }
 
 int getScreenH(const Real8VM* vm)
 {
-    return (vm && vm->fb_h > 0) ? vm->fb_h : 128;
+    return (vm && vm->draw_h() > 0) ? vm->draw_h() : 128;
 }
 
 int getCenteredX(const char* text, int screenW)

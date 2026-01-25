@@ -1,6 +1,6 @@
-﻿# REAL-8 Explorer for Libretro
+﻿# Real8 Explorer for Libretro
 
-REAL-8 Explorer for Libretro is a Libretro core built around the Real8 VM. It runs PICO-8 carts inside RetroArch or any Libretro frontend.
+Real8 Explorer for Libretro is a Libretro core built around the Real8 VM. It runs PICO-8 carts inside RetroArch or any Libretro frontend.
 
 > Not affiliated with Lexaloffle Games, PICO-8, or Libretro.
 

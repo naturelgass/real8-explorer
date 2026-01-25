@@ -77,7 +77,7 @@ namespace {
     bool g_versionPlaceholderActive = false;
 
     const char* kTitlePlaceholder = "My game name";
-    const char* kPublisherPlaceholder = "REAL-8";
+    const char* kPublisherPlaceholder = "Real8";
     const char* kVersionPlaceholder = "1.0.0";
 
     struct BuildParams {
@@ -141,7 +141,7 @@ namespace {
     };
 
     static void showMessage(const char* text, UINT flags) {
-        MessageBoxA(nullptr, text, "REAL-8 Switch Tools", flags);
+        MessageBoxA(nullptr, text, "Real8 Switch Tools", flags);
     }
 
     static bool fileExists(const char* path) {

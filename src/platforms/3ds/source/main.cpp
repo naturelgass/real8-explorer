@@ -14,6 +14,7 @@
 #include <new>
 #include <string>
 #include <vector>
+#include <algorithm>
 #else
 #include "real8_shell.h"
 #endif
@@ -283,15 +284,32 @@ int main(int argc, char *argv[])
     Real8Gfx::GfxState menuGfxBackup;
     std::vector<std::string> inGameOptions;
     int inGameMenuSelection = 0;
-    uint8_t top_screen_fb[Real8VM::RAW_WIDTH][Real8VM::RAW_WIDTH];
-    std::memset(top_screen_fb, 0, sizeof(top_screen_fb));
+    bool menuForceDrawBottom = false;
+    bool menuSavedDrawBottom = false;
+    std::vector<uint8_t> top_screen_fb;
+    int top_screen_w = 0;
+    int top_screen_h = 0;
 
-    auto applyPauseCheckerboard = [&](uint8_t (*buffer)[Real8VM::RAW_WIDTH]) {
-        for (int y = 0; y < Real8VM::RAW_WIDTH; ++y) {
-            for (int x = 0; x < Real8VM::RAW_WIDTH; ++x) {
+    auto ensureTopBufferSize = [&](int w, int h, bool clear) {
+        if (w <= 0 || h <= 0) return;
+        const size_t needed = (size_t)w * (size_t)h;
+        if (top_screen_fb.size() != needed) {
+            top_screen_fb.assign(needed, 0);
+        } else if (clear) {
+            std::fill(top_screen_fb.begin(), top_screen_fb.end(), 0);
+        }
+        top_screen_w = w;
+        top_screen_h = h;
+    };
+
+    auto applyPauseCheckerboard = [&]() {
+        if (top_screen_fb.empty() || top_screen_w <= 0 || top_screen_h <= 0) return;
+        for (int y = 0; y < top_screen_h; ++y) {
+            for (int x = 0; x < top_screen_w; ++x) {
                 if (((x ^ y) & 1) == 0) {
-                    if ((buffer[y][x] & 0x0F) != 0) {
-                        buffer[y][x] = 0;
+                    uint8_t &pix = top_screen_fb[(size_t)y * (size_t)top_screen_w + (size_t)x];
+                    if ((pix & 0x0F) != 0) {
+                        pix = 0;
                     }
                 }
             }
@@ -380,6 +398,11 @@ int main(int argc, char *argv[])
             if (closeMenu) {
                 inMenu = false;
                 vm->clearAltFramebuffer();
+                if (menuForceDrawBottom) {
+                    vm->draw_target_bottom = menuSavedDrawBottom;
+                    vm->gpu.clip(0, 0, vm->draw_w(), vm->draw_h());
+                    menuForceDrawBottom = false;
+                }
             }
             if (exitApp) {
                 vm->quit_requested = true;
@@ -399,12 +422,27 @@ int main(int argc, char *argv[])
             applyInputLatch();
 
             if (vm->isMenuPressed()) {
-                std::memcpy(top_screen_fb, vm->fb, sizeof(top_screen_fb));
-                applyPauseCheckerboard(top_screen_fb);
-                vm->setAltFramebuffer(&top_screen_fb[0][0], 128, 128);
+                const int w = (vm->fb_w > 0) ? vm->fb_w : 128;
+                const int h = (vm->fb_h > 0) ? vm->fb_h : 128;
+                ensureTopBufferSize(w, h, false);
+                if (vm->fb && vm->fb_w > 0 && vm->fb_h > 0) {
+                    const size_t fb_bytes = (size_t)vm->fb_w * (size_t)vm->fb_h;
+                    std::memcpy(top_screen_fb.data(), vm->fb, fb_bytes);
+                } else if (!top_screen_fb.empty()) {
+                    std::fill(top_screen_fb.begin(), top_screen_fb.end(), 0);
+                }
+                applyPauseCheckerboard();
+                vm->setAltFramebuffer(top_screen_fb.data(), top_screen_w, top_screen_h);
 
                 vm->gpu.saveState(menuGfxBackup);
                 vm->gpu.reset();
+                menuForceDrawBottom = false;
+                if (vm->bottom_screen_enabled && vm->fb_bottom) {
+                    menuSavedDrawBottom = vm->draw_target_bottom;
+                    menuForceDrawBottom = true;
+                    vm->draw_target_bottom = true;
+                    vm->gpu.clip(0, 0, vm->draw_w(), vm->draw_h());
+                }
                 Real8Menu::BuildInGameMenu(vm, inGameOptions, inGameMenuSelection);
                 inMenu = true;
             }

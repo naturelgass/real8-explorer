@@ -22,7 +22,7 @@ static int getCenteredX(const char *text)
     return SCREEN_CENTER_X - (textLenInPixels / 2);
 }
 
-static void drawMenuTextToBuffer(uint8_t (*buffer)[128], const char *text, int x, int y, uint8_t col)
+static void drawMenuTextToBuffer(uint8_t *buffer, int buf_w, int buf_h, const char *text, int x, int y, uint8_t col)
 {
     if (!buffer || !text || text[0] == '\0') return;
     std::string p8 = convertUTF8toP8SCII(text);
@@ -35,14 +35,27 @@ static void drawMenuTextToBuffer(uint8_t (*buffer)[128], const char *text, int x
                 if (bits & (0x80 >> i)) {
                     int px = cx + i;
                     int py = y + r;
-                    if ((unsigned)px < 128u && (unsigned)py < 128u) {
-                        buffer[py][px] = col;
+                    if ((unsigned)px < (unsigned)buf_w && (unsigned)py < (unsigned)buf_h) {
+                        buffer[py * buf_w + px] = col;
                     }
                 }
             }
         }
         cx += 5;
     }
+}
+
+static void ensureTopBufferSize(std::vector<uint8_t> &buffer, int &buf_w, int &buf_h, int w, int h, bool clear)
+{
+    if (w <= 0 || h <= 0) return;
+    const size_t needed = (size_t)w * (size_t)h;
+    if (buffer.size() != needed) {
+        buffer.assign(needed, 0);
+    } else if (clear) {
+        std::fill(buffer.begin(), buffer.end(), 0);
+    }
+    buf_w = w;
+    buf_h = h;
 }
 
 static bool isRepoSupportedPlatform(const char *platform)
@@ -68,21 +81,23 @@ static std::string formatBytes(size_t bytes)
 // --------------------------------------------------------------------------
 // 3DS: Pause overlay effect (PICO-8-ish fillp(0xA5A5) checkerboard)
 //
-// The 3DS port uses a dedicated 128x128 buffer for the top screen while the
-// in-game menu is open (STATE_INGAME_MENU). We apply a simple 50% checkerboard
-// darken to that frozen frame to make it feel "paused".
+// The 3DS port uses a dedicated buffer for the top screen while the in-game
+// menu is open (STATE_INGAME_MENU). We apply a simple 50% checkerboard darken
+// to that frozen frame to make it feel "paused".
 // --------------------------------------------------------------------------
 void Real8Shell::applyPauseCheckerboardToTop()
 {
+    if (top_screen_fb.empty() || top_screen_w <= 0 || top_screen_h <= 0) return;
     // Classic checkerboard. fillp(0xA5A5) is essentially alternating pixels,
     // so parity works well as a lightweight approximation.
-    for (int y = 0; y < 128; ++y) {
-        for (int x = 0; x < 128; ++x) {
+    for (int y = 0; y < top_screen_h; ++y) {
+        for (int x = 0; x < top_screen_w; ++x) {
             // Darken half the pixels by forcing them to color 0.
             // Keep existing black pixels as-is.
             if (((x ^ y) & 1) == 0) {
-                if ((top_screen_fb[y][x] & 0x0F) != 0) {
-                    top_screen_fb[y][x] = 0;
+                uint8_t &pix = top_screen_fb[(size_t)y * (size_t)top_screen_w + (size_t)x];
+                if ((pix & 0x0F) != 0) {
+                    pix = 0;
                 }
             }
         }
@@ -226,7 +241,7 @@ Real8Shell::Real8Shell(IReal8Host* h, Real8VM* v) : host(h), vm(v)
     
     // Clear preview buffer
     memset(preview_ram, 0, sizeof(preview_ram));
-    memset(top_screen_fb, 0, sizeof(top_screen_fb));
+    ensureTopBufferSize(top_screen_fb, top_screen_w, top_screen_h, 128, 128, true);
 }
 
 Real8Shell::~Real8Shell()
@@ -262,13 +277,16 @@ void Real8Shell::update()
         else if (sysState == STATE_INGAME_MENU) {
             // In-game menu: keep the frozen game frame on the TOP screen
             // (top_screen_fb is filled when the menu is opened)
-            vm->setAltFramebuffer(&top_screen_fb[0][0], 128, 128);
+            int w = (top_screen_w > 0) ? top_screen_w : 128;
+            int h = (top_screen_h > 0) ? top_screen_h : 128;
+            ensureTopBufferSize(top_screen_fb, top_screen_w, top_screen_h, w, h, false);
+            vm->setAltFramebuffer(top_screen_fb.data(), w, h);
             host->setTopPreviewBlankHint(false);
         }
         else if (sysState != STATE_BROWSER) {
             // Other menus: top screen uses the dedicated buffer
-            memset(top_screen_fb, 0, sizeof(top_screen_fb));
-            vm->setAltFramebuffer(&top_screen_fb[0][0], 128, 128);
+            ensureTopBufferSize(top_screen_fb, top_screen_w, top_screen_h, 128, 128, true);
+            vm->setAltFramebuffer(top_screen_fb.data(), 128, 128);
             host->setTopPreviewBlankHint(true);
         }
     }
@@ -462,17 +480,33 @@ void Real8Shell::update()
 
                 // 3DS: freeze the current game frame to the TOP screen buffer
                 if (strcmp(host->getPlatform(), "3DS") == 0) {
-                    memcpy(top_screen_fb, vm->fb, sizeof(top_screen_fb));
+                    const int w = (vm->fb_w > 0) ? vm->fb_w : 128;
+                    const int h = (vm->fb_h > 0) ? vm->fb_h : 128;
+                    ensureTopBufferSize(top_screen_fb, top_screen_w, top_screen_h, w, h, false);
+                    if (vm->fb && vm->fb_w > 0 && vm->fb_h > 0) {
+                        const size_t fb_bytes = (size_t)vm->fb_w * (size_t)vm->fb_h;
+                        std::memcpy(top_screen_fb.data(), vm->fb, fb_bytes);
+                    } else if (!top_screen_fb.empty()) {
+                        std::fill(top_screen_fb.begin(), top_screen_fb.end(), 0);
+                    }
 
                     // Apply paused overlay effect (checkerboard like fillp(0xA5A5))
                     applyPauseCheckerboardToTop();
 
-                    vm->setAltFramebuffer(&top_screen_fb[0][0], 128, 128);
+                    vm->setAltFramebuffer(top_screen_fb.data(), top_screen_w, top_screen_h);
                     host->setTopPreviewBlankHint(false);
                 }
 
                 vm->gpu.saveState(menu_gfx_backup);
                 vm->gpu.reset();
+                menu_force_draw_bottom = false;
+                if (strcmp(host->getPlatform(), "3DS") == 0 &&
+                    vm->bottom_screen_enabled && vm->fb_bottom) {
+                    menu_saved_draw_bottom = vm->draw_target_bottom;
+                    menu_force_draw_bottom = true;
+                    vm->draw_target_bottom = true;
+                    vm->gpu.clip(0, 0, vm->draw_w(), vm->draw_h());
+                }
                 buildInGameMenu();
                 sysState = STATE_INGAME_MENU;
             }
@@ -513,6 +547,11 @@ void Real8Shell::update()
             updateInGameMenu();
             renderInGameMenu();
             vm->show_frame();
+            if (menu_force_draw_bottom && sysState != STATE_INGAME_MENU) {
+                vm->draw_target_bottom = menu_saved_draw_bottom;
+                vm->gpu.clip(0, 0, vm->draw_w(), vm->draw_h());
+                menu_force_draw_bottom = false;
+            }
             break;
 
         case STATE_ERROR: {
@@ -1064,20 +1103,21 @@ void Real8Shell::renderFileList(bool drawTopPreview)
 
 void Real8Shell::renderTopPreview3ds(const char *statusText)
 {
-    memset(top_screen_fb, 0, sizeof(top_screen_fb));
+    ensureTopBufferSize(top_screen_fb, top_screen_w, top_screen_h, 128, 128, true);
     bool previewBlank = true;
     if (statusText && statusText[0] != '\0') {
-        drawMenuTextToBuffer(top_screen_fb, statusText, getCenteredX(statusText), 60, 11);
+        drawMenuTextToBuffer(top_screen_fb.data(), top_screen_w, top_screen_h,
+                             statusText, getCenteredX(statusText), 60, 11);
         previewBlank = false;
     } else if (has_preview) {
         for (int y = 0; y < 128; ++y) {
             for (int x = 0; x < 128; ++x) {
-                top_screen_fb[y][x] = preview_ram[y][x] & 0x0F;
+                top_screen_fb[(size_t)y * (size_t)top_screen_w + (size_t)x] = preview_ram[y][x] & 0x0F;
             }
         }
         previewBlank = false;
     }
-    vm->setAltFramebuffer(&top_screen_fb[0][0], 128, 128);
+    vm->setAltFramebuffer(top_screen_fb.data(), 128, 128);
     host->setTopPreviewBlankHint(previewBlank);
 }
 
@@ -1388,10 +1428,23 @@ void Real8Shell::initStars()
 
 void Real8Shell::drawStarfield()
 {
+    int screen_w = vm ? vm->draw_w() : 128;
+    int screen_h = vm ? vm->draw_h() : 128;
+    if (screen_w <= 0) screen_w = 128;
+    if (screen_h <= 0) screen_h = 128;
+    float scale_x = (float)screen_w / 128.0f;
+    float scale_y = (float)screen_h / 128.0f;
+
     for (auto &s : bg_stars) {
         s.x -= s.speed;
         if (s.x < 0) { s.x = 128; s.y = rand() % 128; }
-        vm->gpu.pset((int)s.x, (int)s.y, s.col);
+        int px = (int)(s.x * scale_x);
+        int py = (int)(s.y * scale_y);
+        if (px < 0) px = 0;
+        if (py < 0) py = 0;
+        if (px >= screen_w) px = screen_w - 1;
+        if (py >= screen_h) py = screen_h - 1;
+        vm->gpu.pset(px, py, s.col);
     }
 }
 

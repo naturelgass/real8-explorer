@@ -1,8 +1,8 @@
-# REAL-8 Explorer
+# Real8 Explorer
 
 A PICO-8 explorer and emulator front-end for multiple platforms.
 
-REAL-8 Explorer is the comfort layer around the REAL-8 VM + Shell: a native host UI for windowing, menus, input, and tooling, so you can browse, launch, and debug carts with less friction.
+Real8 Explorer is the comfort layer around the Real8 VM + Shell: a native host UI for windowing, menus, input, and tooling, so you can browse, launch, and debug carts with less friction.
 
 Not affiliated with Lexaloffle Games, PICO-8, Nintendo, or RetroArch/Libretro.
 
@@ -15,7 +15,7 @@ Not affiliated with Lexaloffle Games, PICO-8, Nintendo, or RetroArch/Libretro.
 ## Highlights (v1.1.0)
 
 - Publishing workflow: GUI exporters for **standalone homebrew** on **GBA** (.gba), **3DS** (.3dsx/.cia), and **Switch** (.nro).
-- REAL-8 expandability: extended **framebuffer modes**, **stereo depth** pipeline, and **motion sensors**.
+- Real8 expandability: extended **framebuffer modes**, **stereo depth** pipeline, and **motion sensors**.
 - Performance and stability improvements across supported targets.
 - VM goal: PICO-8 compatibility by default, with optional enhancements when you want them.
 
@@ -42,7 +42,7 @@ Not affiliated with Lexaloffle Games, PICO-8, Nintendo, or RetroArch/Libretro.
 - Input: keyboard and controller support, HID remapping UI, per-player configs (up to 8)
 - Modding: boot games with mods created through the Windows version
 
-### REAL-8 expandability
+### Real8 expandability
 
 - Extended framebuffer modes: **240x160** / **320x240** / **640x360 x2** (fullscreen behavior depends on platform)
 - Stereo depth pipeline: **stereo on 3DS** or red/cyan on other platforms, per-sprite depth buckets
@@ -111,11 +111,11 @@ See [GBA README](src/platforms/gba/README.md) for build steps, memory layout, an
 
 <table>
   <tr>
-    <td><img src="https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8Switch.png" alt="REAL-8 on Switch" width="420"></td>
-    <td><img src="https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8-3DS.png" alt="REAL-8 on 3DS" width="420"></td>
+    <td><img src="https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8Switch.png" alt="Real8 on Switch" width="420"></td>
+    <td><img src="https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8-3DS.png" alt="Real8 on 3DS" width="420"></td>
   </tr>
   <tr>
-    <td><img src="https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8-Pico2GBA-Rom.png" alt="REAL-8 on GBA" width="420"></td>
+    <td><img src="https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8-Pico2GBA-Rom.png" alt="Real8 on GBA" width="420"></td>
     <td><img src="https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/WindowsShellMenu.png" alt="Windows Shell" width="420"></td>
   </tr>
   <tr>
@@ -157,4 +157,4 @@ When reporting bugs, please include:
 
 This project is licensed under **GPL-3.0** (see `LICENSE`).
 
-REAL-8 started as a backronym ("Real-Time Emulation Analog Layer"), but it stuck.
+Real8 started as a backronym ("Real-Time Emulation Analog Layer"), but it stuck.

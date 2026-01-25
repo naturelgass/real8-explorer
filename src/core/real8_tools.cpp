@@ -447,6 +447,120 @@ bool Real8Tools::InjectBinaryMod(Real8VM* vm, IReal8Host* host, const std::strin
 // EXPORTERS
 // --------------------------------------------------------------------------
 
+namespace {
+    class PxaBitWriter {
+    public:
+        void writeBits(uint32_t value, int count) {
+            for (int i = 0; i < count; ++i) {
+                uint8_t bit = (value >> i) & 1u;
+                current |= (uint8_t)(bit << bitCount);
+                bitCount++;
+                if (bitCount == 8) {
+                    bytes.push_back(current);
+                    current = 0;
+                    bitCount = 0;
+                }
+            }
+        }
+
+        void flush() {
+            if (bitCount > 0) {
+                bytes.push_back(current);
+                current = 0;
+                bitCount = 0;
+            }
+        }
+
+        std::vector<uint8_t> bytes;
+
+    private:
+        uint8_t current = 0;
+        int bitCount = 0;
+    };
+
+    static bool buildPxaRaw(const std::vector<uint8_t>& input, std::vector<uint8_t>& output) {
+        if (input.size() > 0xFFFF) return false;
+
+        PxaBitWriter bw;
+        // Raw block header: block(0) + offset_bits selector (10) + offset=1 (value 0)
+        bw.writeBits(0, 1);
+        bw.writeBits(1, 1);
+        bw.writeBits(0, 1);
+        bw.writeBits(0, 10);
+        for (uint8_t b : input) {
+            bw.writeBits(b, 8);
+        }
+        bw.writeBits(0, 8); // Raw block terminator
+        bw.flush();
+
+        if (bw.bytes.size() > 0xFFFF) return false;
+
+        output.clear();
+        output.reserve(8 + bw.bytes.size());
+        output.push_back(0x00);
+        output.push_back('p');
+        output.push_back('x');
+        output.push_back('a');
+        uint16_t destLen = (uint16_t)input.size();
+        output.push_back((uint8_t)((destLen >> 8) & 0xFF));
+        output.push_back((uint8_t)(destLen & 0xFF));
+        uint16_t compLen = (uint16_t)bw.bytes.size();
+        output.push_back((uint8_t)((compLen >> 8) & 0xFF));
+        output.push_back((uint8_t)(compLen & 0xFF));
+        output.insert(output.end(), bw.bytes.begin(), bw.bytes.end());
+        return true;
+    }
+
+    static bool loadPngRgba(const std::string& path, std::vector<unsigned char>& out, unsigned& w, unsigned& h) {
+        unsigned char* image = nullptr;
+        unsigned error = lodepng_decode32_file(&image, &w, &h, path.c_str());
+        if (error || !image) {
+            if (image) free(image);
+            return false;
+        }
+        out.assign(image, image + (size_t)w * (size_t)h * 4);
+        free(image);
+        return true;
+    }
+
+    static bool loadPngRgbaFromMemory(const std::vector<uint8_t>& data, std::vector<unsigned char>& out,
+                                      unsigned& w, unsigned& h) {
+        if (data.empty()) return false;
+        unsigned char* image = nullptr;
+        unsigned error = lodepng_decode32(&image, &w, &h, data.data(), data.size());
+        if (error || !image) {
+            if (image) free(image);
+            return false;
+        }
+        out.assign(image, image + (size_t)w * (size_t)h * 4);
+        free(image);
+        return true;
+    }
+
+    static void blitCoverArt(std::vector<unsigned char>& dest, unsigned destW, unsigned destH,
+                             const std::vector<unsigned char>& src, unsigned srcW, unsigned srcH,
+                             unsigned labelW, unsigned labelH, unsigned offsetX, unsigned offsetY) {
+        if (dest.empty() || src.empty() || destW == 0 || destH == 0 || srcW == 0 || srcH == 0) return;
+        if (offsetX >= destW || offsetY >= destH) return;
+        unsigned maxW = destW - offsetX;
+        unsigned maxH = destH - offsetY;
+        unsigned drawW = std::min(labelW, maxW);
+        unsigned drawH = std::min(labelH, maxH);
+        for (unsigned y = 0; y < drawH; ++y) {
+            unsigned sy = (unsigned)((y * srcH) / drawH);
+            for (unsigned x = 0; x < drawW; ++x) {
+                unsigned sx = (unsigned)((x * srcW) / drawW);
+                size_t srcIdx = ((size_t)sy * srcW + sx) * 4;
+                size_t dstIdx = ((size_t)(y + offsetY) * destW + (x + offsetX)) * 4;
+                dest[dstIdx + 0] = src[srcIdx + 0];
+                dest[dstIdx + 1] = src[srcIdx + 1];
+                dest[dstIdx + 2] = src[srcIdx + 2];
+                dest[dstIdx + 3] = src[srcIdx + 3];
+            }
+        }
+    }
+}
+
 
 
 void Real8Tools::ExportLUA(Real8VM* vm, IReal8Host* host, const std::string &outputFile)
@@ -991,4 +1105,110 @@ void Real8Tools::ExportMusic(Real8VM* vm, IReal8Host* host, const std::string &o
     vm->gpu.renderMessage("SYSTEM", "MUSIC EXPORTED", 11);
     vm->show_frame();
     host->delayMs(500);
+}
+
+bool Real8Tools::ExportGamecard(Real8VM* vm, IReal8Host* host, const std::string &outputFile,
+                                const std::string &title, const std::string &author,
+                                const std::string &coverArtPath,
+                                const std::vector<uint8_t> &templatePng)
+{
+#if defined(__GBA__)
+    (void)vm;
+    (void)host;
+    (void)outputFile;
+    (void)title;
+    (void)author;
+    (void)coverArtPath;
+    (void)templatePng;
+    return false;
+#else
+    if (!vm || !host || !vm->ram) return false;
+    if (outputFile.empty() || templatePng.empty()) return false;
+
+    std::string lua = vm->loadedLuaSource;
+    if (lua.empty()) {
+        host->log("[EXPORT] No LUA source available to export.");
+        return false;
+    }
+
+    std::string header;
+    if (!title.empty()) header += "-- title: " + title + "\n";
+    if (!author.empty()) header += "-- author: " + author + "\n";
+    if (!header.empty()) lua = header + lua;
+
+    std::vector<uint8_t> luaBytes(lua.begin(), lua.end());
+    std::vector<uint8_t> pxa;
+    if (!buildPxaRaw(luaBytes, pxa)) {
+        host->log("[EXPORT] Failed to compress LUA with PXA.");
+        return false;
+    }
+
+    const size_t codeCapacity = 0x8000 - 0x4300;
+    if (pxa.size() > codeCapacity) {
+        host->log("[EXPORT] Compressed LUA exceeds cart capacity.");
+        return false;
+    }
+
+    std::vector<uint8_t> cart(0x8000, 0);
+    memcpy(cart.data() + 0x0000, vm->ram + 0x0000, 0x2000);
+    memcpy(cart.data() + 0x2000, vm->ram + 0x2000, 0x1000);
+    memcpy(cart.data() + 0x3000, vm->ram + 0x3000, 0x0100);
+    memcpy(cart.data() + 0x3100, vm->ram + 0x3100, 0x0100);
+    memcpy(cart.data() + 0x3200, vm->ram + 0x3200, 0x1100);
+    memcpy(cart.data() + 0x4300, pxa.data(), pxa.size());
+
+    unsigned w = 0;
+    unsigned h = 0;
+    std::vector<unsigned char> image;
+    if (!loadPngRgbaFromMemory(templatePng, image, w, h)) {
+        host->log("[EXPORT] Failed to load embedded cart template.");
+        return false;
+    }
+    if ((size_t)w * (size_t)h < cart.size()) {
+        host->log("[EXPORT] Cart template is too small to hold cart data.");
+        return false;
+    }
+
+    if (!coverArtPath.empty()) {
+        unsigned cw = 0;
+        unsigned ch = 0;
+        std::vector<unsigned char> cover;
+        if (!loadPngRgba(coverArtPath, cover, cw, ch)) {
+            host->log("[EXPORT] Failed to load cover art: %s", coverArtPath.c_str());
+            return false;
+        }
+        blitCoverArt(image, w, h, cover, cw, ch, 128, 128, 16, 23);
+    }
+
+    for (size_t i = 0; i < cart.size(); ++i) {
+        size_t idx = i * 4;
+        uint8_t val = cart[i];
+        image[idx + 0] = (image[idx + 0] & 0xFC) | ((val >> 4) & 0x03);
+        image[idx + 1] = (image[idx + 1] & 0xFC) | ((val >> 2) & 0x03);
+        image[idx + 2] = (image[idx + 2] & 0xFC) | (val & 0x03);
+        image[idx + 3] = (image[idx + 3] & 0xFC) | ((val >> 6) & 0x03);
+    }
+
+    fs::path outPath(outputFile);
+    std::error_code ec;
+    if (outPath.has_parent_path()) {
+        fs::create_directories(outPath.parent_path(), ec);
+    }
+    if (ec) {
+        host->log("[EXPORT] Failed to create output folder: %s", outPath.parent_path().string().c_str());
+        return false;
+    }
+
+    unsigned error = lodepng_encode32_file(outPath.string().c_str(), image.data(), w, h);
+    if (error) {
+        host->log("[EXPORT] Failed to write gamecard: %s", lodepng_error_text(error));
+        return false;
+    }
+
+    host->log("[EXPORT] Gamecard exported to: %s", outPath.string().c_str());
+    vm->gpu.renderMessage("SYSTEM", "CART EXPORTED", 11);
+    vm->show_frame();
+    host->delayMs(500);
+    return true;
+#endif
 }

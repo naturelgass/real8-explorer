@@ -47,7 +47,7 @@ namespace {
     const int kTemplateElfResourceId = 302;
     const int kLogoPngResourceId = 303;
     const char* kTitlePlaceholder = "My game name";
-    const char* kPublisherPlaceholder = "REAL-8";
+    const char* kPublisherPlaceholder = "Real8";
     const char* kTitleIdPlaceholder = "CTR-P-1234";
 
     HWND g_iconEdit = nullptr;
@@ -699,7 +699,7 @@ namespace {
         const size_t shortOffset = 0x0;
         const size_t longOffset = 0x80;
         const size_t pubOffset = 0x180;
-        const std::string longTitle = "Generated with REAL-8";
+        const std::string longTitle = "Generated with Real8";
         for (int i = 0; i < 16; ++i) {
             size_t entry = titleBase + (size_t)i * titleEntrySize;
             writeUtf16Field(&smdh[entry + shortOffset], 0x80, title);
@@ -1001,7 +1001,7 @@ SystemControlInfo:
             if (out.size() >= 64) break;
         }
         while (!out.empty() && out.back() == ' ') out.pop_back();
-        if (out.empty()) out = "REAL-8";
+        if (out.empty()) out = "Real8";
         if (out.rfind("By ", 0) != 0) {
             out = "By " + out;
         }
@@ -2020,7 +2020,7 @@ SystemControlInfo:
 
         std::string cleanTitle = sanitizeTitle(title);
         std::string cleanPublisher = sanitizePublisher(params->publisher);
-        std::string cleanLongTitle = "Generated with REAL-8";
+        std::string cleanLongTitle = "Generated with Real8";
         std::string bannertoolPath;
         if (findToolPath("bannertool", bannertoolPath)) {
             if (!runTool(bannertoolPath, {"makesmdh", "-s", cleanTitle, "-l", cleanTitle, "-p", cleanPublisher,

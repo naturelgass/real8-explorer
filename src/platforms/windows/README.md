@@ -1,6 +1,6 @@
-# REAL-8 Explorer for Windows
+# Real8 Explorer for Windows
 
-REAL-8 Explorer for Windows is the desktop host for the Real8 VM + Shell. It provides a native SDL window, menu bar, input, and tooling so you can browse, launch, and debug PICO-8 carts on Windows.
+Real8 Explorer for Windows is the desktop host for the Real8 VM + Shell. It provides a native SDL window, menu bar, input, and tooling so you can browse, launch, and debug PICO-8 carts on Windows.
 
 > Not affiliated with Lexaloffle Games or PICO-8.
 
@@ -115,4 +115,4 @@ The build outputs `Real-8 VM.exe` and copies `SDL2.dll` next to it.
 
 ## Scope
 
-This README describes the Windows host only. Core VM, Shell, and cross-platform features live elsewhere in the REAL-8 Explorer codebase.
+This README describes the Windows host only. Core VM, Shell, and cross-platform features live elsewhere in the Real8 Explorer codebase.

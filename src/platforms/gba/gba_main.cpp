@@ -269,7 +269,7 @@ namespace {
             vm.gpu.pprint(title, (int)strlen(title), getCenteredX(title), y + 2, 7);
 
             int textY = y + 18;
-            const char* line1 = "REAL-8 VM";
+            const char* line1 = "Real8 VM";
             vm.gpu.pprint(line1, (int)strlen(line1), getCenteredX(line1), textY, 6);
 
             textY += 12;

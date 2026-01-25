@@ -18,8 +18,8 @@ HAVE_3DSTOOL := $(strip $(3DSTOOL))
 #---------------------------------------------------------------------------------
 # Metadata (override with environment variables if desired)
 #---------------------------------------------------------------------------------
-APP_TITLE       ?= REAL-8 Explorer
-APP_AUTHOR      ?= REAL-8
+APP_TITLE       ?= REAL8 Explorer
+APP_AUTHOR      ?= REAL8
 APP_VERSION     ?= 1.0
 APP_DESCRIPTION ?= Real-8 3DS Host
 
@@ -176,7 +176,7 @@ ifeq ($(REAL8_3DS_STANDALONE),1)
   CIA_TITLE_PUBLISHER ?= $(APP_AUTHOR)
 else
   CIA_TITLE_SHORT ?= A PICO-8 Shell
-  CIA_TITLE_LONG ?= REAL-8 EXPLORER
+  CIA_TITLE_LONG ?= REAL8 EXPLORER
   CIA_TITLE_PUBLISHER ?= By @natureglass
 endif
 

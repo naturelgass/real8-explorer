@@ -144,8 +144,8 @@ void Real8Gfx::init() {
 void Real8Gfx::reset() {
     cam_x = 0; cam_y = 0;
     clip_x = 0; clip_y = 0; 
-    clip_w = vm ? vm->fb_w : Real8VM::PICO_WIDTH;
-    clip_h = vm ? vm->fb_h : Real8VM::PICO_HEIGHT;
+    clip_w = vm ? vm->draw_w() : Real8VM::PICO_WIDTH;
+    clip_h = vm ? vm->draw_h() : Real8VM::PICO_HEIGHT;
     
     pen_col = 6;
     cur_x = 0; cur_y = 0;
@@ -354,9 +354,10 @@ void IWRAM_OBJBATCH_CODE Real8Gfx::invalidateObjBatch() {
 
 bool IWRAM_OBJBATCH_CODE Real8Gfx::tryQueueObjSprite(int n, int x, int y, int w, int h, bool fx, bool fy) {
     if (!objBatchAllowed || !vm || !vm->host || !vm->ram) return false;
+    if (vm->isDrawingBottom()) return false;
     if (w != 1 || h != 1) return false;
     if (draw_mask != 0 || fillp_pattern != 0xFFFFFFFFu) return false;
-    if (vm && (clip_x != 0 || clip_y != 0 || clip_w != vm->fb_w || clip_h != vm->fb_h)) return false;
+    if (vm && (clip_x != 0 || clip_y != 0 || clip_w != vm->draw_w() || clip_h != vm->draw_h())) return false;
     updatePaletteFlags();
     if (!paletteIdentity || !paltDefault) return false;
     if (n < 0 || n >= 256) return false;
@@ -368,7 +369,7 @@ bool IWRAM_OBJBATCH_CODE Real8Gfx::tryQueueObjSprite(int n, int x, int y, int w,
     if (!vm->host->queueSprite(spriteSheet, n, sx, sy, w, h, fx, fy)) return false;
 
     if (objSpriteCount == 0) {
-        vm->mark_dirty_rect(0, 0, 0, 0);
+        vm->mark_draw_dirty_rect(0, 0, 0, 0);
     }
 
     objSprites[objSpriteCount++] = {n, x, y, w, h, fx, fy};
@@ -379,8 +380,8 @@ bool IWRAM_OBJBATCH_CODE Real8Gfx::tryQueueObjSprite(int n, int x, int y, int w,
 // --- Primitives Implementation ---
 
 void IWRAM_PUTPIX_CODE Real8Gfx::put_pixel_raw(int x, int y, uint8_t col) {
-    if (!vm || !vm->fb) return;
-    if (x < 0 || x >= vm->fb_w || y < 0 || y >= vm->fb_h) return;
+    if (!vm || !vm->draw_fb()) return;
+    if (x < 0 || x >= vm->draw_w() || y < 0 || y >= vm->draw_h()) return;
 
 #if !defined(__GBA__)
     // Stereo depth bucket comes from GPIO byte 0x5FF0 (PICO-8 legal convention).
@@ -388,7 +389,7 @@ void IWRAM_PUTPIX_CODE Real8Gfx::put_pixel_raw(int x, int y, uint8_t col) {
     if (vm && vm->ram) depth_bucket = vm->getStereoLayerIndex();
 #endif
 
-    uint8_t* row = vm->fb_row(y);
+    uint8_t* row = vm->draw_fb_row(y);
     if (draw_mask != 0) {
         uint8_t old = row[x];
         uint8_t effective_mask = ((x & 1) == 0) ? (draw_mask & 0x0F) : ((draw_mask >> 4) & 0x0F);
@@ -397,12 +398,14 @@ void IWRAM_PUTPIX_CODE Real8Gfx::put_pixel_raw(int x, int y, uint8_t col) {
         row[x] = col & 0x0F;
     }
 #if !defined(__GBA__)
-    if (vm->depth_fb) vm->depth_row(y)[x] = depth_bucket;
-    // If stereoscopic layers are enabled, also write the pixel into the current depth bucket layer.
-    // NOTE: layers intentionally do NOT clear other buckets; this preserves background information
-    // behind nearer objects to avoid "black hole" artifacts during anaglyph warping.
-    if (vm->stereo_layers) {
-        vm->stereo_layer_row(depth_bucket, y)[x] = row[x];
+    if (!vm->isDrawingBottom()) {
+        if (vm->depth_fb) vm->depth_row(y)[x] = depth_bucket;
+        // If stereoscopic layers are enabled, also write the pixel into the current depth bucket layer.
+        // NOTE: layers intentionally do NOT clear other buckets; this preserves background information
+        // behind nearer objects to avoid "black hole" artifacts during anaglyph warping.
+        if (vm->stereo_layers) {
+            vm->stereo_layer_row(depth_bucket, y)[x] = row[x];
+        }
     }
 #endif
 }
@@ -433,7 +436,7 @@ void IWRAM_PSETGET_CODE Real8Gfx::pset(int x, int y, uint8_t col) {
     }
 
     put_pixel_raw(sx, sy, palette_map[col & 0x0F]);
-    if (vm && !vm->skipDirtyRect) vm->mark_dirty_rect(sx, sy, sx, sy);
+    if (vm && !vm->skipDirtyRect) vm->mark_draw_dirty_rect(sx, sy, sx, sy);
 }
 
 uint8_t IWRAM_PSETGET_CODE Real8Gfx::pget(int x, int y) {
@@ -442,36 +445,39 @@ uint8_t IWRAM_PSETGET_CODE Real8Gfx::pget(int x, int y) {
     // However, most emulators impl pget as raw framebuffer access + camera offset.
     int rx = x - cam_x;
     int ry = y - cam_y;
-    if (!vm || !vm->fb || rx < 0 || rx >= vm->fb_w || ry < 0 || ry >= vm->fb_h) return 0;
-    return vm->fb_row(ry)[rx] & 0x0F;
+    if (!vm || !vm->draw_fb() || rx < 0 || rx >= vm->draw_w() || ry < 0 || ry >= vm->draw_h()) return 0;
+    return vm->draw_fb_row(ry)[rx] & 0x0F;
 }
 
 void IWRAM_CLS_CODE Real8Gfx::cls(int c) {
     invalidateObjBatch();
-    if (!vm->fb) return;
+    uint8_t* draw_fb = vm ? vm->draw_fb() : nullptr;
+    if (!draw_fb) return;
     uint8_t stored = c & 0x0F;
-    std::memset(vm->fb, stored, (size_t)vm->fb_w * (size_t)vm->fb_h);
+    std::memset(draw_fb, stored, (size_t)vm->draw_w() * (size_t)vm->draw_h());
 #if !defined(__GBA__)
-    if (vm->depth_fb) {
-        std::memset(vm->depth_fb, (uint8_t)Real8VM::STEREO_BUCKET_BIAS, (size_t)vm->fb_w * (size_t)vm->fb_h);
-    }
+    if (!vm->isDrawingBottom()) {
+        if (vm->depth_fb) {
+            std::memset(vm->depth_fb, (uint8_t)Real8VM::STEREO_BUCKET_BIAS, (size_t)vm->fb_w * (size_t)vm->fb_h);
+        }
 
-    // Reset stereo layers: clear all buckets, and seed bucket 0 with the clear color.
-    if (vm->stereo_layers) {
-        const size_t total = (size_t)vm->fb_w * (size_t)vm->fb_h * (size_t)Real8VM::STEREO_LAYER_COUNT;
-        std::memset(vm->stereo_layers, 0xFF, total);
-        for (int y = 0; y < vm->fb_h; ++y) {
-            std::memset(vm->stereo_layer_row(Real8VM::STEREO_BUCKET_BIAS, y), stored, (size_t)vm->fb_w);
+        // Reset stereo layers: clear all buckets, and seed bucket 0 with the clear color.
+        if (vm->stereo_layers) {
+            const size_t total = (size_t)vm->fb_w * (size_t)vm->fb_h * (size_t)Real8VM::STEREO_LAYER_COUNT;
+            std::memset(vm->stereo_layers, 0xFF, total);
+            for (int y = 0; y < vm->fb_h; ++y) {
+                std::memset(vm->stereo_layer_row(Real8VM::STEREO_BUCKET_BIAS, y), stored, (size_t)vm->fb_w);
+            }
         }
     }
 #endif
 
     
     // Also update 0x6000 RAM mirror if available
-    if (vm->screen_ram && vm->r8_vmode_cur == 0) {
+    if (!vm->isDrawingBottom() && vm->screen_ram && vm->r8_vmode_cur == 0) {
         std::memset(vm->screen_ram, (stored << 4) | stored, 0x2000);
     }
-    vm->mark_dirty_rect(0, 0, vm->fb_w - 1, vm->fb_h - 1);
+    vm->mark_draw_dirty_rect(0, 0, vm->draw_w() - 1, vm->draw_h() - 1);
     
     // PICO-8 cls resets cursor
     cur_x = 0; cur_y = 0;
@@ -544,21 +550,23 @@ void IWRAM_CODE Real8Gfx::line(int x0, int y0, int x1, int y1, uint8_t c) {
     int dirty_y0 = std::min(sy0, sy1);
     int dirty_x1 = std::max(sx0, sx1);
     int dirty_y1 = std::max(sy0, sy1);
-    if (vm) vm->mark_dirty_rect(dirty_x0, dirty_y0, dirty_x1, dirty_y1);
+    if (vm) vm->mark_draw_dirty_rect(dirty_x0, dirty_y0, dirty_x1, dirty_y1);
 
-    if (fillp_pattern == 0xFFFFFFFFu && draw_mask == 0 && vm && vm->fb && sy0 == sy1) {
+    if (fillp_pattern == 0xFFFFFFFFu && draw_mask == 0 && vm && vm->draw_fb() && sy0 == sy1) {
         int xStart = std::min(sx0, sx1);
         int xEnd = std::max(sx0, sx1);
         uint8_t mapped = palette_map[c & 0x0F];
-        std::memset(&vm->fb_row(sy0)[xStart], mapped, (size_t)(xEnd - xStart + 1));
+        std::memset(&vm->draw_fb_row(sy0)[xStart], mapped, (size_t)(xEnd - xStart + 1));
 #if !defined(__GBA__)
-        uint8_t depth_bucket = (vm->ram ? (vm->getStereoLayerIndex()) : 0);
-        if (vm->depth_fb) {
-            std::memset(&vm->depth_row(sy0)[xStart], depth_bucket, (size_t)(xEnd - xStart + 1));
-        }
-        if (vm->stereo_layers) {
-            std::memset(&vm->stereo_layer_row(depth_bucket, sy0)[xStart],
-                        mapped, (size_t)(xEnd - xStart + 1));
+        if (!vm->isDrawingBottom()) {
+            uint8_t depth_bucket = (vm->ram ? (vm->getStereoLayerIndex()) : 0);
+            if (vm->depth_fb) {
+                std::memset(&vm->depth_row(sy0)[xStart], depth_bucket, (size_t)(xEnd - xStart + 1));
+            }
+            if (vm->stereo_layers) {
+                std::memset(&vm->stereo_layer_row(depth_bucket, sy0)[xStart],
+                            mapped, (size_t)(xEnd - xStart + 1));
+            }
         }
 #endif
         return;
@@ -602,23 +610,25 @@ void IWRAM_CODE Real8Gfx::rectfill(int x0, int y0, int x1, int y1, uint8_t c) {
     
     uint8_t mapped = palette_map[c & 0x0F];
 
-    if (fillp_pattern == 0xFFFFFFFFu && draw_mask == 0 && vm && vm->fb) {
+    if (fillp_pattern == 0xFFFFFFFFu && draw_mask == 0 && vm && vm->draw_fb()) {
         size_t rowCount = (size_t)(sx1 - sx0 + 1);
 #if !defined(__GBA__)
         uint8_t depth_bucket = (vm->ram ? (vm->getStereoLayerIndex()) : 0);
         for (int y = sy0; y <= sy1; ++y) {
-            std::memset(&vm->fb_row(y)[sx0], mapped, rowCount);
-            if (vm->depth_fb) std::memset(&vm->depth_row(y)[sx0], depth_bucket, rowCount);
-            if (vm->stereo_layers) {
-                std::memset(&vm->stereo_layer_row(depth_bucket, y)[sx0], mapped, rowCount);
+            std::memset(&vm->draw_fb_row(y)[sx0], mapped, rowCount);
+            if (!vm->isDrawingBottom()) {
+                if (vm->depth_fb) std::memset(&vm->depth_row(y)[sx0], depth_bucket, rowCount);
+                if (vm->stereo_layers) {
+                    std::memset(&vm->stereo_layer_row(depth_bucket, y)[sx0], mapped, rowCount);
+                }
             }
         }
 #else
         for (int y = sy0; y <= sy1; ++y) {
-            std::memset(&vm->fb_row(y)[sx0], mapped, rowCount);
+            std::memset(&vm->draw_fb_row(y)[sx0], mapped, rowCount);
         }
 #endif
-        vm->mark_dirty_rect(sx0, sy0, sx1, sy1);
+        vm->mark_draw_dirty_rect(sx0, sy0, sx1, sy1);
         return;
     }
     
@@ -633,16 +643,18 @@ void IWRAM_CODE Real8Gfx::rectfill(int x0, int y0, int x1, int y1, uint8_t c) {
                 int bit_index = ((y & 3) << 2) | (x & 3);
                 if (!((fillp_pattern >> (15 - bit_index)) & 1u)) continue;
             }
-            if (vm->fb) {
-                vm->fb_row(y)[x] = mapped;
+            if (vm->draw_fb()) {
+                vm->draw_fb_row(y)[x] = mapped;
 #if !defined(__GBA__)
-                if (vm->depth_fb) vm->depth_row(y)[x] = depth_bucket;
-                if (vm->stereo_layers) vm->stereo_layer_row(depth_bucket, y)[x] = mapped;
+                if (!vm->isDrawingBottom()) {
+                    if (vm->depth_fb) vm->depth_row(y)[x] = depth_bucket;
+                    if (vm->stereo_layers) vm->stereo_layer_row(depth_bucket, y)[x] = mapped;
+                }
 #endif
             }
         }
     }
-    vm->mark_dirty_rect(sx0, sy0, sx1, sy1);
+    vm->mark_draw_dirty_rect(sx0, sy0, sx1, sy1);
 }
 
 static int clamp_rrect_radius(int r, int width, int height) {
@@ -714,7 +726,7 @@ void Real8Gfx::rrect(int x, int y, int w, int h, int r, uint8_t c) {
     int dy0 = std::max(clip_y, sy0);
     int dx1 = std::min(clip_x + clip_w - 1, sx1);
     int dy1 = std::min(clip_y + clip_h - 1, sy1);
-    if (vm && dx0 <= dx1 && dy0 <= dy1) vm->mark_dirty_rect(dx0, dy0, dx1, dy1);
+    if (vm && dx0 <= dx1 && dy0 <= dy1) vm->mark_draw_dirty_rect(dx0, dy0, dx1, dy1);
 
     line(x0 + radius, y0, x1 - radius, y0, c);
     line(x0 + radius, y1, x1 - radius, y1, c);
@@ -745,7 +757,7 @@ void Real8Gfx::rrectfill(int x, int y, int w, int h, int r, uint8_t c) {
     int dy0 = std::max(clip_y, sy0);
     int dx1 = std::min(clip_x + clip_w - 1, sx1);
     int dy1 = std::min(clip_y + clip_h - 1, sy1);
-    if (vm && dx0 <= dx1 && dy0 <= dy1) vm->mark_dirty_rect(dx0, dy0, dx1, dy1);
+    if (vm && dx0 <= dx1 && dy0 <= dy1) vm->mark_draw_dirty_rect(dx0, dy0, dx1, dy1);
 
     int inner_x0 = x0 + radius;
     int inner_x1 = x1 - radius;
@@ -771,7 +783,7 @@ void IWRAM_CIRC_CODE Real8Gfx::circ(int cx, int cy, int r, uint8_t c) {
     int dy0 = std::max(clip_y, sy0);
     int dx1 = std::min(clip_x + clip_w - 1, sx1);
     int dy1 = std::min(clip_y + clip_h - 1, sy1);
-    if (vm && dx0 <= dx1 && dy0 <= dy1) vm->mark_dirty_rect(dx0, dy0, dx1, dy1);
+    if (vm && dx0 <= dx1 && dy0 <= dy1) vm->mark_draw_dirty_rect(dx0, dy0, dx1, dy1);
 
     int x = r, y = 0, err = 0;
     while (x >= y) {
@@ -794,7 +806,7 @@ void IWRAM_CIRC_CODE Real8Gfx::circfill(int cx, int cy, int r, uint8_t c) {
     int dy0 = std::max(clip_y, sy0);
     int dx1 = std::min(clip_x + clip_w - 1, sx1);
     int dy1 = std::min(clip_y + clip_h - 1, sy1);
-    if (vm && dx0 <= dx1 && dy0 <= dy1) vm->mark_dirty_rect(dx0, dy0, dx1, dy1);
+    if (vm && dx0 <= dx1 && dy0 <= dy1) vm->mark_draw_dirty_rect(dx0, dy0, dx1, dy1);
 
     int x = r, y = 0, err = 0;
     while (x >= y) {
@@ -810,13 +822,13 @@ void IWRAM_CIRC_CODE Real8Gfx::circfill(int cx, int cy, int r, uint8_t c) {
 // --- Sprites ---
 
 void IWRAM_CODE Real8Gfx::spr_fast(int n, int x, int y, int w, int h, bool fx, bool fy) {
-    if (!vm->ram || !vm->fb) return;
+    if (!vm->ram || !vm->draw_fb()) return;
     int sx = x - cam_x; int sy = y - cam_y;
     int x0 = std::max(clip_x, sx); int y0 = std::max(clip_y, sy);
     int x1 = std::min(clip_x + clip_w, sx + (w * 8));
     int y1 = std::min(clip_y + clip_h, sy + (h * 8));
     if (x0 >= x1 || y0 >= y1) return;
-    vm->mark_dirty_rect(x0, y0, x1 - 1, y1 - 1);
+    vm->mark_draw_dirty_rect(x0, y0, x1 - 1, y1 - 1);
 
     int sheet_base_x = (n % 16) * 8;
     int sheet_base_y = (n / 16) * 8;
@@ -834,11 +846,16 @@ void IWRAM_CODE Real8Gfx::spr_fast(int n, int x, int y, int w, int h, bool fx, b
         if (use_chunked) {
             int dst_x = x0;
             int src_x = sheet_base_x + (dst_x - sx);
-            uint8_t* dest_ptr = vm->fb_row(cy) + dst_x;
+            uint8_t* dest_ptr = vm->draw_fb_row(cy) + dst_x;
 #if !defined(__GBA__)
-            uint8_t* depth_row = vm->depth_fb ? vm->depth_row(cy) : nullptr;
-            uint8_t depth_bucket = (vm->ram ? (vm->getStereoLayerIndex()) : 0);
-            uint8_t* layer_row = vm->stereo_layers ? vm->stereo_layer_row(depth_bucket, cy) : nullptr;
+            uint8_t* depth_row = nullptr;
+            uint8_t depth_bucket = 0;
+            uint8_t* layer_row = nullptr;
+            if (!vm->isDrawingBottom()) {
+                depth_bucket = (vm->ram ? (vm->getStereoLayerIndex()) : 0);
+                depth_row = vm->depth_fb ? vm->depth_row(cy) : nullptr;
+                layer_row = vm->stereo_layers ? vm->stereo_layer_row(depth_bucket, cy) : nullptr;
+            }
 #endif
 
             if (src_x & 1) {
@@ -925,11 +942,16 @@ void IWRAM_CODE Real8Gfx::spr_fast(int n, int x, int y, int w, int h, bool fx, b
                 }
             }
         } else {
-            uint8_t* dest_ptr = vm->fb_row(cy) + x0;
+            uint8_t* dest_ptr = vm->draw_fb_row(cy) + x0;
 #if !defined(__GBA__)
-            uint8_t* depth_ptr = vm->depth_fb ? (vm->depth_row(cy) + x0) : nullptr;
-            uint8_t depth_bucket = (vm->ram ? (vm->getStereoLayerIndex()) : 0);
-            uint8_t* layer_row = vm->stereo_layers ? vm->stereo_layer_row(depth_bucket, cy) : nullptr;
+            uint8_t* depth_ptr = nullptr;
+            uint8_t depth_bucket = 0;
+            uint8_t* layer_row = nullptr;
+            if (!vm->isDrawingBottom()) {
+                depth_bucket = (vm->ram ? (vm->getStereoLayerIndex()) : 0);
+                depth_ptr = vm->depth_fb ? (vm->depth_row(cy) + x0) : nullptr;
+                layer_row = vm->stereo_layers ? vm->stereo_layer_row(depth_bucket, cy) : nullptr;
+            }
 #endif
             for (int cx = x0; cx < x1; cx++) {
                 int spx = cx - sx; if (fx) spx = (w * 8) - 1 - spx;
@@ -988,12 +1010,12 @@ void IWRAM_SPR_CODE Real8Gfx::spr(int n, int x, int y, int w, int h, bool fx, bo
             }
         }
     }
-    vm->mark_dirty_rect(dx0, dy0, dx1, dy1);
+    vm->mark_draw_dirty_rect(dx0, dy0, dx1, dy1);
 }
 
 void IWRAM_SSPR_CODE Real8Gfx::sspr(int sx, int sy, int sw, int sh, int dx, int dy, int dw, int dh, bool flip_x, bool flip_y) {
     invalidateObjBatch();
-    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0 || !vm->fb) return;
+    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0 || !vm->draw_fb()) return;
     REAL8_PROFILE_HOTSPOT(vm, Real8VM::kHotspotSspr);
     // 1x tile-aligned sspr can reuse the spr fast path.
     if (draw_mask == 0 && !flip_x && !flip_y && sw == dw && sh == dh
@@ -1016,10 +1038,11 @@ void IWRAM_SSPR_CODE Real8Gfx::sspr(int sx, int sy, int sw, int sh, int dx, int 
     int dirty_x1 = std::min(max_x - 1, screen_dx + dw - 1);
     int dirty_y1 = std::min(max_y - 1, screen_dy + dh - 1);
     if (dirty_x1 < dirty_x0 || dirty_y1 < dirty_y0) return;
-    if (vm) vm->mark_dirty_rect(dirty_x0, dirty_y0, dirty_x1, dirty_y1);
+    if (vm) vm->mark_draw_dirty_rect(dirty_x0, dirty_y0, dirty_x1, dirty_y1);
     uint32_t sprite_base = sprite_base_addr();
 #if !defined(__GBA__)
-    const uint8_t depth_bucket = (vm && vm->ram) ? (vm->getStereoLayerIndex()) : 0;
+    const bool allow_stereo = vm && !vm->isDrawingBottom();
+    const uint8_t depth_bucket = (allow_stereo && vm->ram) ? (vm->getStereoLayerIndex()) : 0;
 #endif
 
     for (int yy = 0; yy < dh; ++yy) {
@@ -1039,10 +1062,12 @@ void IWRAM_SSPR_CODE Real8Gfx::sspr(int sx, int sy, int sw, int sh, int dx, int 
                 uint8_t c = get_pixel_ram(sprite_base, srcx, srcy);
                 if (!palt_map[c]) {
                     const uint8_t out = palette_map[c];
-                    vm->fb_row(dst_y)[dst_x] = out;
+                    vm->draw_fb_row(dst_y)[dst_x] = out;
 #if !defined(__GBA__)
-                    if (vm->depth_fb) vm->depth_row(dst_y)[dst_x] = depth_bucket;
-                    if (vm->stereo_layers) vm->stereo_layer_row(depth_bucket, dst_y)[dst_x] = out;
+                    if (allow_stereo) {
+                        if (vm->depth_fb) vm->depth_row(dst_y)[dst_x] = depth_bucket;
+                        if (vm->stereo_layers) vm->stereo_layer_row(depth_bucket, dst_y)[dst_x] = out;
+                    }
 #endif
                 }
             }
@@ -1135,7 +1160,7 @@ void IWRAM_MAP_CODE Real8Gfx::map(int mx, int my, int sx, int sy, int w, int h, 
     int dy0 = std::max(clip_y, sy0);
     int dx1 = std::min(clip_x + clip_w - 1, sx1);
     int dy1 = std::min(clip_y + clip_h - 1, sy1);
-    if (vm && dx0 <= dx1 && dy0 <= dy1) vm->mark_dirty_rect(dx0, dy0, dx1, dy1);
+    if (vm && dx0 <= dx1 && dy0 <= dy1) vm->mark_draw_dirty_rect(dx0, dy0, dx1, dy1);
     for (int j = 0; j < h; ++j) {
         for (int i = 0; i < w; ++i) {
             uint8_t tile = mget(mx + i, my + j);
@@ -1155,8 +1180,8 @@ void Real8Gfx::camera(int x, int y) {
 }
 void Real8Gfx::clip(int x, int y, int w, int h) {
     invalidateObjBatch();
-    int max_w = vm ? vm->fb_w : Real8VM::PICO_WIDTH;
-    int max_h = vm ? vm->fb_h : Real8VM::PICO_HEIGHT;
+    int max_w = vm ? vm->draw_w() : Real8VM::PICO_WIDTH;
+    int max_h = vm ? vm->draw_h() : Real8VM::PICO_HEIGHT;
     if (w < 0) w = 0;
     if (h < 0) h = 0;
     if (x < 0) { w += x; x = 0; }
@@ -1319,7 +1344,7 @@ int Real8Gfx::pprint(const char *s, int len, int x, int y, uint8_t col) {
         int dy0 = std::max(clip_y, sy0);
         int dx1 = std::min(clip_x + clip_w - 1, sx1);
         int dy1 = std::min(clip_y + clip_h - 1, sy1);
-        if (dx0 <= dx1 && dy0 <= dy1) vm->mark_dirty_rect(dx0, dy0, dx1, dy1);
+        if (dx0 <= dx1 && dy0 <= dy1) vm->mark_draw_dirty_rect(dx0, dy0, dx1, dy1);
     }
     return cx;
 }
@@ -1328,8 +1353,8 @@ void Real8Gfx::renderMessage(const char *header, std::string msg, int color) {
     bool old_menu = use_menu_font;
     use_menu_font = true;
     cls(0);
-    int w = vm ? vm->fb_w : Real8VM::PICO_WIDTH;
-    int h = vm ? vm->fb_h : Real8VM::PICO_HEIGHT;
+    int w = vm ? vm->draw_w() : Real8VM::PICO_WIDTH;
+    int h = vm ? vm->draw_h() : Real8VM::PICO_HEIGHT;
     int mid_y = h / 2;
     rectfill(0, mid_y - 14, w - 1, mid_y + 11, color);
     int hX = (w / 2) - ((int)strlen(header) * 5 / 2);

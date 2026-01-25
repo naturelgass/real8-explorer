@@ -58,6 +58,8 @@ private:
     bool pendingRepoBootCopy = false;
 
     Real8Gfx::GfxState menu_gfx_backup;
+    bool menu_force_draw_bottom = false;
+    bool menu_saved_draw_bottom = false;
     
     // --- State Logic ---
     void updateBrowser();
@@ -96,7 +98,9 @@ private:
     // --- Preview RAM ---
     uint8_t preview_ram[128][128];
     bool has_preview = false;
-    uint8_t top_screen_fb[128][128];
+    std::vector<uint8_t> top_screen_fb;
+    int top_screen_w = 0;
+    int top_screen_h = 0;
 
     // --- Selection State ---
     int fileSelection = 0;

@@ -1208,7 +1208,7 @@ public:
         // OPEN LOG FILE (Overwrites previous log on startup)
         logFile.open("logs.txt", std::ios::out | std::ios::trunc);
         if (logFile.is_open()) {
-            logFile << "=== REAL-8 SESSION STARTED ===\n";
+            logFile << "=== Real8 SESSION STARTED ===\n";
             logFile.flush();
         }
 

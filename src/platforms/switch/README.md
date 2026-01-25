@@ -1,6 +1,6 @@
-﻿# REAL-8 Explorer for Nintendo Switch
+﻿# Real8 Explorer for Nintendo Switch
 
-REAL-8 Explorer for Nintendo Switch is the libnx host for the Real8 VM + Shell. It provides a native fullscreen SDL2 front-end for browsing and running PICO-8 carts on Switch.
+Real8 Explorer for Nintendo Switch is the libnx host for the Real8 VM + Shell. It provides a native fullscreen SDL2 front-end for browsing and running PICO-8 carts on Switch.
 
 > Not affiliated with Lexaloffle Games, PICO-8, or Nintendo.
 
@@ -201,9 +201,9 @@ folder (run `make template` once to generate it) before configuring the tools bu
 
 ## Screenshots
 
-### REAL-8 on Switch
+### Real8 on Switch
 
-![REAL-8 on Switch](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8Switch.png)
+![Real8 on Switch](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8Switch.png)
 
 ## Notes and limitations
 

@@ -481,7 +481,23 @@ static int l_stat(lua_State *L)
     case 151: // Framebuffer height
         lua_pushinteger(L, vm ? vm->fb_h : 0);
         return 1;
-    case 152: // Current host platform
+    case 152: // Bottom framebuffer width (3DS)
+        if (vm && vm->host && vm->host->getPlatform() &&
+            std::strcmp(vm->host->getPlatform(), "3DS") == 0) {
+            lua_pushinteger(L, vm->bottom_fb_w);
+        } else {
+            lua_pushinteger(L, 0);
+        }
+        return 1;
+    case 153: // Bottom framebuffer height (3DS)
+        if (vm && vm->host && vm->host->getPlatform() &&
+            std::strcmp(vm->host->getPlatform(), "3DS") == 0) {
+            lua_pushinteger(L, vm->bottom_fb_h);
+        } else {
+            lua_pushinteger(L, 0);
+        }
+        return 1;
+    case 154: // Current host platform
         lua_pushstring(L, (vm && vm->host && vm->host->getPlatform()) ? vm->host->getPlatform() : "");
         return 1;
 
@@ -2246,10 +2262,15 @@ static void vm_sync_ram(Real8VM *vm, uint32_t start_addr, int length)
                 vm->ram[addr] = clamp_s8(vm->ram[addr]);
             }
         }
+
+        if (start_addr <= Real8VM::BOTTOM_GPIO_ADDR && end_addr > Real8VM::BOTTOM_GPIO_ADDR) {
+            vm->ram[Real8VM::BOTTOM_GPIO_ADDR] = (uint8_t)(vm->ram[Real8VM::BOTTOM_GPIO_ADDR] & 0x03);
+            vm->applyBottomScreenFlags(vm->ram[Real8VM::BOTTOM_GPIO_ADDR]);
+        }
     }
 
-    // 6. REAL-8 GPIO (0x5FE0 - 0x5FE2)
-    if (end_addr > 0x5FE0 && start_addr <= 0x5FE2)
+    // 6. REAL-8 GPIO (0x5FE0 - 0x5FE4)
+    if (end_addr > 0x5FE0 && start_addr <= 0x5FE4)
     {
         if (start_addr <= 0x5FE0 && end_addr > 0x5FE0) {
             vm->r8_flags = vm->ram[0x5FE0];
@@ -2259,6 +2280,12 @@ static void vm_sync_ram(Real8VM *vm, uint32_t start_addr, int length)
         }
         if (start_addr <= 0x5FE2 && end_addr > 0x5FE2) {
             vm->ram[0x5FE2] = vm->r8_vmode_cur;
+        }
+        if (start_addr <= Real8VM::BOTTOM_VMODE_REQ_ADDR && end_addr > Real8VM::BOTTOM_VMODE_REQ_ADDR) {
+            vm->applyBottomVideoMode(vm->ram[Real8VM::BOTTOM_VMODE_REQ_ADDR], /*force=*/false);
+        }
+        if (start_addr <= Real8VM::BOTTOM_VMODE_CUR_ADDR && end_addr > Real8VM::BOTTOM_VMODE_CUR_ADDR) {
+            vm->ram[Real8VM::BOTTOM_VMODE_CUR_ADDR] = vm->bottom_vmode_cur;
         }
     }
 }

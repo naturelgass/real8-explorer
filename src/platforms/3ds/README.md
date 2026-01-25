@@ -1,6 +1,6 @@
-﻿# REAL-8 Explorer for Nintendo 3DS
+﻿# Real8 Explorer for Nintendo 3DS
 
-REAL-8 Explorer for Nintendo 3DS is the citro2d/citro3d host for the Real8 VM + Shell. It provides a dual-screen front-end for browsing and running PICO-8 carts on 3DS.
+Real8 Explorer for Nintendo 3DS is the citro2d/citro3d host for the Real8 VM + Shell. It provides a dual-screen front-end for browsing and running PICO-8 carts on 3DS.
 
 > Not affiliated with Lexaloffle Games, PICO-8, or Nintendo.
 
@@ -142,9 +142,9 @@ make cia
 
 ## Screenshots
 
-### REAL-8 on 3DS
+### Real8 on 3DS
 
-![REAL-8 on 3DS](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8-3DS.png)
+![Real8 on 3DS](https://raw.githubusercontent.com/naturelgass/real8-explorer/refs/heads/main/screenshots/Real8-3DS.png)
 
 ## Notes and limitations
 

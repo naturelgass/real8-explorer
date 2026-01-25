@@ -1,8 +1,8 @@
 # Software Information
-display_name = "Pico-8 (REAL-8 VM)"
+display_name = "Pico-8 (Real8 VM)"
 authors = "Alexandros Daskalakis"
 supported_extensions = "p8|png"
-corename = "REAL-8 VM"
+corename = "Real8 VM"
 categories = "Emulator"
 license = "GPLv3"
 permissions = ""
@@ -14,7 +14,7 @@ systemname = "Pico-8"
 systemid = "pico8"
 
 # Libretro Information
-database = "REAL-8"
+database = "Real8"
 supports_no_game = "false"
 savestate = "true"
 savestate_features = "serialized"
@@ -29,4 +29,4 @@ needs_fullpath = "true"
 disk_control = "false"
 is_experimental = "true"
 
-description = "A fantasy virtual machine core for REAL-8."
+description = "A fantasy virtual machine core for Real8."

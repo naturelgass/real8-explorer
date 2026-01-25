@@ -1692,6 +1692,7 @@ if (gameSubtexTopR) {
 
         const bool inGameSingleScreen = (topbuffer == bottombuffer);
         const int mode = (debugVMRef ? debugVMRef->r8_vmode_cur : 0);
+        const int bottomMode = (debugVMRef ? debugVMRef->bottom_vmode_cur : mode);
 
         if (inGameSingleScreen != lastInGameSingleScreen) {
             bottomStaticValid = false;
@@ -1965,7 +1966,15 @@ if (gameSubtexTopR) {
         bool hasWallpaper = (wallpaperTex != nullptr);
         bool topStretch = debugVMRef && debugVMRef->stretchScreen;
         bool topHasWallpaper = hasWallpaper && (!debugVMRef || (debugVMRef->showSkin && !topStretch));
-        bool bottomHasWallpaper = hasWallpaper && bottomWallpaperVisible;
+        bool bottomScreenActive = false;
+        if (debugVMRef) {
+            if (debugVMRef->ram) {
+                bottomScreenActive = (debugVMRef->ram[Real8VM::BOTTOM_GPIO_ADDR] & 0x03) != 0;
+            } else {
+                bottomScreenActive = debugVMRef->isBottomScreenEnabled();
+            }
+        }
+        bool bottomHasWallpaper = bottomWallpaperVisible && topHasWallpaper;
         const int logicalTopW = topStretch ? kTopWidth : kBottomWidth;
         if (mode == 1 || mode == 2) {
             tw = top_w;
@@ -2132,20 +2141,38 @@ if (gameSubtexTopR) {
             }
             float bscaleX = 1.0f;
             float bscaleY = 1.0f;
-            if (bottom_w == kPicoWidth && bottom_h == kPicoHeight) {
+            int drawW = bottom_w;
+            int drawH = bottom_h;
+            const bool bottomGameTallScale =
+                (bottomMode == 0 && bottom_w == kPicoWidth && bottom_h == kPicoHeight &&
+                 debugVMRef && !debugVMRef->isShellUI);
+            if (bottomGameTallScale) {
+                float scale = std::min((float)kBottomWidth / (float)bottom_w,
+                                       (float)kBottomHeight / (float)bottom_h);
+                drawW = (int)((float)bottom_w * scale);
+                drawH = (int)((float)bottom_h * scale);
+                bx = (kBottomWidth - drawW) / 2;
+                by = (kBottomHeight - drawH) / 2;
+                bscaleX = scale;
+                bscaleY = scale;
+            } else if (bottom_w == kPicoWidth && bottom_h == kPicoHeight) {
                 bx = (kBottomWidth - kBottomGameSize) / 2;
                 by = kBottomPad;
                 bscaleX = (float)kBottomGameSize / (float)bottom_w;
                 bscaleY = (float)kBottomGameSize / (float)bottom_h;
-            } else if (mode == 1 || mode == 2) {
+                drawW = (int)((float)bottom_w * bscaleX);
+                drawH = (int)((float)bottom_h * bscaleY);
+            } else if (bottomMode == 1 || bottomMode == 2) {
                 bx = (kBottomWidth - bottom_w) / 2;
                 by = (kBottomHeight - bottom_h) / 2;
                 bscaleX = 1.0f;
                 bscaleY = 1.0f;
+                drawW = bottom_w;
+                drawH = bottom_h;
             } else {
                 float scale = std::min((float)kBottomWidth / (float)bottom_w, (float)kBottomHeight / (float)bottom_h);
-                int drawW = (int)((float)bottom_w * scale);
-                int drawH = (int)((float)bottom_h * scale);
+                drawW = (int)((float)bottom_w * scale);
+                drawH = (int)((float)bottom_h * scale);
                 bx = (kBottomWidth - drawW) / 2;
                 by = (kBottomHeight - drawH) / 2;
                 bscaleX = scale;
@@ -2158,7 +2185,67 @@ if (gameSubtexTopR) {
             }
 #endif
 
-            C2D_DrawImageAt(gameImageBottom, (float)bx, (float)by, 0.5f, nullptr, bscaleX, bscaleY);
+            if (!bottomGameTallScale) {
+                C2D_DrawImageAt(gameImageBottom, (float)bx, (float)by, 0.5f, nullptr, bscaleX, bscaleY);
+            } else {
+                const int kNoDoubleRows = 8;
+                const int srcW = bottom_w;
+                const int srcH = bottom_h;
+                const int topH = kNoDoubleRows;
+                const int botH = kNoDoubleRows;
+                const int midH = srcH - topH - botH;
+
+                const float dstTopH = (float)topH;
+                const float dstBotH = (float)botH;
+                float dstMidH = (float)drawH - dstTopH - dstBotH;
+                if (dstMidH < 1.0f) dstMidH = 1.0f;
+
+                const float scaleYMid = dstMidH / (float)midH;
+                const float tscaleX = (float)drawW / (float)bottom_w;
+                const float drawX = (float)bx;
+                const float drawY = (float)by;
+
+                const float vTopFull = 1.0f;
+                const float vTopSplit = 1.0f - ((float)topH / (float)srcH);
+                const float vBotSplit = (float)botH / (float)srcH;
+                const float vBotFull = 0.0f;
+
+                Tex3DS_SubTexture subTop;
+                subTop.width  = srcW;
+                subTop.height = topH;
+                subTop.left   = 0.0f;
+                subTop.right  = 1.0f;
+                subTop.top    = vTopFull;
+                subTop.bottom = vTopSplit;
+
+                C2D_Image imgTop = gameImageBottom;
+                imgTop.subtex = &subTop;
+                C2D_DrawImageAt(imgTop, drawX, drawY, 0.5f, nullptr, tscaleX, 1.0f);
+
+                Tex3DS_SubTexture subMid;
+                subMid.width  = srcW;
+                subMid.height = midH;
+                subMid.left   = 0.0f;
+                subMid.right  = 1.0f;
+                subMid.top    = vTopSplit;
+                subMid.bottom = vBotSplit;
+
+                C2D_Image imgMid = gameImageBottom;
+                imgMid.subtex = &subMid;
+                C2D_DrawImageAt(imgMid, drawX, drawY + dstTopH, 0.5f, nullptr, tscaleX, scaleYMid);
+
+                Tex3DS_SubTexture subBot;
+                subBot.width  = srcW;
+                subBot.height = botH;
+                subBot.left   = 0.0f;
+                subBot.right  = 1.0f;
+                subBot.top    = vBotSplit;
+                subBot.bottom = vBotFull;
+
+                C2D_Image imgBot = gameImageBottom;
+                imgBot.subtex = &subBot;
+                C2D_DrawImageAt(imgBot, drawX, drawY + dstTopH + dstMidH, 0.5f, nullptr, tscaleX, 1.0f);
+            }
         }
 
         // Flush once after all targets have been drawn this frame.
