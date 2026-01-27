@@ -72,12 +72,21 @@ private:
     SDL_AudioDeviceID audioDevice;
     WindowsInput input;
     SDL_Window* sdlWindow; 
+    SDL_Window* bottomWindow = nullptr;
+    SDL_Renderer* bottomRenderer = nullptr;
+    SDL_Texture* bottomTexture = nullptr;
+    Uint32 bottomWindowId = 0;
+    int bottomWindowFbW = 0;
+    int bottomWindowFbH = 0;
 
     std::ofstream logFile;
 
     std::vector<uint32_t> screenBuffer;
     int screenW = 128;
     int screenH = 128;
+    std::vector<uint32_t> bottomScreenBuffer;
+    int bottomScreenW = 0;
+    int bottomScreenH = 0;
     int defaultWindowW = 0;
     int defaultWindowH = 0;
     std::vector<uint32_t> wallBuffer;
@@ -673,6 +682,7 @@ public:
     int getModeWindowScale(int mode) const
     {
         switch (mode) {
+        case 0: return 4;
         case 1: return 3;
         case 2: return 2;
         case 3: return 1;
@@ -680,7 +690,7 @@ public:
         }
     }
 
-    void calculateGameRect(int winW, int winH, SDL_Rect *outRect, float *outScale)
+    void calculateGameRectFor(int winW, int winH, int gameW, int gameH, bool stretch, SDL_Rect *outRect, float *outScale)
     {
         int padding = 0;
 
@@ -690,9 +700,9 @@ public:
         if (availW < 1) availW = 1;
         if (availH < 1) availH = 1;
 
-        bool stretch = (debugVMRef && debugVMRef->stretchScreen);
-        int gameW = (debugVMRef && debugVMRef->fb_w > 0) ? debugVMRef->fb_w : 128;
-        int gameH = (debugVMRef && debugVMRef->fb_h > 0) ? debugVMRef->fb_h : 128;
+        if (gameW < 1) gameW = 1;
+        if (gameH < 1) gameH = 1;
+
         if (stretch) {
             outRect->x = padding;
             outRect->y = padding;
@@ -711,6 +721,168 @@ public:
 
             if (outScale) *outScale = scale;
         }
+    }
+
+    void calculateGameRect(int winW, int winH, SDL_Rect *outRect, float *outScale)
+    {
+        bool stretch = (debugVMRef && debugVMRef->stretchScreen);
+        int gameW = (debugVMRef && debugVMRef->fb_w > 0) ? debugVMRef->fb_w : 128;
+        int gameH = (debugVMRef && debugVMRef->fb_h > 0) ? debugVMRef->fb_h : 128;
+        calculateGameRectFor(winW, winH, gameW, gameH, stretch, outRect, outScale);
+    }
+
+    void buildPaletteLUT(uint8_t *palette_map, uint32_t *paletteLUT) const
+    {
+        for (int i = 0; i < 16; i++) {
+            uint8_t p8ID = palette_map ? palette_map[i] : (uint8_t)i;
+            const uint8_t *rgb;
+            if (p8ID < 16) rgb = Real8Gfx::PALETTE_RGB[p8ID];
+            else if (p8ID >= 128 && p8ID < 144) rgb = Real8Gfx::PALETTE_RGB[p8ID - 128 + 16];
+            else rgb = Real8Gfx::PALETTE_RGB[p8ID & 0x0F];
+            paletteLUT[i] = (255u << 24) | (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
+        }
+    }
+
+    void renderIndexedFrame(const uint8_t *framebuffer, int fb_w, int fb_h,
+                            const uint32_t *paletteLUT,
+                            SDL_Renderer *targetRenderer,
+                            SDL_Texture *&targetTexture,
+                            std::vector<uint32_t> &targetBuffer,
+                            int &targetW, int &targetH,
+                            bool drawWallpaper,
+                            bool applyCrt,
+                            int mode,
+                            int gameW, int gameH,
+                            bool stretch)
+    {
+        if (!framebuffer || fb_w <= 0 || fb_h <= 0 || !targetRenderer) return;
+
+        if (targetW != fb_w || targetH != fb_h) {
+            targetW = fb_w;
+            targetH = fb_h;
+            targetBuffer.resize((size_t)fb_w * (size_t)fb_h);
+        }
+
+        for (int y = 0; y < fb_h; y++) {
+            const uint8_t *src_row = framebuffer + (y * fb_w);
+            uint32_t *dst_row = targetBuffer.data() + (y * fb_w);
+            for (int x = 0; x < fb_w; x++) {
+                dst_row[x] = paletteLUT[src_row[x] & 0x0F];
+            }
+        }
+
+        SDL_SetRenderDrawColor(targetRenderer, 0, 0, 0, 255);
+        SDL_RenderClear(targetRenderer);
+
+        int outputW = 0;
+        int outputH = 0;
+        SDL_GetRendererOutputSize(targetRenderer, &outputW, &outputH);
+
+        int texW = 0;
+        int texH = 0;
+        if (!targetTexture || SDL_QueryTexture(targetTexture, NULL, NULL, &texW, &texH) != 0 || texW != fb_w || texH != fb_h) {
+            if (targetTexture) SDL_DestroyTexture(targetTexture);
+            targetTexture = SDL_CreateTexture(targetRenderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, fb_w, fb_h);
+        }
+
+        SDL_SetTextureScaleMode(targetTexture, (mode == 0 && interpolation) ? SDL_ScaleModeBest : SDL_ScaleModeNearest);
+        SDL_UpdateTexture(targetTexture, NULL, targetBuffer.data(), fb_w * sizeof(uint32_t));
+
+        SDL_Rect srcRect = {0, 0, fb_w, fb_h};
+
+        if (drawWallpaper && targetRenderer == renderer && wallpaperTex && wallW > 0 && wallH > 0) {
+            float scaleW = (float)outputW / (float)wallW;
+            float scaleH = (float)outputH / (float)wallH;
+            float scale = (scaleW > scaleH) ? scaleW : scaleH;
+
+            int drawW = (int)(wallW * scale);
+            int drawH = (int)(wallH * scale);
+
+            SDL_Rect wallRect;
+            wallRect.x = (outputW - drawW) / 2;
+            wallRect.y = (outputH - drawH) / 2;
+            wallRect.w = drawW;
+            wallRect.h = drawH;
+
+            SDL_RenderCopy(targetRenderer, wallpaperTex, NULL, &wallRect);
+        }
+
+        SDL_Rect dstRect;
+        float scale = 1.0f;
+        calculateGameRectFor(outputW, outputH, gameW, gameH, stretch, &dstRect, &scale);
+
+        SDL_SetRenderDrawBlendMode(targetRenderer, SDL_BLENDMODE_NONE);
+        SDL_RenderCopy(targetRenderer, targetTexture, &srcRect, &dstRect);
+
+        if (applyCrt) {
+            SDL_SetRenderDrawBlendMode(targetRenderer, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(targetRenderer, 0, 0, 0, 80);
+            for (int y = dstRect.y; y < dstRect.y + dstRect.h; y += 2) {
+                SDL_RenderDrawLine(targetRenderer, dstRect.x, y, dstRect.x + dstRect.w, y);
+            }
+            SDL_SetRenderDrawBlendMode(targetRenderer, SDL_BLENDMODE_NONE);
+        }
+
+        SDL_RenderPresent(targetRenderer);
+    }
+
+    void ensureBottomWindow(int fb_w, int fb_h, int mode)
+    {
+        if (fb_w <= 0 || fb_h <= 0) return;
+
+        if (!bottomWindow) {
+            int scale = getModeWindowScale(mode);
+            if (scale < 1) scale = 1;
+            const int winW = fb_w * scale;
+            const int winH = fb_h * scale;
+            bottomWindow = SDL_CreateWindow("Real8 Bottom Screen",
+                                            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                            winW, winH,
+                                            SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+            if (!bottomWindow) return;
+
+            bottomRenderer = SDL_CreateRenderer(bottomWindow, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+            if (!bottomRenderer) {
+                SDL_DestroyWindow(bottomWindow);
+                bottomWindow = nullptr;
+                return;
+            }
+            bottomWindowId = SDL_GetWindowID(bottomWindow);
+        }
+
+        if (bottomWindowFbW != fb_w || bottomWindowFbH != fb_h) {
+            bottomWindowFbW = fb_w;
+            bottomWindowFbH = fb_h;
+            int scale = getModeWindowScale(mode);
+            if (scale < 1) scale = 1;
+            SDL_SetWindowSize(bottomWindow, fb_w * scale, fb_h * scale);
+            if (bottomTexture) {
+                SDL_DestroyTexture(bottomTexture);
+                bottomTexture = nullptr;
+            }
+        }
+    }
+
+    void destroyBottomWindow()
+    {
+        if (bottomTexture) {
+            SDL_DestroyTexture(bottomTexture);
+            bottomTexture = nullptr;
+        }
+        if (bottomRenderer) {
+            SDL_DestroyRenderer(bottomRenderer);
+            bottomRenderer = nullptr;
+        }
+        if (bottomWindow) {
+            SDL_DestroyWindow(bottomWindow);
+            bottomWindow = nullptr;
+        }
+        bottomWindowId = 0;
+        bottomWindowFbW = 0;
+        bottomWindowFbH = 0;
+        bottomScreenW = 0;
+        bottomScreenH = 0;
+        bottomScreenBuffer.clear();
     }
 
     static LRESULT CALLBACK InputBoxWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -1264,6 +1436,8 @@ public:
     }
 
     bool isConsoleOpen() override { return isConsoleActive; }
+    bool isBottomWindowId(Uint32 id) const { return bottomWindowId != 0 && bottomWindowId == id; }
+    void closeBottomWindow() { destroyBottomWindow(); }
 
     void openRealtimeModWindow()
     {
@@ -1738,6 +1912,10 @@ public:
             SDL_DestroyTexture(texture);
             texture = nullptr;
         }
+        if (bottomTexture) {
+            SDL_DestroyTexture(bottomTexture);
+            bottomTexture = nullptr;
+        }
     }
 
     void onFramebufferResize(int fb_w, int fb_h) override
@@ -1759,6 +1937,7 @@ public:
     }
 
     ~WindowsHost() { 
+        destroyBottomWindow();
         if (logFile.is_open()) logFile.close();
         if (wallpaperTex) SDL_DestroyTexture(wallpaperTex); 
         if (texture) SDL_DestroyTexture(texture);
@@ -1843,81 +2022,56 @@ public:
     {
         if (!framebuffer || fb_w <= 0 || fb_h <= 0) return;
 
+        if (bottomWindow && (!debugVMRef || !debugVMRef->isBottomScreenEnabled())) {
+            destroyBottomWindow();
+        }
+
         uint32_t paletteLUT[16];
-        for (int i = 0; i < 16; i++) {
-            uint8_t p8ID = palette_map ? palette_map[i] : (uint8_t)i;
-            const uint8_t *rgb;
-            if (p8ID < 16) rgb = Real8Gfx::PALETTE_RGB[p8ID];
-            else if (p8ID >= 128 && p8ID < 144) rgb = Real8Gfx::PALETTE_RGB[p8ID - 128 + 16];
-            else rgb = Real8Gfx::PALETTE_RGB[p8ID & 0x0F];
-            paletteLUT[i] = (255u << 24) | (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
-        }
-
-        if (screenW != fb_w || screenH != fb_h) {
-            screenW = fb_w;
-            screenH = fb_h;
-            screenBuffer.resize((size_t)screenW * (size_t)screenH);
-        }
-
-        for (int y = 0; y < fb_h; y++) {
-            const uint8_t *src_row = framebuffer + (y * fb_w);
-            uint32_t *dst_row = screenBuffer.data() + (y * fb_w);
-            for (int x = 0; x < fb_w; x++) {
-                dst_row[x] = paletteLUT[src_row[x] & 0x0F];
-            }
-        }
-
-        SDL_RenderClear(renderer);
-
-        int outputW, outputH;
-        SDL_GetRendererOutputSize(renderer, &outputW, &outputH);
-
-        int texW = 0, texH = 0;
-        if (!texture || SDL_QueryTexture(texture, NULL, NULL, &texW, &texH) != 0 || texW != fb_w || texH != fb_h) {
-            if (texture) SDL_DestroyTexture(texture);
-            texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, fb_w, fb_h);
-        }
+        buildPaletteLUT(palette_map, paletteLUT);
 
         const int mode = (debugVMRef ? debugVMRef->r8_vmode_cur : 0);
-        SDL_SetTextureScaleMode(texture, (mode == 0 && interpolation) ? SDL_ScaleModeBest : SDL_ScaleModeNearest);
+        const bool stretch = (debugVMRef && debugVMRef->stretchScreen);
+        int gameW = (debugVMRef && debugVMRef->fb_w > 0) ? debugVMRef->fb_w : fb_w;
+        int gameH = (debugVMRef && debugVMRef->fb_h > 0) ? debugVMRef->fb_h : fb_h;
 
-        SDL_UpdateTexture(texture, NULL, screenBuffer.data(), fb_w * sizeof(uint32_t));
+        renderIndexedFrame(framebuffer, fb_w, fb_h, paletteLUT,
+                           renderer, texture, screenBuffer, screenW, screenH,
+                           true, (mode == 0 && crt_filter),
+                           mode, gameW, gameH, stretch);
+    }
 
-        SDL_Rect srcRect = {0, 0, fb_w, fb_h};
-        // Draw Wallpaper
-        if (wallpaperTex && wallW > 0 && wallH > 0) {
-            float scaleW = (float)outputW / (float)wallW;
-            float scaleH = (float)outputH / (float)wallH;
-            float scale = (scaleW > scaleH) ? scaleW : scaleH;
+    void flipScreens(const uint8_t *top, int top_w, int top_h,
+                     const uint8_t *bottom, int bottom_w, int bottom_h,
+                     uint8_t *palette_map) override
+    {
+        if (!top || top_w <= 0 || top_h <= 0) return;
 
-            int drawW = (int)(wallW * scale);
-            int drawH = (int)(wallH * scale);
+        uint32_t paletteLUT[16];
+        buildPaletteLUT(palette_map, paletteLUT);
 
-            SDL_Rect wallRect;
-            wallRect.x = (outputW - drawW) / 2;
-            wallRect.y = (outputH - drawH) / 2;
-            wallRect.w = drawW;
-            wallRect.h = drawH;
+        const bool stretch = (debugVMRef && debugVMRef->stretchScreen);
+        const int topMode = (debugVMRef ? debugVMRef->r8_vmode_cur : 0);
+        int topGameW = (debugVMRef && debugVMRef->fb_w > 0) ? debugVMRef->fb_w : top_w;
+        int topGameH = (debugVMRef && debugVMRef->fb_h > 0) ? debugVMRef->fb_h : top_h;
 
-            SDL_RenderCopy(renderer, wallpaperTex, NULL, &wallRect);
-        }
+        renderIndexedFrame(top, top_w, top_h, paletteLUT,
+                           renderer, texture, screenBuffer, screenW, screenH,
+                           true, (topMode == 0 && crt_filter),
+                           topMode, topGameW, topGameH, stretch);
 
-        SDL_Rect dstRect;
-        float scale = 1.0f;
-        calculateGameRect(outputW, outputH, &dstRect, &scale);
-        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
-        SDL_RenderCopy(renderer, texture, &srcRect, &dstRect);
-
-        if (mode == 0 && crt_filter) {
-            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 80);
-            for (int y = dstRect.y; y < dstRect.y + dstRect.h; y += 2) {
-                SDL_RenderDrawLine(renderer, dstRect.x, y, dstRect.x + dstRect.w, y);
+        const bool bottomEnabled = (debugVMRef && debugVMRef->isBottomScreenEnabled());
+        if (bottomEnabled && bottom && bottom_w > 0 && bottom_h > 0) {
+            const int bottomMode = (debugVMRef ? debugVMRef->bottom_vmode_cur : 0);
+            ensureBottomWindow(bottom_w, bottom_h, bottomMode);
+            if (bottomRenderer) {
+                renderIndexedFrame(bottom, bottom_w, bottom_h, paletteLUT,
+                                   bottomRenderer, bottomTexture, bottomScreenBuffer, bottomScreenW, bottomScreenH,
+                                   false, (bottomMode == 0 && crt_filter),
+                                   bottomMode, bottom_w, bottom_h, stretch);
             }
-            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+        } else if (bottomWindow) {
+            destroyBottomWindow();
         }
-
-        SDL_RenderPresent(renderer);
     }
 
     unsigned long getMillis() override { return SDL_GetTicks(); }
@@ -1927,6 +2081,7 @@ public:
         fastForwardOverride = held;
 #if SDL_VERSION_ATLEAST(2, 0, 18)
         if (renderer) SDL_RenderSetVSync(renderer, held ? SDL_FALSE : SDL_TRUE);
+        if (bottomRenderer) SDL_RenderSetVSync(bottomRenderer, held ? SDL_FALSE : SDL_TRUE);
 #endif
     }
 

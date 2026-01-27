@@ -654,6 +654,13 @@ int main(int argc, char *argv[])
                     if (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) delta = -delta;
                     if (delta != 0) vm->mouse_wheel_event = delta;
                 }
+                else if (event.type == SDL_WINDOWEVENT) {
+                    if (event.window.event == SDL_WINDOWEVENT_CLOSE) {
+                        if (host && host->isBottomWindowId(event.window.windowID)) {
+                            host->closeBottomWindow();
+                        }
+                    }
+                }
                 else if (event.type == SDL_KEYDOWN) {
                     if (event.key.keysym.sym == SDLK_ESCAPE) {
                         if (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN_DESKTOP) {

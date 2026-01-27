@@ -511,7 +511,7 @@ namespace {
     static inline bool supports_bottom_screen(const Real8VM* vm) {
         if (!vm || !vm->host) return false;
         const char* platform = vm->host->getPlatform();
-        return platform && std::strcmp(platform, "3DS") == 0;
+        return platform && (std::strcmp(platform, "3DS") == 0 || std::strcmp(platform, "Windows") == 0);
     }
 }
 
@@ -768,6 +768,9 @@ void Real8VM::rebootVM()
         if (isGba && host) host->log("%s", msg);
     };
 
+    bootSplashActive = false;
+    bootSplashEndMs = 0;
+
     host->log("[VM] Rebooting...");
     gbaLog("[BOOT] REBOOT BEGIN");
 
@@ -994,6 +997,18 @@ void Real8VM::runFrame()
         shouldRunLua = false;
     }
 
+    unsigned long now_ms = 0;
+    bool splashActive = false;
+    if (bootSplashActive && host) {
+        now_ms = host->getMillis();
+        if (now_ms < bootSplashEndMs) {
+            splashActive = true;
+            shouldRunLua = true;
+        } else {
+            bootSplashActive = false;
+        }
+    }
+
     // If we are skipping this frame (30fps simulation), we only maintain audio
     // on platforms that require it. We do NOT process input counters to prevent
     // desync with Lua logic.
@@ -1034,6 +1049,61 @@ void Real8VM::runFrame()
 #endif
 
     gpu.beginFrame();
+    if (splashActive) {
+        const unsigned long splash_end = bootSplashEndMs;
+        const unsigned long total_duration = 1500;
+        const unsigned long text_duration = 1000;
+        const unsigned long fade_ms = 200;
+        const unsigned long splash_start = (splash_end >= total_duration) ? (splash_end - total_duration) : 0;
+        const unsigned long elapsed = (now_ms > splash_start) ? (now_ms - splash_start) : 0;
+        float alpha = 1.0f;
+        if (elapsed >= text_duration) {
+            alpha = 0.0f;
+        } else if (fade_ms > 0 && text_duration > fade_ms * 2) {
+            if (elapsed < fade_ms) {
+                alpha = (float)elapsed / (float)fade_ms;
+            } else if (elapsed > text_duration - fade_ms) {
+                alpha = (float)(text_duration - elapsed) / (float)fade_ms;
+            } else {
+                alpha = 1.0f;
+            }
+        }
+        if (alpha < 0.0f) alpha = 0.0f;
+        if (alpha > 1.0f) alpha = 1.0f;
+
+        Real8Gfx::GfxState gfx_state;
+        gpu.saveState(gfx_state);
+        const char* msg = "Powered by REAL8";
+        int screenW = draw_w();
+        int screenH = draw_h();
+        if (screenW <= 0) screenW = 128;
+        if (screenH <= 0) screenH = 128;
+        const int fontWidth = 5;
+        const int fontHeight = 6;
+        int x = (screenW / 2) - ((int)std::strlen(msg) * fontWidth / 2);
+        int y = (screenH / 2) - (fontHeight / 2);
+        static const uint8_t kFadeColors[] = {0, 5, 6, 7};
+        const int colorCount = (int)(sizeof(kFadeColors) / sizeof(kFadeColors[0]));
+        int colorIdx = (int)std::floor(alpha * (float)(colorCount - 1) + 0.5f);
+        if (colorIdx < 0) colorIdx = 0;
+        if (colorIdx >= colorCount) colorIdx = colorCount - 1;
+        const uint8_t textColor = kFadeColors[colorIdx];
+
+        gpu.setMenuFont(true);
+        gpu.camera(0, 0);
+        gpu.clip(0, 0, screenW, screenH);
+        gpu.draw_mask = 0;
+        gpu.fillp(0);
+        gpu.rectfill(0, 0, screenW - 1, screenH - 1, 0);
+        if (textColor != 0) {
+            gpu.pprint(msg, (int)std::strlen(msg), x, y, textColor);
+        }
+        mark_draw_dirty_rect(0, 0, screenW - 1, screenH - 1);
+        gpu.restoreState(gfx_state);
+        gpu.setMenuFont(false);
+        mouse_wheel_event = 0;
+        return;
+    }
 
     // --------------------------------------------------------------------------
     // INPUT PROCESSING (Synchronized with Logic Frame)
@@ -1428,6 +1498,13 @@ bool Real8VM::loadGame(const GameData& game)
     if (useGbaInitWatchdog && host) host->log("[BOOT] fps ok");
     mark_dirty_rect(0, 0, 128, 128);
     if (useGbaInitWatchdog && host) host->log("[BOOT] loadGame ok");
+    if (host) {
+        bootSplashActive = true;
+        bootSplashEndMs = host->getMillis() + 1500;
+    } else {
+        bootSplashActive = false;
+        bootSplashEndMs = 0;
+    }
     return true;
 }
 

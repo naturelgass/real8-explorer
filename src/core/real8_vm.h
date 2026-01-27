@@ -135,6 +135,8 @@ public:
 
   // True when the shell UI (menus) is active; used to disable certain effects.
   bool isShellUI = false;
+  bool bootSplashActive = false;
+  unsigned long bootSplashEndMs = 0;
 
   bool reset_requested = false;
   bool exit_requested = false;

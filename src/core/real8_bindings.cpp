@@ -481,17 +481,19 @@ static int l_stat(lua_State *L)
     case 151: // Framebuffer height
         lua_pushinteger(L, vm ? vm->fb_h : 0);
         return 1;
-    case 152: // Bottom framebuffer width (3DS)
+    case 152: // Bottom framebuffer width (3DS/Windows)
         if (vm && vm->host && vm->host->getPlatform() &&
-            std::strcmp(vm->host->getPlatform(), "3DS") == 0) {
+            (std::strcmp(vm->host->getPlatform(), "3DS") == 0 ||
+             std::strcmp(vm->host->getPlatform(), "Windows") == 0)) {
             lua_pushinteger(L, vm->bottom_fb_w);
         } else {
             lua_pushinteger(L, 0);
         }
         return 1;
-    case 153: // Bottom framebuffer height (3DS)
+    case 153: // Bottom framebuffer height (3DS/Windows)
         if (vm && vm->host && vm->host->getPlatform() &&
-            std::strcmp(vm->host->getPlatform(), "3DS") == 0) {
+            (std::strcmp(vm->host->getPlatform(), "3DS") == 0 ||
+             std::strcmp(vm->host->getPlatform(), "Windows") == 0)) {
             lua_pushinteger(L, vm->bottom_fb_h);
         } else {
             lua_pushinteger(L, 0);

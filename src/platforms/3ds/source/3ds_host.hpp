@@ -1704,6 +1704,35 @@ if (gameSubtexTopR) {
             topPreviewBlank = isBlankTopPreview(topbuffer, bottombuffer);
         }
 
+        auto updateBottomTexture = [&](bool allowScreenshot) {
+#if REAL8_3DS_HAS_PAL8_TLUT
+            if (useGpuPalette) {
+                u8* bottomIndexSrc = indexBufferBottom;
+                if (isLinearVmFramebuffer(bottombuffer) && gameTex &&
+                    gameTex->width == bottom_w && gameTex->height == bottom_h) {
+                    bottomIndexSrc = (u8*)bottombuffer;
+                }
+                DirtyRect dirtyBottom;
+                if (getDirtyRectForBuffer(bottombuffer, bottom_w, bottom_h, dirtyBottom)) {
+                    alignDirtyRectToTiles(dirtyBottom, bottom_w, bottom_h);
+                }
+                blitFrameToTexture(bottombuffer, bottom_w, bottom_h, gameTex, cachedPalette565, cachedPalette32,
+                                   allowScreenshot && wantScreenshot, bottomIndexSrc,
+                                   dirtyBottom.valid ? &dirtyBottom : nullptr);
+            } else
+#endif
+            {
+                DirtyRect dirtyBottom;
+                if (getDirtyRectForBuffer(bottombuffer, bottom_w, bottom_h, dirtyBottom)) {
+                    alignDirtyRectToTiles(dirtyBottom, bottom_w, bottom_h);
+                }
+                blitFrameToTexture(bottombuffer, bottom_w, bottom_h, gameTex, cachedPalette565, cachedPalette32,
+                                   allowScreenshot && wantScreenshot, pixelBuffer565Bottom,
+                                   dirtyBottom.valid ? &dirtyBottom : nullptr);
+            }
+            if (allowScreenshot && wantScreenshot) capturedThisFrame = true;
+        };
+
 
         uint8_t st_flags = 0;
         uint8_t st_mode = 3;
@@ -1725,8 +1754,7 @@ if (gameSubtexTopR) {
         const int convPx = st_conv * kConvPxPerLevel;
 
         const bool stereoCapable =
-            (inGameSingleScreen &&
-             debugVMRef && !debugVMRef->isShellUI &&
+            (debugVMRef && !debugVMRef->isShellUI &&
              debugVMRef->stereo_layers != nullptr &&
              topTargetR != nullptr && gameTexTopR != nullptr);
 
@@ -1881,6 +1909,9 @@ if (gameSubtexTopR) {
             lastStereoDepth = depthLevel;
             lastStereoConv = convPx;
             lastStereoSwap = swapEyes;
+            if (!inGameSingleScreen) {
+                updateBottomTexture(false);
+            }
         } else {
 
         if (inGameSingleScreen) {
@@ -1928,30 +1959,7 @@ if (gameSubtexTopR) {
                                        dirtyTop.valid ? &dirtyTop : nullptr);
                 }
             }
-            #if REAL8_3DS_HAS_PAL8_TLUT
-            if (useGpuPalette) {
-                u8* bottomIndexSrc = indexBufferBottom;
-                if (isLinearVmFramebuffer(bottombuffer) && gameTex &&
-                    gameTex->width == bottom_w && gameTex->height == bottom_h) {
-                    bottomIndexSrc = (u8*)bottombuffer;
-                }
-                DirtyRect dirtyBottom;
-                if (getDirtyRectForBuffer(bottombuffer, bottom_w, bottom_h, dirtyBottom)) {
-                    alignDirtyRectToTiles(dirtyBottom, bottom_w, bottom_h);
-                }
-                blitFrameToTexture(bottombuffer, bottom_w, bottom_h, gameTex, cachedPalette565, cachedPalette32, wantScreenshot, bottomIndexSrc,
-                                   dirtyBottom.valid ? &dirtyBottom : nullptr);
-            } else
-#endif
-            {
-                DirtyRect dirtyBottom;
-                if (getDirtyRectForBuffer(bottombuffer, bottom_w, bottom_h, dirtyBottom)) {
-                    alignDirtyRectToTiles(dirtyBottom, bottom_w, bottom_h);
-                }
-                blitFrameToTexture(bottombuffer, bottom_w, bottom_h, gameTex, cachedPalette565, cachedPalette32, wantScreenshot, pixelBuffer565Bottom,
-                                   dirtyBottom.valid ? &dirtyBottom : nullptr);
-            }
-            if (wantScreenshot) capturedThisFrame = true;
+            updateBottomTexture(true);
         }
 
         
