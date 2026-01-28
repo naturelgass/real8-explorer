@@ -63,11 +63,6 @@ namespace {
     const int kBottomHeight = 240;
     const int kPicoWidth = 128;
     const int kPicoHeight = 128;
-    const int kBottomGameSize = 256;
-    const int kBottomPad = 5;
-    const int kBottomVisibleHeight = kBottomHeight - (kBottomPad * 2);
-    const int kBottomCropPx = kBottomGameSize - kBottomVisibleHeight;
-    const int kBottomScale = kBottomGameSize / kPicoWidth;
 
     const int kSampleRate = 22050;
     const int kSamplesPerBuffer = 1024;
@@ -689,14 +684,7 @@ private:
         };
 
         fillSubtex(gameSubtex, bottomW, bottomH, bottomTexW, bottomTexH);
-
-        if (bottomW == kPicoWidth && bottomH == kPicoHeight) {
-            const int bottomCropSrc = kBottomCropPx / kBottomScale;
-            const int bottomSrcHeight = bottomH - bottomCropSrc;
-            fillSubtex(gameSubtexBottom, bottomW, bottomSrcHeight, bottomTexW, bottomTexH);
-        } else {
-            fillSubtex(gameSubtexBottom, bottomW, bottomH, bottomTexW, bottomTexH);
-        }
+        fillSubtex(gameSubtexBottom, bottomW, bottomH, bottomTexW, bottomTexH);
 
         fillSubtex(gameSubtexTop, topW, topH, topTexW, topTexH);
         *gameSubtexTopR = *gameSubtexTop;
@@ -1984,7 +1972,19 @@ if (gameSubtexTopR) {
         }
         bool bottomHasWallpaper = bottomWallpaperVisible && topHasWallpaper;
         const int logicalTopW = topStretch ? kTopWidth : kBottomWidth;
-        if (mode == 1 || mode == 2) {
+        if (mode == 3 && top_w == kTopWidth && top_h == kTopHeight) {
+            tw = top_w;
+            th = top_h;
+            tx = (logicalTopW - tw) / 2;
+            ty = 0;
+            tscale = 1.0f;
+        } else if (mode == 2 && top_w == 200 && top_h == 120) {
+            tw = top_w * 2;
+            th = top_h * 2;
+            tx = (logicalTopW - tw) / 2;
+            ty = (kTopHeight - th) / 2;
+            tscale = 2.0f;
+        } else if (mode == 0 && !topStretch) {
             tw = top_w;
             th = top_h;
             tx = (logicalTopW - tw) / 2;
@@ -2152,7 +2152,7 @@ if (gameSubtexTopR) {
             int drawW = bottom_w;
             int drawH = bottom_h;
             const bool bottomGameTallScale =
-                (bottomMode == 0 && bottom_w == kPicoWidth && bottom_h == kPicoHeight &&
+                (bottomMode == 1 && bottom_w == kPicoWidth && bottom_h == kPicoHeight &&
                  debugVMRef && !debugVMRef->isShellUI);
             if (bottomGameTallScale) {
                 float scale = std::min((float)kBottomWidth / (float)bottom_w,
@@ -2163,20 +2163,21 @@ if (gameSubtexTopR) {
                 by = (kBottomHeight - drawH) / 2;
                 bscaleX = scale;
                 bscaleY = scale;
-            } else if (bottom_w == kPicoWidth && bottom_h == kPicoHeight) {
-                bx = (kBottomWidth - kBottomGameSize) / 2;
-                by = kBottomPad;
-                bscaleX = (float)kBottomGameSize / (float)bottom_w;
-                bscaleY = (float)kBottomGameSize / (float)bottom_h;
-                drawW = (int)((float)bottom_w * bscaleX);
-                drawH = (int)((float)bottom_h * bscaleY);
-            } else if (bottomMode == 1 || bottomMode == 2) {
+            } else if (bottomMode == 0 || bottomMode == 1) {
                 bx = (kBottomWidth - bottom_w) / 2;
                 by = (kBottomHeight - bottom_h) / 2;
                 bscaleX = 1.0f;
                 bscaleY = 1.0f;
                 drawW = bottom_w;
                 drawH = bottom_h;
+            } else if (bottomMode == 2) {
+                const float scale = 2.0f;
+                drawW = (int)((float)bottom_w * scale);
+                drawH = (int)((float)bottom_h * scale);
+                bx = (kBottomWidth - drawW) / 2;
+                by = (kBottomHeight - drawH) / 2;
+                bscaleX = scale;
+                bscaleY = scale;
             } else {
                 float scale = std::min((float)kBottomWidth / (float)bottom_w, (float)kBottomHeight / (float)bottom_h);
                 drawW = (int)((float)bottom_w * scale);
@@ -2440,15 +2441,37 @@ if (gameSubtexTopR) {
             int bh = 0;
             float scaleX = 1.0f;
             float scaleY = 1.0f;
-            if (gameW == kPicoWidth && gameH == kPicoHeight) {
-                bx = (kBottomWidth - kBottomGameSize) / 2;
-                by = kBottomPad;
-                bw = kBottomGameSize;
-                bh = kBottomVisibleHeight;
-                scaleX = (float)kBottomGameSize / (float)gameW;
-                scaleY = (float)kBottomGameSize / (float)gameH;
+            const int bottomMode = (debugVMRef ? debugVMRef->bottom_vmode_cur : 0);
+            const bool bottomGameTallScale =
+                (bottomMode == 1 && gameW == kPicoWidth && gameH == kPicoHeight &&
+                 debugVMRef && !debugVMRef->isShellUI);
+            if (bottomGameTallScale) {
+                float scale = std::min((float)kBottomWidth / (float)gameW,
+                                       (float)kBottomHeight / (float)gameH);
+                bw = (int)((float)gameW * scale);
+                bh = (int)((float)gameH * scale);
+                bx = (kBottomWidth - bw) / 2;
+                by = (kBottomHeight - bh) / 2;
+                scaleX = scale;
+                scaleY = scale;
+            } else if (bottomMode == 0 || bottomMode == 1) {
+                bw = gameW;
+                bh = gameH;
+                bx = (kBottomWidth - bw) / 2;
+                by = (kBottomHeight - bh) / 2;
+                scaleX = 1.0f;
+                scaleY = 1.0f;
+            } else if (bottomMode == 2) {
+                const float scale = 2.0f;
+                bw = (int)((float)gameW * scale);
+                bh = (int)((float)gameH * scale);
+                bx = (kBottomWidth - bw) / 2;
+                by = (kBottomHeight - bh) / 2;
+                scaleX = scale;
+                scaleY = scale;
             } else {
-                float scale = std::min((float)kBottomWidth / (float)gameW, (float)kBottomHeight / (float)gameH);
+                float scale = std::min((float)kBottomWidth / (float)gameW,
+                                       (float)kBottomHeight / (float)gameH);
                 bw = (int)((float)gameW * scale);
                 bh = (int)((float)gameH * scale);
                 bx = (kBottomWidth - bw) / 2;

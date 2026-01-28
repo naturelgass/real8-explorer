@@ -69,62 +69,35 @@ private:
         int gameH = (debugVMRef && debugVMRef->fb_h > 0) ? debugVMRef->fb_h : 128;
         int mode = (debugVMRef ? debugVMRef->r8_vmode_cur : 0);
 
-        if (mode == 3) {
-            int scale = 2;
-            int drawW = gameW * scale;
-            int drawH = gameH * scale;
+        if (mode == 0) {
+            if (stretch) {
+                outRect->x = padding;
+                outRect->y = padding;
+                outRect->w = availW;
+                outRect->h = availH;
+                if (outScale) *outScale = (float)availW / (float)gameW;
+                return;
+            }
+            int drawW = gameW;
+            int drawH = gameH;
             outRect->x = (winW - drawW) / 2;
             outRect->y = (winH - drawH) / 2;
             outRect->w = drawW;
             outRect->h = drawH;
-            if (outScale) *outScale = (float)scale;
+            if (outScale) *outScale = 1.0f;
             return;
         }
 
-        if (mode == 2) {
-            int scale = 2;
-            int drawW = gameW * scale;
-            int drawH = gameH * scale;
-            outRect->x = (winW - drawW) / 2;
-            outRect->y = (winH - drawH) / 2;
-            outRect->w = drawW;
-            outRect->h = drawH;
-            if (outScale) *outScale = (float)scale;
-            return;
-        }
-
-        if (mode != 0) {
-            int scale = std::min(availW / gameW, availH / gameH);
-            if (scale < 1) scale = 1;
-            int drawW = gameW * scale;
-            int drawH = gameH * scale;
-            outRect->x = (winW - drawW) / 2;
-            outRect->y = (winH - drawH) / 2;
-            outRect->w = drawW;
-            outRect->h = drawH;
-            if (outScale) *outScale = (float)scale;
-            return;
-        }
-
-        if (stretch) {
-            outRect->x = padding;
-            outRect->y = padding;
-            outRect->w = availW;
-            outRect->h = availH;
-            if (outScale) *outScale = (float)availW / (float)gameW;
-            return;
-        }
-
-        float scale = std::min((float)availW / (float)gameW, (float)availH / (float)gameH);
-        int drawW = (int)((float)gameW * scale);
-        int drawH = (int)((float)gameH * scale);
-
+        int scale = std::min(availW / gameW, availH / gameH);
+        if (scale < 1) scale = 1;
+        int drawW = gameW * scale;
+        int drawH = gameH * scale;
         outRect->x = (winW - drawW) / 2;
         outRect->y = (winH - drawH) / 2;
         outRect->w = drawW;
         outRect->h = drawH;
-
-        if (outScale) *outScale = scale;
+        if (outScale) *outScale = (float)scale;
+        return;
     }
 
     std::string resolveVirtualPath(const char *filename)

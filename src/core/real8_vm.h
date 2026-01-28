@@ -216,6 +216,16 @@ public:
   static constexpr uint8_t BOTTOM_VMODE_DEFAULT = 2;
   bool isBottomScreenEnabled() const { return bottom_screen_enabled; }
   bool isDrawingBottom() const { return draw_target_bottom && fb_bottom; }
+  bool isPicoScreenMode() const { return fb_w == PICO_WIDTH && fb_h == PICO_HEIGHT; }
+
+  // --------------------------------------------------------------------------
+  // PLATFORM TARGET (GPIO 0x5F85)
+  // --------------------------------------------------------------------------
+  static constexpr uint16_t PLATFORM_TARGET_ADDR = 0x5F85;
+  static constexpr uint8_t PLATFORM_TARGET_WINDOWS = 0;
+  static constexpr uint8_t PLATFORM_TARGET_GBA = 1;
+  static constexpr uint8_t PLATFORM_TARGET_3DS = 2;
+  static constexpr uint8_t PLATFORM_TARGET_SWITCH = 3;
 
   bool showRepoSnap = true;
   bool showSkin = false;
@@ -367,7 +377,7 @@ public:
   // HELPERS (Low Level)
   // --------------------------------------------------------------------------
   inline void screenByteToFB(size_t idx, uint8_t v) {
-    if (idx >= 0x2000 || r8_vmode_cur != 0) return;
+    if (idx >= 0x2000 || !isPicoScreenMode()) return;
     int y = (int)(idx >> 6);
     int x = (int)((idx & 0x3F) << 1);
     if (!fb || y < 0 || y >= fb_h || x < 0 || x + 1 >= fb_w) return;

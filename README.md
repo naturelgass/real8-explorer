@@ -44,10 +44,34 @@ Not affiliated with Lexaloffle Games, PICO-8, Nintendo, or RetroArch/Libretro.
 
 ### Real8 expandability
 
-- Extended framebuffer modes: **240x160** / **320x240** / **640x360 x2** (fullscreen behavior depends on platform)
+- Multiple framebuffer modes (fullscreen behavior depends on platform)
 - Stereo depth pipeline: **stereo on 3DS** or red/cyan on other platforms, per-sprite depth buckets
 - Motion sensors: **accelerometer and gyroscope** on 3DS and Switch
 - Demo: [PICO EXTENDED](demos/pico_extended.p8)
+
+### Framebuffer Modes
+
+| Target | Mode |  Host   | Screen | Resolution | Scale | V-Mapping | Display            |
+| ------ | -----| ------- | ------ | ---------- | ----- | --------- | ------------------ |
+|   0    |  0   | Windows | Main   |  128×128   |   x4  | normal    | Window             |
+|   1    |  0   | GBA     | Main   |  128×128   |   x1  | normal    | Borders            |
+|   1    |  1   | GBA     | Main   |  240×160   |   x1  | normal    | Full Screen        |
+|   2    |  0   | 3DS     | Top    |  128×128   |   x1  | normal    | Borders            |
+|   2    |  1   | 3DS     | Top    |  128×128   |   x2  | special   | Left/Right Borders |
+|   2    |  2   | 3DS     | Top    |  200×120   |   x2  | normal    | Full Screen        |
+|   2    |  3   | 3DS     | Top    |  400×240   |   x1  | normal    | Full Screen        |
+|   2    |  0   | 3DS     | Bottom |  128×128   |   x1  | normal    | Borders            |
+|   2    |  1   | 3DS     | Bottom |  128×128   |   x2  | special   | Left/Right Borders |
+|   2    |  2   | 3DS     | Bottom |  160×120   |   x2  | normal    | Full Screen        |
+|   2    |  3   | 3DS     | Bottom |  320×240   |   x1  | normal    | Full Screen        |
+|   3    |  0   | Switch  | Main   |  128×128   |   x1  | normal    | Borders            |
+|   3    |  1   | Switch  | Main   |  256×144   |   x5  | normal    | Full Screen        |
+|   3    |  2   | Switch  | Main   |  640×640   |   x5  | normal    | Borders            |
+|   3    |  3   | Switch  | Main   |  1280×720  |   x5  | normal    | Full Screen        |
+
+By default, the PICO-8 128x128 resolution applies unless you overide it:
+
+First you target a platform e.g. ```poke(0x5f85,2)``` for 3DS, and second you set a platform resolution e.g. ```poke(0x5fe1,3)``` for 400x240.
 
 ### Publishing workflow
 
@@ -55,7 +79,7 @@ Publish your PICO-8 cart as a standalone homebrew game using the GUI exporters:
 
 - **Pico2GBA**: publish a `.gba` file (optional 240x160 native resolution)
 - **PicoTo3DS**: publish `.3dsx` or `.cia` (optional stereo depth, gyro, and 320x240 native resolution)
-- **Pico2Switch**: publish a `.nro` file (optional gyro and 640x360 x2 native resolution)
+- **Pico2Switch**: publish a `.nro` file (optional gyro and 1280z720 native resolution)
 
 ### Developer and power-user tools
 

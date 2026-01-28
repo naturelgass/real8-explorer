@@ -24,6 +24,7 @@ hstep=0.5
 
 -- real8 settings
 mode=0
+platform_target=2
 st_mode=0
 st_depth=1
 st_conv=0
@@ -83,6 +84,7 @@ fb_h=128
 
 -- register helpers
 function apply_regs()
+ poke(0x5f85,platform_target)
  poke(0x5fe1,mode) -- request video mode
  poke(0x5fe0,sensors and 1 or 0) -- motion sensor enable flag
  local flags=0
@@ -369,8 +371,8 @@ function _draw()
  set_depth(0)
  print(msg,2,1,12)
  print("press B for stereo mode: "..st_mode, 2, 9, 14)
- print("platform: "..plat, 2, 17, 11)
- print("resolution: "..w.."x"..h,2,26,10)
+ print("platform: "..plat.." target:"..platform_target, 2, 17, 11)
+ print("resolution: "..w.."x"..h.." mode:"..mode,2,26,10)
 
  -- print("sensors: "..stat(148).." dt:"..stat(149),2,34,15)
  -- print("ax: "..stat(142),2,42,10)
@@ -402,7 +404,7 @@ function _draw()
   print("press < to change screen mode",2,1,12)
   print("press A to re-calibrate",2,9,14)
   print("ax:"..stat(142).." ay:"..stat(143).." az:"..stat(144),2,17,11)
-  print("resolution: "..bottom_w.."x"..bottom_h,2,25,10)
+  print("resolution: "..bottom_w.."x"..bottom_h.." mode:"..bottom_mode,2,25,10)
 
   sspr(0,0,2*r,2*r,bottom_x-bottom_r,bottom_y-bottom_r,bottom_r*2,bottom_r*2)
   poke(0x5f84,0x01) -- restore top draw target

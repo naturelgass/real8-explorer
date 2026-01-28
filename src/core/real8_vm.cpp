@@ -48,6 +48,7 @@ static char g_last_lua_source[256] = {0};
 
 namespace {
     static inline bool supports_bottom_screen(const Real8VM* vm);
+    static inline uint8_t default_platform_target_for_host(const Real8VM* vm);
 }
 
 void real8_set_last_api_call(const char* name)
@@ -442,6 +443,13 @@ bool Real8VM::initMemory()
     }
     if (newRam) {
         ram[0x5F81] = 3; // default stereo mode = host default
+        ram[Real8VM::PLATFORM_TARGET_ADDR] = default_platform_target_for_host(this);
+        if (host && std::strcmp(host->getPlatform(), "3DS") == 0) {
+            ram[0x5FE1] = 1;
+        }
+    }
+    if (ram && ram[Real8VM::PLATFORM_TARGET_ADDR] > Real8VM::PLATFORM_TARGET_SWITCH) {
+        ram[Real8VM::PLATFORM_TARGET_ADDR] = default_platform_target_for_host(this);
     }
 
     if (!rom) {
@@ -486,25 +494,76 @@ namespace {
         return (v > 3) ? 3 : v;
     }
 
-    static inline uint8_t clamp_mode_for_platform(const Real8VM* vm, uint8_t mode) {
-        if (!vm || !vm->host) return mode;
+    enum PlatformTarget : uint8_t {
+        kTargetWindows = Real8VM::PLATFORM_TARGET_WINDOWS,
+        kTargetGba = Real8VM::PLATFORM_TARGET_GBA,
+        kTarget3ds = Real8VM::PLATFORM_TARGET_3DS,
+        kTargetSwitch = Real8VM::PLATFORM_TARGET_SWITCH
+    };
+
+    static inline uint8_t clamp_platform_target(uint8_t v) {
+        return (v > kTargetSwitch) ? kTargetWindows : v;
+    }
+
+    static inline uint8_t default_platform_target_for_host(const Real8VM* vm) {
+        if (!vm || !vm->host) return kTargetWindows;
         const char* platform = vm->host->getPlatform();
-        if (!platform) return mode;
-        if (std::strcmp(platform, "3DS") == 0) {
-            if (mode == 3) mode = 2;
-        } else if (std::strcmp(platform, "GBA") == 0) {
-            if (mode >= 2) mode = 1;
+        if (!platform) return kTargetWindows;
+        if (std::strcmp(platform, "GBA") == 0) return kTargetGba;
+        if (std::strcmp(platform, "3DS") == 0) return kTarget3ds;
+        if (std::strcmp(platform, "Switch") == 0) return kTargetSwitch;
+        return kTargetWindows;
+    }
+
+    static inline uint8_t effective_platform_target(const Real8VM* vm) {
+        uint8_t target = kTargetWindows;
+        if (vm && vm->ram) {
+            target = clamp_platform_target(vm->ram[Real8VM::PLATFORM_TARGET_ADDR]);
         }
+        if (!vm || !vm->host) return target;
+        const char* platform = vm->host->getPlatform();
+        if (!platform) return target;
+        if (std::strcmp(platform, "GBA") == 0) return kTargetGba;
+        if (std::strcmp(platform, "3DS") == 0) return kTarget3ds;
+        if (std::strcmp(platform, "Switch") == 0) return kTargetSwitch;
+        return target;
+    }
+
+    static inline uint8_t clamp_mode_for_target(uint8_t target, uint8_t mode) {
+        if (target == kTargetWindows) return 0;
+        if (target == kTargetGba && mode > 1) return 1;
         return mode;
     }
 
-    static inline void mode_to_size(uint8_t mode, int& out_w, int& out_h) {
-        switch (mode) {
-            case 0: out_w = 128; out_h = 128; break;
-            case 1: out_w = 240; out_h = 160; break;
-            case 2: out_w = 320; out_h = 240; break;
-            case 3: out_w = 640; out_h = 360; break;
-            default: out_w = 128; out_h = 128; break;
+    static inline void mode_to_size_for_target(uint8_t target, bool bottom, uint8_t mode, int& out_w, int& out_h) {
+        switch (target) {
+            case kTargetGba:
+                if (mode == 1) { out_w = 240; out_h = 160; }
+                else { out_w = 128; out_h = 128; }
+                break;
+            case kTarget3ds:
+                if (mode == 2) {
+                    if (bottom) { out_w = 160; out_h = 120; }
+                    else { out_w = 200; out_h = 120; }
+                } else if (mode == 3) {
+                    if (bottom) { out_w = 320; out_h = 240; }
+                    else { out_w = 400; out_h = 240; }
+                } else {
+                    out_w = 128; out_h = 128;
+                }
+                break;
+            case kTargetSwitch:
+                switch (mode) {
+                    case 1: out_w = 256; out_h = 144; break;
+                    case 2: out_w = 640; out_h = 640; break;
+                    case 3: out_w = 1280; out_h = 720; break;
+                    default: out_w = 128; out_h = 128; break;
+                }
+                break;
+            case kTargetWindows:
+            default:
+                out_w = 128; out_h = 128;
+                break;
         }
     }
 
@@ -523,19 +582,12 @@ void Real8VM::applyVideoMode(uint8_t requested_mode, bool force)
     const int prev_h = fb_h;
 
     uint8_t req = clamp_mode_u8(requested_mode);
-    uint8_t cur = clamp_mode_for_platform(this, req);
+    const uint8_t target = effective_platform_target(this);
+    uint8_t cur = clamp_mode_for_target(target, req);
 
     int new_w = fb_w;
     int new_h = fb_h;
-    mode_to_size(cur, new_w, new_h);
-    const char* platform = host ? host->getPlatform() : nullptr;
-    if (platform && std::strcmp(platform, "3DS") == 0 && cur == 2) {
-        new_w = 400;
-        new_h = 240;
-    } else if (platform && std::strcmp(platform, "Switch") == 0 && cur == 2) {
-        new_w = 400;
-        new_h = 240;
-    }
+    mode_to_size_for_target(target, /*bottom=*/false, cur, new_w, new_h);
 
     const bool size_changed = (new_w != prev_w || new_h != prev_h);
     const bool mode_changed = (prev_req != req || prev_cur != cur);
@@ -644,11 +696,12 @@ void Real8VM::applyBottomVideoMode(uint8_t requested_mode, bool force)
     const int prev_h = bottom_fb_h;
 
     uint8_t req = clamp_mode_u8(requested_mode);
-    uint8_t cur = clamp_mode_for_platform(this, req);
+    const uint8_t target = effective_platform_target(this);
+    uint8_t cur = clamp_mode_for_target(target, req);
 
     int new_w = bottom_fb_w;
     int new_h = bottom_fb_h;
-    mode_to_size(cur, new_w, new_h);
+    mode_to_size_for_target(target, /*bottom=*/true, cur, new_w, new_h);
 
     const bool size_changed = (new_w != prev_w || new_h != prev_h);
     const bool mode_changed = (prev_req != req || prev_cur != cur);
@@ -861,11 +914,13 @@ void Real8VM::rebootVM()
     
     if (ram) memset(ram, 0, 0x8000);
     if (ram) ram[0x5F81] = 3; // default stereo mode = host default
+    if (ram) ram[Real8VM::PLATFORM_TARGET_ADDR] = default_platform_target_for_host(this);
     if (rom && !rom_readonly) memset(rom, 0, 0x8000);
     memset(custom_font, 0, 0x800);
     clear_menu_items();
     r8_flags = 0;
-    applyVideoMode(0, /*force=*/true);
+    const uint8_t default_mode = (host && std::strcmp(host->getPlatform(), "3DS") == 0) ? 1 : 0;
+    applyVideoMode(default_mode, /*force=*/true);
     bottom_vmode_req = supports_bottom_screen(this) ? BOTTOM_VMODE_DEFAULT : 0;
     applyBottomVideoMode(bottom_vmode_req, /*force=*/true);
     gbaLog("[BOOT] REBOOT CORE OK");

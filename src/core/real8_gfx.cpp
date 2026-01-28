@@ -474,7 +474,7 @@ void IWRAM_CLS_CODE Real8Gfx::cls(int c) {
 
     
     // Also update 0x6000 RAM mirror if available
-    if (!vm->isDrawingBottom() && vm->screen_ram && vm->r8_vmode_cur == 0) {
+    if (!vm->isDrawingBottom() && vm->screen_ram && vm->isPicoScreenMode()) {
         std::memset(vm->screen_ram, (stored << 4) | stored, 0x2000);
     }
     vm->mark_draw_dirty_rect(0, 0, vm->draw_w() - 1, vm->draw_h() - 1);

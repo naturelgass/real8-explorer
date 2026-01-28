@@ -620,6 +620,11 @@ void Real8Shell::updateInGameMenu()
     if (result.refreshList) {
         refreshGameList();
     }
+    if (menu_bottom_override_active && host && std::strcmp(host->getPlatform(), "3DS") == 0 &&
+        result.action != Real8Menu::InGameAction::None) {
+        vm->applyBottomVideoMode(menu_saved_bottom_vmode_req, /*force=*/true);
+        menu_bottom_override_active = false;
+    }
     switch (result.action) {
     case Real8Menu::InGameAction::Resume:
         sysState = STATE_RUNNING;

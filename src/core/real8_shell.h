@@ -53,6 +53,7 @@ private:
     IReal8Host* host;
     Real8VM* vm; 
     ShellState sysState = STATE_BOOT;
+    ShellState lastState = STATE_BOOT;
     bool isSwitchPlatform = false;
     bool pendingInitialRefresh = true;
     bool pendingRepoBootCopy = false;
@@ -60,6 +61,8 @@ private:
     Real8Gfx::GfxState menu_gfx_backup;
     bool menu_force_draw_bottom = false;
     bool menu_saved_draw_bottom = false;
+    bool menu_bottom_override_active = false;
+    uint8_t menu_saved_bottom_vmode_req = 0;
     
     // --- State Logic ---
     void updateBrowser();

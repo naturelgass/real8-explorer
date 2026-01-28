@@ -257,6 +257,7 @@ void Real8Shell::update()
     // 1. Poll Hardware
     host->pollInput();
     updateAsyncDownloads();
+    ShellState prevState = lastState;
 
     // Tell the VM whether we are rendering shell/UI (menus) vs gameplay.
     // Stereo anaglyph should only apply during gameplay.
@@ -506,6 +507,11 @@ void Real8Shell::update()
                     menu_force_draw_bottom = true;
                     vm->draw_target_bottom = true;
                     vm->gpu.clip(0, 0, vm->draw_w(), vm->draw_h());
+                    if (!menu_bottom_override_active) {
+                        menu_saved_bottom_vmode_req = vm->bottom_vmode_req;
+                        menu_bottom_override_active = true;
+                    }
+                    vm->applyBottomVideoMode(2, /*force=*/true);
                 }
                 buildInGameMenu();
                 sysState = STATE_INGAME_MENU;
@@ -585,6 +591,10 @@ void Real8Shell::update()
         }
     }
 
+    if (sysState == STATE_BROWSER && prevState != STATE_BROWSER) {
+        resetModeForShell();
+    }
+    lastState = sysState;
 }
 
 void Real8Shell::startAsyncDownload(AsyncDownload &task, const std::string &url, const std::string &path)
@@ -611,7 +621,12 @@ void Real8Shell::startAsyncDownload(AsyncDownload &task, const std::string &url,
 void Real8Shell::resetModeForShell()
 {
     if (!vm) return;
-    vm->applyVideoMode(0, /*force=*/true);
+    uint8_t mode = 0;
+    if (host && std::strcmp(host->getPlatform(), "3DS") == 0) {
+        mode = 1;
+        vm->applyBottomVideoMode(Real8VM::BOTTOM_VMODE_DEFAULT, /*force=*/true);
+    }
+    vm->applyVideoMode(mode, /*force=*/true);
 }
 
 bool Real8Shell::isPreviewDownloadActiveFor(const std::string &url) const

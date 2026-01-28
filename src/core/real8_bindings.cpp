@@ -2265,6 +2265,24 @@ static void vm_sync_ram(Real8VM *vm, uint32_t start_addr, int length)
             }
         }
 
+        if (start_addr <= Real8VM::PLATFORM_TARGET_ADDR && end_addr > Real8VM::PLATFORM_TARGET_ADDR) {
+            uint8_t target = vm->ram[Real8VM::PLATFORM_TARGET_ADDR];
+            if (vm->host) {
+                const char* platform = vm->host->getPlatform();
+                if (platform) {
+                    if (std::strcmp(platform, "GBA") == 0) target = Real8VM::PLATFORM_TARGET_GBA;
+                    else if (std::strcmp(platform, "3DS") == 0) target = Real8VM::PLATFORM_TARGET_3DS;
+                    else if (std::strcmp(platform, "Switch") == 0) target = Real8VM::PLATFORM_TARGET_SWITCH;
+                }
+            }
+            if (target > Real8VM::PLATFORM_TARGET_SWITCH) {
+                target = Real8VM::PLATFORM_TARGET_WINDOWS;
+            }
+            vm->ram[Real8VM::PLATFORM_TARGET_ADDR] = target;
+            vm->applyVideoMode(vm->r8_vmode_req, /*force=*/false);
+            vm->applyBottomVideoMode(vm->bottom_vmode_req, /*force=*/false);
+        }
+
         if (start_addr <= Real8VM::BOTTOM_GPIO_ADDR && end_addr > Real8VM::BOTTOM_GPIO_ADDR) {
             vm->ram[Real8VM::BOTTOM_GPIO_ADDR] = (uint8_t)(vm->ram[Real8VM::BOTTOM_GPIO_ADDR] & 0x03);
             vm->applyBottomScreenFlags(vm->ram[Real8VM::BOTTOM_GPIO_ADDR]);
@@ -2340,7 +2358,7 @@ static uint8_t read_screen_byte(Real8VM *vm, uint32_t addr)
         return vm->ram[addr];
 
     uint32_t offset = addr - 0x6000;
-    if (!vm->fb || vm->r8_vmode_cur != 0)
+    if (!vm->fb || !vm->isPicoScreenMode())
         return vm->ram[addr];
 
     int y = offset >> 6;
@@ -2477,7 +2495,7 @@ static int l_memcpy(lua_State *L)
 
     // If reading FROM Screen (0x6000+), we must reconstruct the RAM data from the
     // visual Framebuffer because vm->spr() likely bypasses screen_ram for speed.
-    if (src_hits_screen && vm->fb && vm->r8_vmode_cur == 0)
+    if (src_hits_screen && vm->fb && vm->isPicoScreenMode())
     {
         int s_start = std::max((int)src, 0x6000);
         int s_end = std::min((int)(src + len), 0x8000);
@@ -2586,7 +2604,7 @@ static int l_memset(lua_State *L)
         }
 
         // --- Visual Update (Framebuffer) ---
-        if (vm->r8_vmode_cur == 0) {
+        if (vm->isPicoScreenMode()) {
             uint8_t c1 = val & 0x0F;
             uint8_t c2 = (val >> 4) & 0x0F;
 
@@ -5696,11 +5714,15 @@ void register_pico8_api(lua_State *L)
     const char *overlay = R"LUAFPS(
     function __p8_sys_overlay(fps)
       camera(0, 0)
-      clip(0, 0, 128, 128)
+      local w = stat(150)
+      local h = stat(151)
+      if (w == nil or w <= 0) then w = 128 end
+      if (h == nil or h <= 0) then h = 128 end
+      clip(0, 0, w, h)
       local bar_h = 8
       local bar_w = 32
-      local y0 = 128 - bar_h  
-      rectfill(0, y0, bar_w, 126, 0)
+      local y0 = h - bar_h
+      rectfill(0, y0, bar_w, h - 2, 0)
       print("FPS:"..tostr(fps), 2, y0 + 1, 11)
     end
   )LUAFPS";
