@@ -1510,6 +1510,9 @@ bool Real8VM::loadGame(const GameData& game)
         if (useGbaInitWatchdog && host) host->log("[BOOT] Mods ok");
     #endif
 
+        // Ensure native px9 bindings override any Lua implementations.
+        register_px9_bindings(L);
+
         // _init (make it fatal so you see it immediately)
         cacheLuaRefs();
         if (lua_ref_init != LUA_NOREF) {

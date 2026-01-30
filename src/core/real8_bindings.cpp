@@ -3247,11 +3247,19 @@ static int l_btn(lua_State *L)
 {
     auto *vm = get_vm(L);
     int argc = lua_gettop(L);
+    auto sample_state = [&](int p) -> uint32_t {
+        if (!vm || !vm->host) return 0;
+        if (vm->isLibretroPlatform || vm->isGbaPlatform) {
+            return vm->get_btn_state(p);
+        }
+        vm->host->pollInput();
+        return vm->host->getPlayerInput(p);
+    };
 
     // PICO-8 quirk: btn() with no args returns a bitfield of PLAYER 0 state only
     if (argc == 0)
     {
-        lua_pushinteger(L, (int)vm->get_btn_state(0));
+        lua_pushinteger(L, (int)sample_state(0));
         return 1;
     }
 
@@ -3264,8 +3272,13 @@ static int l_btn(lua_State *L)
         p = to_int_floor(L, 2);
     }
 
-    // Pass player index 'p' to the VM
-    lua_pushboolean(L, vm->btn(i, p));
+    if (i < 0 || i > 31) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    uint32_t state = sample_state(p);
+    lua_pushboolean(L, (state & (1u << i)) != 0);
     return 1;
 }
 
@@ -5016,6 +5029,319 @@ static int l_sys_set_state(lua_State* L) {
     return 0;
 }
 
+// --------------------------------------------------------------------------
+// PX9 DECOMPRESSOR (gfx/map)
+// --------------------------------------------------------------------------
+struct Px9BitReader {
+    Real8VM *vm = nullptr;
+    uint32_t addr = 0;
+    uint32_t bitbuf = 0;
+    int bitcount = 0;
+
+    Px9BitReader(Real8VM *vm_in, uint32_t addr_in) : vm(vm_in), addr(addr_in) {}
+
+    uint32_t readBits(int n) {
+        if (n <= 0) {
+            return 0;
+        }
+        while (bitcount < n) {
+            uint8_t b = read_mapped_byte(vm, addr++);
+            bitbuf |= (uint32_t)b << bitcount;
+            bitcount += 8;
+        }
+        uint32_t val = bitbuf & ((1u << n) - 1u);
+        bitbuf >>= n;
+        bitcount -= n;
+        return val;
+    }
+};
+
+static int px9_gnp(Px9BitReader &br, int base) {
+    int bits = 0;
+    int n = base;
+    for (;;) {
+        bits++;
+        if (bits >= 31) {
+            n += (int)br.readBits(31);
+            break;
+        }
+        int vv = (int)br.readBits(bits);
+        n += vv;
+        if (vv < ((1 << bits) - 1)) {
+            break;
+        }
+    }
+    return n;
+}
+
+static void px9_mtf(std::vector<uint8_t> &list, uint8_t val) {
+    if (list.empty()) {
+        return;
+    }
+    for (size_t i = 0; i < list.size(); ++i) {
+        if (list[i] == val) {
+            if (i == 0) {
+                return;
+            }
+            for (size_t j = i; j > 0; --j) {
+                list[j] = list[j - 1];
+            }
+            list[0] = val;
+            return;
+        }
+    }
+}
+
+static uint8_t px9_call_vget(lua_State *L, int func_idx, int x, int y) {
+    lua_pushvalue(L, func_idx);
+    lua_pushinteger(L, x);
+    lua_pushinteger(L, y);
+    lua_call(L, 2, 1);
+    int v = 0;
+    if (lua_isnumber(L, -1)) {
+        v = (int)lua_tointeger(L, -1);
+        if (v < 0) v = 0;
+        if (v > 255) v = 255;
+    }
+    lua_pop(L, 1);
+    return (uint8_t)v;
+}
+
+static int px9_vlist_val(std::vector<uint8_t> &list, uint8_t val) {
+    for (size_t i = 0; i < list.size(); ++i) {
+        if (list[i] == val) {
+            if (i == 0) {
+                return 1;
+            }
+            for (size_t j = i; j > 0; --j) {
+                list[j] = list[j - 1];
+            }
+            list[0] = val;
+            return (int)i + 1;
+        }
+    }
+    list.insert(list.begin(), val);
+    return 1;
+}
+
+static int l_px9_decomp(lua_State *L) {
+    auto *vm = get_vm(L);
+    if (!vm) {
+        return 0;
+    }
+
+    int x0 = to_int_floor(L, 1);
+    int y0 = to_int_floor(L, 2);
+    uint32_t src = (uint32_t)to_int_floor(L, 3);
+    luaL_checktype(L, 4, LUA_TFUNCTION);
+    luaL_checktype(L, 5, LUA_TFUNCTION);
+    int vget_idx = lua_absindex(L, 4);
+    int vset_idx = lua_absindex(L, 5);
+
+    Px9BitReader br(vm, src);
+
+    int w_1 = px9_gnp(br, 0);
+    int h_1 = px9_gnp(br, 0);
+    int eb = px9_gnp(br, 1);
+
+    int el_count = px9_gnp(br, 1);
+    std::vector<uint8_t> el;
+    el.reserve(el_count);
+    for (int i = 0; i < el_count; ++i) {
+        el.push_back((uint8_t)br.readBits(eb));
+    }
+
+    std::vector<std::vector<uint8_t>> pr(256);
+    std::vector<uint8_t> pr_init(256, 0);
+
+    int splen = 0;
+    bool predict = false;
+
+    for (int y = y0; y <= y0 + h_1; ++y) {
+        for (int x = x0; x <= x0 + w_1; ++x) {
+            if (--splen < 1) {
+                splen = px9_gnp(br, 1);
+                predict = !predict;
+            }
+
+            uint8_t a = 0;
+            if (y > y0) {
+                lua_pushvalue(L, vget_idx);
+                lua_pushinteger(L, x);
+                lua_pushinteger(L, y - 1);
+                lua_call(L, 2, 1);
+                if (lua_isnumber(L, -1)) {
+                    int aval = (int)lua_tointeger(L, -1);
+                    if (aval < 0) {
+                        aval = 0;
+                    } else if (aval > 255) {
+                        aval = 255;
+                    }
+                    a = (uint8_t)aval;
+                }
+                lua_pop(L, 1);
+            }
+
+            if (!pr_init[a]) {
+                pr[a] = el;
+                pr_init[a] = 1;
+            }
+            auto &l = pr[a];
+
+            int idx = 1;
+            if (!predict) {
+                idx = px9_gnp(br, 2);
+            }
+            if (idx < 1) {
+                idx = 1;
+            } else if (idx > (int)l.size()) {
+                idx = (int)l.size();
+            }
+
+            uint8_t v = l.empty() ? 0 : l[(size_t)(idx - 1)];
+            px9_mtf(l, v);
+            px9_mtf(el, v);
+
+            lua_pushvalue(L, vset_idx);
+            lua_pushinteger(L, x);
+            lua_pushinteger(L, y);
+            lua_pushinteger(L, v);
+            lua_call(L, 3, 0);
+        }
+    }
+
+    return 0;
+}
+
+static int l_px9_comp(lua_State *L) {
+    auto *vm = get_vm(L);
+    if (!vm) {
+        return 0;
+    }
+
+    int x0 = to_int_floor(L, 1);
+    int y0 = to_int_floor(L, 2);
+    int w = to_int_floor(L, 3);
+    int h = to_int_floor(L, 4);
+    uint32_t dest = (uint32_t)to_int_floor(L, 5);
+    luaL_checktype(L, 6, LUA_TFUNCTION);
+    int vget_idx = lua_absindex(L, 6);
+
+    uint32_t dest0 = dest;
+
+    std::vector<uint8_t> el;
+    el.reserve(256);
+    bool found[256] = {};
+    int highest = 0;
+
+    for (int y = y0; y < y0 + h; ++y) {
+        for (int x = x0; x < x0 + w; ++x) {
+            uint8_t v = px9_call_vget(L, vget_idx, x, y);
+            if (!found[v]) {
+                found[v] = true;
+                el.push_back(v);
+                if (v > highest) highest = v;
+            }
+        }
+    }
+
+    int bits = 1;
+    while (highest >= (1 << bits)) {
+        bits++;
+    }
+
+    int bit = 1;
+    uint8_t byte = 0;
+
+    auto putbit = [&](int bval) {
+        if (bval > 0) {
+            byte = (uint8_t)(byte + (uint8_t)bit);
+        }
+        write_mapped_byte(vm, dest, byte);
+        bit <<= 1;
+        if (bit == 256) {
+            bit = 1;
+            byte = 0;
+            dest += 1;
+        }
+    };
+
+    auto putval = [&](int val, int nbits) {
+        for (int i = 0; i < nbits; ++i) {
+            putbit((val >> i) & 1);
+        }
+    };
+
+    auto putnum = [&](int val) {
+        int nbits = 0;
+        int vv = 0;
+        do {
+            nbits += 1;
+            int mx = (1 << nbits) - 1;
+            vv = (val < mx) ? val : mx;
+            putval(vv, nbits);
+            val -= vv;
+        } while (vv >= ((1 << nbits) - 1));
+    };
+
+    putnum(w - 1);
+    putnum(h - 1);
+    putnum(bits - 1);
+    putnum((int)el.size() - 1);
+    for (size_t i = 0; i < el.size(); ++i) {
+        putval(el[i], bits);
+    }
+
+    std::vector<std::vector<uint8_t>> pr(256);
+    std::vector<uint8_t> pr_init(256, 0);
+    std::vector<int> dat;
+    dat.reserve((size_t)w * (size_t)h);
+
+    for (int y = y0; y < y0 + h; ++y) {
+        for (int x = x0; x < x0 + w; ++x) {
+            uint8_t v = px9_call_vget(L, vget_idx, x, y);
+            uint8_t a = (y > y0) ? px9_call_vget(L, vget_idx, x, y - 1) : 0;
+            if (!pr_init[a]) {
+                pr[a] = el;
+                pr_init[a] = 1;
+            }
+            int idx = px9_vlist_val(pr[a], v);
+            dat.push_back(idx);
+            px9_vlist_val(el, v);
+        }
+    }
+
+    bool nopredict = false;
+    size_t pos = 0;
+    while (pos < dat.size()) {
+        size_t pos0 = pos;
+        if (nopredict) {
+            while (pos < dat.size() && dat[pos] != 1) {
+                pos++;
+            }
+        } else {
+            while (pos < dat.size() && dat[pos] == 1) {
+                pos++;
+            }
+        }
+        int splen = (int)(pos - pos0);
+        putnum(splen - 1);
+        if (nopredict) {
+            for (size_t i = pos0; i < pos; ++i) {
+                putnum(dat[i] - 2);
+            }
+        }
+        nopredict = !nopredict;
+    }
+
+    if (bit > 0) {
+        dest += 1;
+    }
+
+    lua_pushinteger(L, (int)(dest - dest0));
+    return 1;
+}
+
 // In real8_bindings.cpp
 
 int l_load_p8_code(lua_State* L) {
@@ -5365,6 +5691,8 @@ void register_pico8_api(lua_State *L)
     // Optimization: Point both to the same implementation
     reg(L, "check_flag", l_map_check);
     reg(L, "_map_check_cpu", l_map_check);
+    reg(L, "px9_comp", l_px9_comp);
+    reg(L, "px9_decomp", l_px9_decomp);
     gbaLog("[BOOT] REG MAP OK");
 
     // --- Math ---
@@ -5736,4 +6064,10 @@ void register_pico8_api(lua_State *L)
         gbaLog("[BOOT] REG OVERLAY OK");
     }
     gbaLog("[BOOT] REG DONE");
+}
+
+void register_px9_bindings(lua_State *L)
+{
+    reg(L, "px9_comp", l_px9_comp);
+    reg(L, "px9_decomp", l_px9_decomp);
 }
