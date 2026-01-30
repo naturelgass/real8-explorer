@@ -1202,6 +1202,31 @@ SystemControlInfo:
         return data;
     }
 
+    static bool tryToolCandidate(const char* baseDir, const char* toolName, std::string& outPath) {
+        if (!baseDir || !*baseDir || !toolName || !*toolName) return false;
+        std::string exeName = std::string(toolName) + ".exe";
+        char candidate[MAX_PATH] = "";
+        if (buildPath(baseDir, exeName.c_str(), candidate, sizeof(candidate))) {
+            if (fileExists(candidate)) {
+                outPath = candidate;
+                return true;
+            }
+        }
+        if (buildPath(baseDir, ("bin\\" + exeName).c_str(), candidate, sizeof(candidate))) {
+            if (fileExists(candidate)) {
+                outPath = candidate;
+                return true;
+            }
+        }
+        if (buildPath(baseDir, ("tools\\bin\\" + exeName).c_str(), candidate, sizeof(candidate))) {
+            if (fileExists(candidate)) {
+                outPath = candidate;
+                return true;
+            }
+        }
+        return false;
+    }
+
     static bool findToolPath(const char* toolName, std::string& outPath) {
         char buffer[MAX_PATH] = "";
         DWORD len = SearchPathA(nullptr, toolName, ".exe", MAX_PATH, buffer, nullptr);
@@ -1212,26 +1237,27 @@ SystemControlInfo:
 
         char exeDir[MAX_PATH] = "";
         if (getExeDir(exeDir, sizeof(exeDir))) {
-            std::string exeName = std::string(toolName) + ".exe";
-            char candidate[MAX_PATH] = "";
-            if (buildPath(exeDir, ("bin\\" + exeName).c_str(), candidate, sizeof(candidate))) {
-                if (fileExists(candidate)) {
-                    outPath = candidate;
-                    return true;
-                }
+            char currentDir[MAX_PATH] = "";
+            snprintf(currentDir, sizeof(currentDir), "%s", exeDir);
+            for (int i = 0; i < 4; ++i) {
+                if (tryToolCandidate(currentDir, toolName, outPath)) return true;
+                char parentDir[MAX_PATH] = "";
+                if (!getParentDir(currentDir, parentDir, sizeof(parentDir))) break;
+                snprintf(currentDir, sizeof(currentDir), "%s", parentDir);
             }
         }
 
         const char* devkitPro = getenv("DEVKITPRO");
         if (devkitPro) {
-            std::string exeName = std::string(toolName) + ".exe";
-            char candidate[MAX_PATH] = "";
-            if (buildPath(devkitPro, ("tools\\bin\\" + exeName).c_str(), candidate, sizeof(candidate))) {
-                if (fileExists(candidate)) {
-                    outPath = candidate;
-                    return true;
-                }
-            }
+            if (tryToolCandidate(devkitPro, toolName, outPath)) return true;
+        }
+
+        const char* defaultDevkitPro = "C:\\devkitPro";
+        if (tryToolCandidate(defaultDevkitPro, toolName, outPath)) return true;
+
+        char cwd[MAX_PATH] = "";
+        if (GetCurrentDirectoryA(MAX_PATH, cwd) > 0) {
+            if (tryToolCandidate(cwd, toolName, outPath)) return true;
         }
 
         return false;
