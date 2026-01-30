@@ -242,7 +242,8 @@ static int l_stat(lua_State *L)
     }
     case 25: // Total Patterns Played (since last music())
     {
-        lua_pushinteger(L, vm ? vm->audio.get_music_patterns_played() : 0);
+        //lua_pushinteger(L, vm ? vm->audio.get_music_patterns_played() : 0);
+        lua_pushinteger(L, vm ? vm->audio.get_music_pattern() : -1);
         return 1;
     }
     case 26: // Ticks Played on Current Pattern

@@ -161,6 +161,7 @@ struct AudioEngine
     int get_note_row_hp(int ch) const;
     int get_music_pattern_hp() const;
     int get_music_patterns_played_hp() const;
+    int get_any_sfx_playing() const;
     int get_music_ticks_on_pattern_hp() const;
     bool is_music_playing_hp() const;
 
