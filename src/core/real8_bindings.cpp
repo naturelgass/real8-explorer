@@ -1175,42 +1175,7 @@ static int IWRAM_BINDINGS_CODE l_pget(lua_State *L)
     auto *vm = get_vm(L);
     int x = to_int_floor(L, 1);
     int y = to_int_floor(L, 2);
-
-    // 1. Get Camera Position
-    int cx = vm->gpu.cam_x;
-    int cy = vm->gpu.cam_y;
-
-    // 2. Apply Camera & Check Bounds
-    // PICO-8 pget is relative to the camera.
-    int rx = x + cx;
-    int ry = y + cy;
-
-    if ((uint32_t)rx > 127u || (uint32_t)ry > 127u)
-    {
-        lua_pushinteger(L, 0);
-        return 1;
-    }
-
-    // 3. Read from Screen RAM (vm->screen_ram is the source of truth)
-    uint8_t val = 0;
-
-    // Calculate offset: 64 bytes per row (128 pixels / 2 pixels per byte)
-    int offset = (ry * 64) + (rx >> 1);
-
-    if (vm->screen_ram)
-    {
-        val = vm->screen_ram[offset];
-    }
-    else if (vm->ram)
-    {
-        // Fallback to main RAM if screen_ram is not separated
-        val = vm->ram[0x6000 + offset];
-    }
-
-    // 4. Extract Nibble
-    // PICO-8 Format: Even X = Low Nibble, Odd X = High Nibble
-    int pixel = (rx & 1) ? (val >> 4) : (val & 0x0F);
-
+    const uint8_t pixel = vm ? vm->gpu.pget(x, y) : 0;
     lua_pushinteger(L, pixel);
     return 1;
 }
