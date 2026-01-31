@@ -765,6 +765,11 @@ void Real8Shell::updateBrowser()
     bool RepoSupport = isRepoSupportedPlatform(platform);
     bool is3ds = (strcmp(platform, "3DS") == 0);
     bool normalMenu = RepoSupport;
+    auto getParentPath = [](const std::string& path) {
+        size_t slash = path.find_last_of('/');
+        if (slash == std::string::npos) return std::string();
+        return path.substr(0, slash);
+    };
 
     bool repoSnapEnabled = RepoSupport && vm->showRepoSnap;
     static bool lastRepoSnapState = repoSnapEnabled;
@@ -780,7 +785,7 @@ void Real8Shell::updateBrowser()
     if (gameList.empty()) {
         if (vm->btnp(4) && !current_vfs_path.empty()) { // O -> Back
             std::string lastFolder = current_vfs_path;
-            current_vfs_path = "";
+            current_vfs_path = getParentPath(current_vfs_path);
             refreshGameList(lastFolder);
             return;
         }
@@ -837,7 +842,7 @@ void Real8Shell::updateBrowser()
     if (vm->btnp(4)) { // O -> Back
         if (current_vfs_path != "") {
             std::string lastFolder = current_vfs_path;
-            current_vfs_path = "";
+            current_vfs_path = getParentPath(current_vfs_path);
             refreshGameList(lastFolder); 
         }
     }
@@ -1082,7 +1087,17 @@ void Real8Shell::renderFileList(bool drawTopPreview)
 
         GameEntry &e = gameList[idx];
         bool isSelected = (idx == fileSelection);
-        int textColor = e.isFolder ? (isSelected ? 10 : 9) : (isSelected ? 7 : 6);
+        int textColor = 6;
+        if (e.isFolder) {
+            int folderBase = e.isRemote; // ? 9 : 142;
+            if(folderBase){
+                textColor = isSelected ? 10 : 9;
+            } else {
+                textColor = isSelected ? 14 : 8;
+            }
+        } else {
+            textColor = isSelected ? 7 : 6;
+        }
 
         if (isSelected) {
             vm->gpu.rectfill(2, y - 2, 125, y + 6, 5);
@@ -1176,26 +1191,91 @@ void Real8Shell::refreshGameList(std::string selectPath)
 
     if (current_vfs_path == "") {
         // Root: Scan Local Files
-        std::vector<std::string> files = host->listFiles(""); 
-        for (const auto &n : files) {
-            bool isGame = false;
-            if (n.length() > 3 && n.substr(n.length() - 3) == ".p8") isGame = true;
-            if (n.length() > 7 && n.substr(n.length() - 7) == ".p8.png") isGame = true;
-            if (n.find("games.json") != std::string::npos) isGame = false;
-            if (n.find("cache.p8") != std::string::npos) isGame = false;
-
-            if (isGame) {
-                GameEntry e;
-                e.displayName = (n[0] == '/') ? n.substr(1) : n;
-                e.path = (n[0] == '/') ? n : "/" + n;
-                e.isRemote = false;
-                e.isFolder = false;
-                e.isFavorite = (favorites.count(e.path) > 0);
-                gameList.push_back(e);
-            }
-        }
+        std::vector<std::string> files = host->listFiles("");
         parseJsonGames();
-        for(auto &f : vfs[""]) gameList.push_back(f);
+
+        auto endsWith = [](const std::string& s, const char* suffix) {
+            size_t len = strlen(suffix);
+            if (s.length() < len) return false;
+            return s.compare(s.length() - len, len, suffix) == 0;
+        };
+        auto isGameFile = [&](const std::string& s) {
+            if (s.find("games.json") != std::string::npos) return false;
+            if (s.find("cache.p8") != std::string::npos) return false;
+            return endsWith(s, ".p8.png") || endsWith(s, ".p8");
+        };
+        auto normalizePath = [](std::string p) {
+            if (!p.empty() && p[0] == '/') p = p.substr(1);
+            for (char &c : p) if (c == '\\') c = '/';
+            return p;
+        };
+        auto ensureFolderEntry = [&](const std::string& folderPath) {
+            if (folderPath.empty()) return;
+            std::string current;
+            size_t pos = 0;
+            while (pos < folderPath.size()) {
+                size_t next = folderPath.find('/', pos);
+                std::string part = (next == std::string::npos) ? folderPath.substr(pos) : folderPath.substr(pos, next - pos);
+                if (part.empty()) break;
+                std::string parent = current;
+                if (!current.empty()) current += "/";
+                current += part;
+
+                auto &list = vfs[parent];
+                bool exists = false;
+                for (const auto &e : list) {
+                    if (e.isFolder && e.path == current) { exists = true; break; }
+                }
+                if (!exists) {
+                    GameEntry folder;
+                    folder.displayName = part;
+                    folder.path = current;
+                    folder.isRemote = false;
+                    folder.isFolder = true;
+                    folder.isFavorite = false;
+                    list.push_back(folder);
+                }
+
+                if (next == std::string::npos) break;
+                pos = next + 1;
+            }
+        };
+        auto addFileEntry = [&](const std::string& relPath) {
+            std::string dir;
+            std::string name = relPath;
+            size_t slash = relPath.find_last_of('/');
+            if (slash != std::string::npos) {
+                dir = relPath.substr(0, slash);
+                name = relPath.substr(slash + 1);
+                ensureFolderEntry(dir);
+            }
+
+            auto &list = vfs[dir];
+            std::string fullPath = "/" + relPath;
+            for (const auto &e : list) {
+                if (!e.isFolder && e.path == fullPath) return;
+            }
+
+            GameEntry e;
+            e.displayName = name;
+            e.path = fullPath;
+            e.isRemote = false;
+            e.isFolder = false;
+            e.isFavorite = false;
+            list.push_back(e);
+        };
+
+        for (const auto &raw : files) {
+            std::string n = normalizePath(raw);
+            if (n.empty()) continue;
+            if (!isGameFile(n)) continue;
+            addFileEntry(n);
+        }
+
+        for (auto e : vfs[""]) {
+            e.isFavorite = (favorites.count(e.path) > 0);
+            gameList.push_back(e);
+        }
     } 
     else {
         // Subfolder

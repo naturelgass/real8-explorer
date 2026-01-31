@@ -2114,9 +2114,10 @@ public:
         std::vector<std::string> results;
         fs::path cartsPath = rootPath / "carts";
         if (!fs::exists(cartsPath)) return results;
-        for (const auto &entry : fs::directory_iterator(cartsPath)) {
+        for (const auto &entry : fs::recursive_directory_iterator(cartsPath)) {
             if (entry.is_regular_file()) {
-                std::string filename = entry.path().filename().string();
+                fs::path rel = fs::relative(entry.path(), cartsPath);
+                std::string filename = rel.generic_string();
                 if (strlen(ext) == 0 || filename.find(ext) != std::string::npos) {
                     results.push_back("/" + filename);
                 }

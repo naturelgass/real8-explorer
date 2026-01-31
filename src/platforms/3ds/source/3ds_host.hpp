@@ -48,6 +48,7 @@
 #include <cstdarg>
 #include <ctime>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <vector>
 #include <string>
@@ -2415,16 +2416,34 @@ if (gameSubtexTopR) {
         std::vector<std::string> results;
         std::string cartsDir = rootPath + "/carts";
         ensureDir(cartsDir);
-        DIR *dir = opendir(cartsDir.c_str());
-        if (!dir) return results;
-        struct dirent *ent;
-        while ((ent = readdir(dir)) != nullptr) {
-            if (ent->d_name[0] == '.') continue;
-            std::string filename = ent->d_name;
-            if (ext && strlen(ext) > 0 && filename.find(ext) == std::string::npos) continue;
-            results.push_back("/" + filename);
-        }
-        closedir(dir);
+
+        std::function<void(const std::string&, const std::string&)> addFilesRecursive;
+        addFilesRecursive = [&](const std::string& baseDir, const std::string& relDir) {
+            std::string fullDir = baseDir;
+            if (!relDir.empty()) fullDir += "/" + relDir;
+
+            DIR *dir = opendir(fullDir.c_str());
+            if (!dir) return;
+            struct dirent *ent;
+            while ((ent = readdir(dir)) != nullptr) {
+                if (ent->d_name[0] == '.') continue;
+                std::string name = ent->d_name;
+                std::string relPath = relDir.empty() ? name : (relDir + "/" + name);
+                std::string fullPath = fullDir + "/" + name;
+
+                struct stat st;
+                if (stat(fullPath.c_str(), &st) != 0) continue;
+                if (S_ISDIR(st.st_mode)) {
+                    addFilesRecursive(baseDir, relPath);
+                } else if (S_ISREG(st.st_mode)) {
+                    if (ext && strlen(ext) > 0 && relPath.find(ext) == std::string::npos) continue;
+                    results.push_back("/" + relPath);
+                }
+            }
+            closedir(dir);
+        };
+
+        addFilesRecursive(cartsDir, "");
         return results;
     }
 
