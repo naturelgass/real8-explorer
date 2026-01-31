@@ -64,9 +64,25 @@ namespace {
     const int kPicoWidth = 128;
     const int kPicoHeight = 128;
 
-    const int kSampleRate = 22050;
+    const int kSampleRate = 32000;
+
+    #ifndef REAL8_3DS_AUDIO_NO_GLITCH
+    #define REAL8_3DS_AUDIO_NO_GLITCH 1
+    #endif
+
+    #if REAL8_3DS_AUDIO_NO_GLITCH
     const int kSamplesPerBuffer = 1024;
-    const int kNumAudioBuffers = 2;
+    const int kNumAudioBuffers = 6;
+    const int kFifoTargetMs = 140;
+    const int kFifoMinStartMs = 80;
+    const int kFifoMaxMs = 300;
+    #else
+    const int kSamplesPerBuffer = 1024;
+    const int kNumAudioBuffers = 4;
+    const int kFifoTargetMs = 140;
+    const int kFifoMinStartMs = 50;
+    const int kFifoMaxMs = 200;
+    #endif
     // Citro3D clear color is 0xRRGGBBAA (like CLEAR_COLOR 0x68B0D8FF in examples)
     const u32 kClearColor = 0x000000FF; // black, fully opaque
 
@@ -497,15 +513,33 @@ private:
     std::string rootPath = "sdmc:/real8";
 
     // ---- Audio FIFO (mono) to avoid blocking the emulation thread ----
-    static const size_t kAudioFifoSamples = kSamplesPerBuffer * kNumAudioBuffers * 4; // mono samples
+    static const size_t kAudioFifoSamples = (size_t)((kSampleRate * kFifoMaxMs) / 1000);
     int16_t* audioFifo = nullptr;
     size_t audioFifoHead = 0;   // write pos
     size_t audioFifoTail = 0;   // read pos
     size_t audioFifoCount = 0;  // number of valid mono samples in fifo
     int nextWaveToSubmit = 0;
+    bool audioStarted = false;
+    uint32_t audioUnderruns = 0;
+    uint32_t audioOverruns = 0;
+    u64 audioStatsLastMs = 0;
+    double lastRateCorrection = 0.0;
+
+    // Resampler state (VM -> NDSP)
+    uint64_t resamplePosFp = 0;
+    int16_t resamplePrev = 0;
+    bool resampleHasPrev = false;
+    std::vector<int16_t> resampleScratch;
+
+    static inline int16_t quantizeToU8S16(int16_t s) {
+        uint16_t u = (uint16_t)((int)s + 32768);
+        uint8_t q = (uint8_t)(u >> 8);
+        return (int16_t)(((int)q - 128) << 8);
+    }
 
     inline void audioFifoReset() {
         audioFifoHead = audioFifoTail = audioFifoCount = 0;
+        audioStarted = false;
     }
 
     inline size_t audioFifoFree() const {
@@ -514,12 +548,25 @@ private:
 
     inline void audioFifoWriteMono(const int16_t* src, int count) {
         if (!audioFifo || count <= 0) return;
+        const size_t maxSamples = (size_t)((kSampleRate * kFifoMaxMs) / 1000);
 
-        // Never block: if overflow, drop newest samples.
-        size_t freeSpace = audioFifoFree();
-        if ((size_t)count > freeSpace) {
-            count = (int)freeSpace;
-            if (count <= 0) return;
+        // If incoming chunk is huge, keep the newest tail and drop the rest.
+        if ((size_t)count > maxSamples) {
+            src += (count - (int)maxSamples);
+            count = (int)maxSamples;
+            audioFifoHead = audioFifoTail;
+            audioFifoCount = 0;
+            audioOverruns++;
+        }
+
+        // If we'd exceed the max, drop oldest samples to make room.
+        size_t needed = audioFifoCount + (size_t)count;
+        if (needed > maxSamples) {
+            size_t drop = needed - maxSamples;
+            if (drop > audioFifoCount) drop = audioFifoCount;
+            audioFifoTail = (audioFifoTail + drop) % kAudioFifoSamples;
+            audioFifoCount -= drop;
+            audioOverruns++;
         }
 
         for (int i = 0; i < count; ++i) {
@@ -536,26 +583,51 @@ private:
     void pumpAudio() {
         if (!audioReady || !audioFifo) return;
 
-        // Try to submit as many full buffers as possible without blocking.
-        for (int attempts = 0; attempts < kNumAudioBuffers; ++attempts) {
-            int idx = nextWaveToSubmit;
+        if (!audioStarted) {
+            const size_t minStart = (size_t)((kSampleRate * kFifoMinStartMs) / 1000);
+            if (audioFifoCount < minStart) return;
+            audioStarted = true;
+        }
 
-            if (waveBufIsBusy(idx)) break;
-            if (audioFifoCount < (size_t)kSamplesPerBuffer) break;
+        // Submit any finished buffers (refill + requeue).
+        for (int i = 0; i < kNumAudioBuffers; ++i) {
+            int idx = (nextWaveToSubmit + i) % kNumAudioBuffers;
+            if (waveBufIsBusy(idx)) continue;
 
-            int16_t* dst = (int16_t*)waveBuf[idx].data_pcm16; // interleaved stereo
+            int16_t* dst = (int16_t*)waveBuf[idx].data_pcm16; // mono
+            size_t available = audioFifoCount;
+            int toCopy = (available >= (size_t)kSamplesPerBuffer) ? kSamplesPerBuffer : (int)available;
 
-            // Fill one NDSP buffer worth of stereo frames from mono FIFO.
-            for (int i = 0; i < kSamplesPerBuffer; ++i) {
-                int16_t s = audioFifo[audioFifoTail];
+            for (int s = 0; s < toCopy; ++s) {
+                dst[s] = audioFifo[audioFifoTail];
                 audioFifoTail = (audioFifoTail + 1) % kAudioFifoSamples;
-                dst[i * 2 + 0] = s;
-                dst[i * 2 + 1] = s;
             }
-            audioFifoCount -= (size_t)kSamplesPerBuffer;
+            if (toCopy < kSamplesPerBuffer) {
+                memset(dst + toCopy, 0, (size_t)(kSamplesPerBuffer - toCopy) * sizeof(int16_t));
+                audioUnderruns++;
+            }
+            audioFifoCount -= (size_t)toCopy;
 
             submitAudioBuffer(idx);
-            nextWaveToSubmit = (nextWaveToSubmit + 1) % kNumAudioBuffers;
+            nextWaveToSubmit = (idx + 1) % kNumAudioBuffers;
+        }
+
+        if (debugVMRef) {
+            const u64 now = osGetTime();
+            if (now - audioStatsLastMs >= 5000) {
+                audioStatsLastMs = now;
+                const size_t fifoMs = (size_t)((audioFifoCount * 1000) / kSampleRate);
+                int queued = 0;
+                for (int i = 0; i < kNumAudioBuffers; ++i) {
+                    if (waveBufIsBusy(i)) queued++;
+                }
+                unsigned long genMax = debugVMRef->audio.gen_ms_max;
+                debugVMRef->audio.gen_ms_max = 0;
+                log("[3DS][AUDIO] fifo=%lums queued=%d underruns=%lu overruns=%lu gen_max=%lums corr=%.3f%%",
+                    (unsigned long)fifoMs, queued,
+                    (unsigned long)audioUnderruns, (unsigned long)audioOverruns,
+                    (unsigned long)genMax, lastRateCorrection * 100.0);
+            }
         }
     }
 
@@ -907,19 +979,18 @@ private:
             }
         }
 
-        ndspSetOutputMode(NDSP_OUTPUT_STEREO);
+        ndspSetOutputMode(NDSP_OUTPUT_MONO);
         ndspChnSetInterp(0, NDSP_INTERP_LINEAR);
         ndspChnSetRate(0, kSampleRate);
-        ndspChnSetFormat(0, NDSP_FORMAT_STEREO_PCM16);
+        ndspChnSetFormat(0, NDSP_FORMAT_MONO_PCM16);
 
         float mix[12];
         memset(mix, 0, sizeof(mix));
         mix[0] = 1.0f;
-        mix[1] = 1.0f;
         ndspChnSetMix(0, mix);
 
         size_t totalFrames = (size_t)kSamplesPerBuffer * (size_t)kNumAudioBuffers;
-        size_t totalI16 = totalFrames * 2; // stereo interleaved
+        size_t totalI16 = totalFrames; // mono
         audioBuffer = (int16_t*)linearAlloc(totalI16 * sizeof(int16_t));
         if (!audioBuffer) {
             log("[3DS][AUDIO] linearAlloc failed for audio buffer");
@@ -930,9 +1001,10 @@ private:
 
         memset(waveBuf, 0, sizeof(waveBuf));
         for (int i = 0; i < kNumAudioBuffers; ++i) {
-            waveBuf[i].data_vaddr = audioBuffer + (i * kSamplesPerBuffer * 2);
+            waveBuf[i].data_vaddr = audioBuffer + (i * kSamplesPerBuffer);
             waveBuf[i].data_pcm16 = (int16_t*)waveBuf[i].data_vaddr;
             waveBuf[i].nsamples   = kSamplesPerBuffer;
+            waveBuf[i].status     = NDSP_WBUF_DONE;
         }
 
         // Allocate FIFO in normal heap (don’t burn linear RAM).
@@ -1198,7 +1270,7 @@ if (gameSubtexTopR) {
 
     void submitAudioBuffer(int bufIndex) {
         int16_t *buf = (int16_t*)waveBuf[bufIndex].data_pcm16;
-        DSP_FlushDataCache(buf, kSamplesPerBuffer * 2 * sizeof(int16_t));
+        DSP_FlushDataCache(buf, kSamplesPerBuffer * sizeof(int16_t));
         ndspChnWaveBufAdd(0, &waveBuf[bufIndex]);
     }
 
@@ -2529,14 +2601,21 @@ if (gameSubtexTopR) {
     void pushAudio(const int16_t *samples, int count) override {
         if (!audioReady) return;
 
+        const bool isPaused = (debugVMRef && debugVMRef->isShellUI);
+        const bool fastForward = isFastForwardHeld();
+
         // Reset request from VM
-        if (!samples || count <= 0) {
+        if (isPaused || !samples || count <= 0) {
             // Stop playback and fully reset our submit state so audio can resume reliably.
             ndspChnWaveBufClear(0);
 
             // Clear FIFO and rewind submission pointer.
             audioFifoReset();
             nextWaveToSubmit = 0;
+            audioUnderruns = 0;
+            audioOverruns = 0;
+            audioStatsLastMs = 0;
+            lastRateCorrection = 0.0;
 
             // Mark all wave buffers as reusable (some libctru versions leave status stale after WaveBufClear).
             for (int i = 0; i < kNumAudioBuffers; ++i) {
@@ -2545,15 +2624,73 @@ if (gameSubtexTopR) {
 
             // Zero the backing buffers to avoid clicks/pop after reset.
             if (audioBuffer) {
-                const size_t totalI16 = (size_t)kSamplesPerBuffer * (size_t)kNumAudioBuffers * 2;
+                const size_t totalI16 = (size_t)kSamplesPerBuffer * (size_t)kNumAudioBuffers;
                 memset(audioBuffer, 0, totalI16 * sizeof(int16_t));
                 DSP_FlushDataCache(audioBuffer, totalI16 * sizeof(int16_t));
             }
+            resamplePosFp = 0;
+            resamplePrev = 0;
+            resampleHasPrev = false;
+            resampleScratch.clear();
             return;
         }
 
-        // Write mono samples to FIFO quickly (never blocks).
-        audioFifoWriteMono(samples, count);
+        double correction = 0.0;
+        if (!fastForward && !isPaused) {
+            const double fifoMs = (double)audioFifoCount * 1000.0 / (double)kSampleRate;
+            const double errorMs = fifoMs - (double)kFifoTargetMs;
+            const double kServoGain = 0.00005;
+            const double kServoMax = 0.005;
+            correction = errorMs * kServoGain;
+            if (correction > kServoMax) correction = kServoMax;
+            if (correction < -kServoMax) correction = -kServoMax;
+        }
+        lastRateCorrection = correction;
+
+        const uint64_t baseStepFp =
+            ((uint64_t)AudioEngine::SAMPLE_RATE_NUM << 32) /
+            ((uint64_t)AudioEngine::SAMPLE_RATE_DEN * (uint64_t)kSampleRate);
+        uint64_t stepFp = (uint64_t)llround((double)baseStepFp * (1.0 + correction));
+        if (stepFp < 1) stepFp = 1;
+
+        // Resample VM output to NDSP rate (linear), with 8-bit source quantization.
+        resampleScratch.clear();
+        {
+            const double step = (double)stepFp / (double)(1ull << 32);
+            const double est = (step > 0.0) ? ((double)count / step) : (double)count;
+            resampleScratch.reserve((size_t)(est + 4.0));
+        }
+
+        int idx = 0;
+        if (!resampleHasPrev && count > 0) {
+            resamplePrev = quantizeToU8S16(samples[0]);
+            resampleHasPrev = true;
+            idx = 1;
+        }
+
+        uint64_t pos = resamplePosFp;
+        int16_t prev = resamplePrev;
+
+        for (; idx < count; ++idx) {
+            int16_t curr = quantizeToU8S16(samples[idx]);
+            while (pos <= (1ull << 32)) {
+                const uint32_t t = (uint32_t)pos;
+                const int32_t delta = (int32_t)curr - (int32_t)prev;
+                const int32_t out = (int32_t)prev + (int32_t)((delta * (int64_t)t) >> 32);
+                resampleScratch.push_back((int16_t)out);
+                pos += stepFp;
+            }
+            pos -= (1ull << 32);
+            prev = curr;
+        }
+
+        resamplePrev = prev;
+        resamplePosFp = pos;
+
+        if (!resampleScratch.empty()) {
+            // Write mono samples to FIFO quickly (never blocks).
+            audioFifoWriteMono(resampleScratch.data(), (int)resampleScratch.size());
+        }
 
         // Submit any newly-available full NDSP buffers.
         pumpAudio();

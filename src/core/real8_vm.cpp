@@ -1076,7 +1076,7 @@ void Real8VM::runFrame()
     #if REAL8_HAS_LIBRETRO_BUFFERS
         if (isLibretro) {
             // FIX: Calculate samples based on actual rate (22050 / 60 = 367.5)
-            int samples_needed = (AudioEngine::SAMPLE_RATE / 60) + 1; 
+            int samples_needed = (int)(AudioEngine::SAMPLE_RATE / 60.0f) + 1; 
             if (samples_needed > 2048) samples_needed = 2048;
             audio.generateSamples(static_audio_buffer, samples_needed);
             if (host) host->pushAudio(static_audio_buffer, samples_needed);
@@ -1360,7 +1360,7 @@ void Real8VM::runFrame()
     if (!gbaAudioDisabled) {
     #if REAL8_HAS_LIBRETRO_BUFFERS
         if (isLibretro) {
-            int samples_needed = (AudioEngine::SAMPLE_RATE / 60) + 1; 
+            int samples_needed = (int)(AudioEngine::SAMPLE_RATE / 60.0f) + 1; 
             if (samples_needed > 2048) samples_needed = 2048;
             audio.generateSamples(static_audio_buffer, samples_needed);
             if (host) host->pushAudio(static_audio_buffer, samples_needed);

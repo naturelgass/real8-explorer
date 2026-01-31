@@ -192,8 +192,10 @@ void AudioEngine::flushOutputQueues() {
     // Drop any already-generated samples so mute is immediate.
     fifo_r = fifo_w = fifo_count = 0;
     out_block_idx = 0;
-    samples_accumulator = 0.0f;
+    samples_accum_num = 0;
     last_mixed_sample = 0.0f;
+    last_audio_ms = 0;
+    gen_ms_max = 0;
     // Do NOT reset sequencer/channel state here; we want playback to resume
     // where it left off when unmuted.
 }
@@ -420,7 +422,10 @@ void AudioEngine::update_music_tick() {
         music_pattern = -1;
     } else {
         music_pattern++;
-        if (music_pattern >= 64) music_pattern = -1;
+        if (music_pattern >= 64) {
+            music_pattern = -1;
+            music_playing = false;
+        }
     }
 }
 
@@ -634,15 +639,23 @@ void AudioEngine::generateSamples(int16_t* out_buffer, int count) {
 void AudioEngine::update(IReal8Host *host) {
     if (!host) return;
 
-    samples_accumulator += (float)SAMPLE_RATE / 60.0f;
-    int gen = (int)samples_accumulator;
-    samples_accumulator -= (float)gen;
+    unsigned long now_ms = host->getMillis();
+    if (last_audio_ms == 0) {
+        last_audio_ms = now_ms;
+        return;
+    }
 
-    if (gen <= 0) return;
-    if (gen > 2048) gen = 2048;
+    unsigned long delta_ms = now_ms - last_audio_ms;
+    last_audio_ms = now_ms;
 
-    // Generate into scratch
-    generateSamples(buffer, gen);
+    if (delta_ms > 100) delta_ms = 100; // clamp to avoid huge bursts after stalls
+
+    const int64_t denom = (int64_t)SAMPLE_RATE_DEN * 1000;
+    samples_accum_num += (int64_t)SAMPLE_RATE_NUM * (int64_t)delta_ms;
+    int gen_total = (int)(samples_accum_num / denom);
+    samples_accum_num -= (int64_t)gen_total * denom;
+
+    if (gen_total <= 0) return;
 
     // FIFO write
     auto fifo_write = [&](const int16_t* in, int n) {
@@ -664,7 +677,23 @@ void AudioEngine::update(IReal8Host *host) {
         return true;
     };
 
-    fifo_write(buffer, gen);
+    // Generate into scratch in chunks (buffer is fixed-size).
+    const int kChunkMs = 10;
+    int max_chunk = (int)((((int64_t)SAMPLE_RATE_NUM * kChunkMs) + (denom - 1)) / denom);
+    if (max_chunk < 1) max_chunk = 1;
+
+    while (gen_total > 0) {
+        int gen = gen_total;
+        if (gen > 2048) gen = 2048;
+        if (gen > max_chunk) gen = max_chunk;
+        unsigned long gen_start = host->getMillis();
+        generateSamples(buffer, gen);
+        unsigned long gen_end = host->getMillis();
+        unsigned long gen_ms = gen_end - gen_start;
+        if (gen_ms > gen_ms_max) gen_ms_max = gen_ms;
+        fifo_write(buffer, gen);
+        gen_total -= gen;
+    }
 
     // Push in stable, fixed blocks
     while (fifo_count >= OUT_BLOCK_SAMPLES) {
@@ -728,7 +757,10 @@ int AudioEngine::get_music_pattern_hp() const {
 
 int AudioEngine::get_music_patterns_played_hp() const {
     const MixerTickSnap *snap = get_last_snap(*this);
-    return snap ? snap->patterns_played : get_music_patterns_played();
+    if (snap) {
+        return snap->music_playing ? snap->patterns_played : -1;
+    }
+    return is_music_playing() ? get_music_patterns_played() : -1;
 }
 
 int AudioEngine::get_music_ticks_on_pattern_hp() const {

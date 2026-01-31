@@ -68,7 +68,15 @@ struct AudioEngine
     bool muted = false;
     bool volume_mute = false;
     static const int CHANNELS = 4;
-    static const int SAMPLE_RATE = 22050;
+    #if defined(__3DS__)
+    static constexpr int SAMPLE_RATE_NUM = 55125;
+    static constexpr int SAMPLE_RATE_DEN = 10;
+    static constexpr float SAMPLE_RATE = (float)SAMPLE_RATE_NUM / (float)SAMPLE_RATE_DEN;
+    #else
+    static constexpr int SAMPLE_RATE_NUM = 22050;
+    static constexpr int SAMPLE_RATE_DEN = 1;
+    static constexpr float SAMPLE_RATE = 22050.0f;
+    #endif
     static constexpr int SNAP_COUNT = 256;
 
     struct MixerTickSnap {
@@ -84,8 +92,10 @@ struct AudioEngine
     float samples_per_tick_accumulator = 0.0f; 
 
     // Buffer output
-    float samples_accumulator = 0.0f;
+    int64_t samples_accum_num = 0;
     float last_mixed_sample = 0.0f;
+    unsigned long last_audio_ms = 0;
+    unsigned long gen_ms_max = 0;
     
     // DECLARE CHANNELS HERE
     Channel channels[CHANNELS];
@@ -153,7 +163,7 @@ struct AudioEngine
     int get_music_pattern() const { return music_pattern; }
     int get_music_row() const { return channels[0].is_music ? channels[0].row : 0; } 
     int get_music_speed() const { return music_speed; }
-    int get_music_patterns_played() const { return music_patterns_played; }
+    int get_music_patterns_played() const { return music_playing ? music_patterns_played : -1; }
     int get_music_ticks_on_pattern() const { return music_ticks_on_pattern; }
     bool is_music_playing() const { return music_playing; }
 
