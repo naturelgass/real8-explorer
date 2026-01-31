@@ -422,6 +422,7 @@ private:
 
     // Runtime switch: true when PAL8+TLUT is available and initialized successfully.
     bool useGpuPalette = false;
+    bool presentedThisLoop = false;
 
 #if REAL8_3DS_HAS_PAL8_TLUT
     C3D_Tlut gameTlut;
@@ -1583,6 +1584,9 @@ if (gameSubtexTopR) {
         shutdownGfx();
     }
 
+    void beginLoop() { presentedThisLoop = false; }
+    bool didPresent() const { return presentedThisLoop; }
+
     const char *getPlatform() const override { return "3DS"; }
     std::string getClipboardText() override { return ""; }
 
@@ -1634,7 +1638,6 @@ if (gameSubtexTopR) {
     }
 
     void waitForDebugEvent() override {
-        gspWaitForVBlank();
         svcSleepThread(1000000LL);
     }
 
@@ -2260,6 +2263,7 @@ if (gameSubtexTopR) {
         // Flush once after all targets have been drawn this frame.
         C2D_Flush();
         C3D_FrameEnd(0);
+        presentedThisLoop = true;
 
         if (screenshotPending && capturedThisFrame) {
             if (writeBmp24(pendingScreenshotPath, screenBuffer32.data(), screenW, screenH)) {

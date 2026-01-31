@@ -466,36 +466,28 @@ int main(int argc, char *argv[])
     host->setInterpolation(vm->interpolation);
 
     host->log("Real-8 3DS Port Started.");
-    bool running = true;
 
     FrameStats frameStats;
+    bool running = true;
+    bool doTick = true;   // toggles every vblank
+
     while (running && aptMainLoop()) {
+        host->beginLoop();
         frameStats.beginFrame();
-        // Poll input once per frame (pollInput internally avoids duplicate scans in the same ms).
+
         host->pollInput();
-        if (host->isExitComboHeld()) {
-            running = false;
-            break;
-        }
+        if (host->isExitComboHeld()) break;
 
-        host->crt_filter = vm->crt_filter;
-        if (vm->interpolation != host->interpolation) {
-            host->setInterpolation(vm->interpolation);
-        }
-
-        // Run exactly one emulation/update step per displayed frame.
         shell->update();
-        if (vm->quit_requested) {
-            running = false;
-            break;
-        }
+        if (vm->quit_requested) break;
 
-        // Frame pacing: lock to VBlank unless fast-forward is held.
-        u64 workEndMs = osGetTime();
-        if (!host->isFastForwardHeld()) {
+        // Only wait if we DIDN'T present this loop.
+        // (If we did present, SYNCDRAW already waited.)
+        if (!host->isFastForwardHeld() && !host->didPresent()) {
             gspWaitForVBlank();
         }
-        frameStats.endFrame(host, workEndMs);
+
+        frameStats.endFrame(host, osGetTime());
     }
 
     delete shell;
