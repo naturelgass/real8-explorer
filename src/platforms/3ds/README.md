@@ -29,7 +29,7 @@ Real8 Explorer for Nintendo 3DS is the citro2d/citro3d host for the Real8 VM + S
 
 | Area | Details |
 | --- | --- |
-| Cart loading | Load `.p8` and `.png` carts from `sdmc:/real8` |
+| Cart loading | Load `.p8` and `.png` carts from `sdmc:/real8/carts` |
 | Library and browsing | Local library, favorites, repository URL support, remote games with folders and genre |
 | Save states | Save and load VM state from the Shell menu |
 | Wallpaper | Custom `wallpaper.png` with auto-seeded default from RomFS |
@@ -45,7 +45,7 @@ Real8 Explorer for Nintendo 3DS is the citro2d/citro3d host for the Real8 VM + S
 
 | Area | Details |
 | --- | --- |
-| Storage | Auto-creates `real8`, `config`, `saves`, `mods`, and `screenshots` folders on the SD card |
+| Storage | Auto-creates `real8`, `carts`, `config`, `saves`, `mods`, and `screenshots` folders on the SD card |
 | Config seeding | Copies `wallpaper.png` and `gamesrepo.txt` from RomFS if missing |
 | Repo downloads | HTTP/HTTPS downloads via 3ds-curl (libcurl) |
 | Logging | Console logs plus `sdmc:/real8/log.txt` for important errors |
@@ -61,7 +61,7 @@ Real8 Explorer for Nintendo 3DS is the citro2d/citro3d host for the Real8 VM + S
 
 | Path | Purpose |
 | --- | --- |
-| `sdmc:/real8` | Carts placed here show up as local games |
+| `sdmc:/real8/carts` | Carts placed here show up as local games |
 | `sdmc:/real8/config` | `config.dat`, `gamesrepo.txt`, `gameslist.json`, `wallpaper.png` |
 | `sdmc:/real8/saves` | Save states (`.sav`) |
 | `sdmc:/real8/mods` | Mod packs by game id |
@@ -124,7 +124,7 @@ make cia
 
 ### Load local carts
 
-- Copy `.p8` or `.png` carts into `sdmc:/real8`
+- Copy `.p8` or `.png` carts into `sdmc:/real8/carts`
 - Launch the `.3dsx` from the Homebrew Menu (or install the CIA)
 
 ### Use a remote repo

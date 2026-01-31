@@ -30,7 +30,7 @@ Real8 Explorer for Nintendo Switch is the libnx host for the Real8 VM + Shell. I
 
 | Area | Details |
 | --- | --- |
-| Cart loading | Load `.p8` and `.png` carts from `sdmc:/real8` |
+| Cart loading | Load `.p8` and `.png` carts from `sdmc:/real8/carts` |
 | Library and browsing | Local library, favorites, repository URL support, remote games with folders and genre |
 | Save states | Save and load VM state from the Shell menu |
 | Wallpaper | Custom `wallpaper.png` with auto-seeded default from ROMFS |
@@ -47,7 +47,7 @@ Real8 Explorer for Nintendo Switch is the libnx host for the Real8 VM + Shell. I
 
 | Area | Details |
 | --- | --- |
-| Storage | Auto-creates `real8`, `config`, `saves`, `mods`, and `screenshots` folders on the SD card |
+| Storage | Auto-creates `real8`, `carts`, `config`, `saves`, `mods`, and `screenshots` folders on the SD card |
 | Repo downloads | HTTP/HTTPS downloads via libcurl (used for remote repo lists) |
 | Network info | Reads connection status and IP via NIFM when available |
 | Logging | `printf` output viewable via nxlink |
@@ -63,7 +63,7 @@ Real8 Explorer for Nintendo Switch is the libnx host for the Real8 VM + Shell. I
 
 | Path | Purpose |
 | --- | --- |
-| `sdmc:/real8` | Carts placed here show up as local games |
+| `sdmc:/real8/carts` | Carts placed here show up as local games |
 | `sdmc:/real8/config` | `config.dat`, `gamesrepo.txt`, `gameslist.json`, `wallpaper.png` |
 | `sdmc:/real8/saves` | Save states (`.sav`) |
 | `sdmc:/real8/mods` | Mod packs by game id |
@@ -183,7 +183,7 @@ folder (run `make template` once to generate it) before configuring the tools bu
 
 ### Load local carts
 
-- Copy `.p8` or `.png` carts into `sdmc:/real8`
+- Copy `.p8` or `.png` carts into `sdmc:/real8/carts`
 - Launch the NRO from the Homebrew Menu
 
 ### Use a remote repo

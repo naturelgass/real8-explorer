@@ -1029,6 +1029,7 @@ private:
         ensureDir(rootPath + "/config");
         ensureDir(rootPath + "/saves");
         ensureDir(rootPath + "/mods");
+        ensureDir(rootPath + "/carts");
         ensureDir(rootPath + "/screenshots");
 
         // Init RomFS once
@@ -1256,12 +1257,20 @@ if (gameSubtexTopR) {
         std::string fname = filename ? filename : "";
         if (!fname.empty() && fname[0] == '/') fname = fname.substr(1);
 
+        auto isCartFile = [](const std::string& name) {
+            if (name.length() >= 3 && name.compare(name.length() - 3, 3, ".p8") == 0) return true;
+            if (name.length() >= 4 && name.compare(name.length() - 4, 4, ".png") == 0) return true;
+            return false;
+        };
+
         std::string targetDir = rootPath;
         if (fname.length() > 4 && fname.substr(fname.length() - 4) == ".sav") {
             targetDir = rootPath + "/saves";
         } else if (fname == "config.dat" || fname == "wallpaper.png" || fname == "favorites.txt" ||
                    fname == "gameslist.json" || fname == "gamesrepo.txt") {
             targetDir = rootPath + "/config";
+        } else if (isCartFile(fname)) {
+            targetDir = rootPath + "/carts";
         }
 
         ensureDir(targetDir);
@@ -2404,7 +2413,9 @@ if (gameSubtexTopR) {
 
     std::vector<std::string> listFiles(const char *ext) override {
         std::vector<std::string> results;
-        DIR *dir = opendir(rootPath.c_str());
+        std::string cartsDir = rootPath + "/carts";
+        ensureDir(cartsDir);
+        DIR *dir = opendir(cartsDir.c_str());
         if (!dir) return results;
         struct dirent *ent;
         while ((ent = readdir(dir)) != nullptr) {

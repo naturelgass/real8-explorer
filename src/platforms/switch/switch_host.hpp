@@ -106,6 +106,12 @@ private:
         if (!fname.empty() && fname[0] == '/')
             fname = fname.substr(1);
 
+        auto isCartFile = [](const std::string& name) {
+            if (name.length() >= 3 && name.compare(name.length() - 3, 3, ".p8") == 0) return true;
+            if (name.length() >= 4 && name.compare(name.length() - 4, 4, ".png") == 0) return true;
+            return false;
+        };
+
         fs::path targetDir;
 
         if (fname.length() > 4 && fname.substr(fname.length() - 4) == ".sav")
@@ -115,6 +121,10 @@ private:
         else if (fname == "config.dat" || fname == "wallpaper.png" || fname == "favorites.txt" || fname == "gameslist.json" || fname == "gamesrepo.txt")
         {
             targetDir = rootPath / "config";
+        }
+        else if (isCartFile(fname))
+        {
+            targetDir = rootPath / "carts";
         }
         else
         {
@@ -275,6 +285,7 @@ public:
         fs::create_directories(rootPath / "mods");
         fs::create_directories(rootPath / "config");
         fs::create_directories(rootPath / "saves");
+        fs::create_directories(rootPath / "carts");
 
         // Mount ROMFS (bundled files inside the NRO)
         Result romfs_rc = romfsInit();
@@ -639,8 +650,9 @@ public:
 
     std::vector<std::string> listFiles(const char *ext) override {
         std::vector<std::string> results;
-        if (!fs::exists(rootPath)) return results;
-        for (const auto &entry : fs::directory_iterator(rootPath)) {
+        fs::path cartsPath = rootPath / "carts";
+        if (!fs::exists(cartsPath)) return results;
+        for (const auto &entry : fs::directory_iterator(cartsPath)) {
             if (entry.is_regular_file()) {
                 std::string filename = entry.path().filename().string();
                 if (strlen(ext) == 0 || filename.find(ext) != std::string::npos) {
