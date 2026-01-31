@@ -3037,17 +3037,26 @@ static int IWRAM_BINDINGS_CODE l_spr(lua_State *L)
     int x = (int16_t)to_int_floor(L, 2);
     int y = (int16_t)to_int_floor(L, 3);
 
-    // PICO-8 entities might use fractional sizes (e.g. 6px hitbox / 8 = 0.75).
-    // Direct (int) cast truncates 0.75 to 0 (invisible).
-    // We use ceil() to ensure it draws at least 1 tile.
+    // PICO-8 accepts fractional w/h for spr() and treats them as partial sprite sizes.
     double dw = luaL_optnumber(L, 4, 1.0);
     double dh = luaL_optnumber(L, 5, 1.0);
-
-    int w = (int)ceil(dw);
-    int h = (int)ceil(dh);
-
     bool fx = lua_toboolean(L, 6), fy = lua_toboolean(L, 7);
-    vm->gpu.spr(n, x, y, w, h, fx, fy);
+
+    const auto is_int = [](double v) { return std::fabs(v - std::round(v)) < 1e-6; };
+    if (is_int(dw) && is_int(dh)) {
+        int w = (int)std::round(dw);
+        int h = (int)std::round(dh);
+        vm->gpu.spr(n, x, y, w, h, fx, fy);
+        return 0;
+    }
+
+    int sw = (int)std::floor(dw * 8.0 + 1e-6);
+    int sh = (int)std::floor(dh * 8.0 + 1e-6);
+    if (sw <= 0 || sh <= 0) return 0;
+
+    int sx = (n % 16) * 8;
+    int sy = (n / 16) * 8;
+    vm->gpu.sspr(sx, sy, sw, sh, x, y, sw, sh, fx, fy);
     return 0;
 }
 // In real8_bindings.cpp, replace the l_sspr function:
