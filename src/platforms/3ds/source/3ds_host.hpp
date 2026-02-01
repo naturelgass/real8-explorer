@@ -30,6 +30,10 @@
 #include <citro3d.h>
 #include <citro2d.h>
 
+#ifndef C3D_FRAME_NONBLOCK
+#define C3D_FRAME_NONBLOCK 0
+#endif
+
 #include "real8_host.h"
 #include "real8_vm.h"
 #include "real8_gfx.h"
@@ -440,6 +444,58 @@ private:
     // Runtime switch: true when PAL8+TLUT is available and initialized successfully.
     bool useGpuPalette = false;
     bool presentedThisLoop = false;
+    enum class FramePaceMode : uint8_t {
+        Vsync60,
+        Vsync30,
+        Uncapped
+    };
+    static constexpr int kWorkSampleCount = 60;
+    static constexpr int kEnter60Ms = 15;
+    static constexpr int kLeave60Ms = 17;
+    static constexpr int kEnter30Ms = 31;
+    static constexpr int kLeave30Ms = 34;
+    static constexpr int kModeHoldFrames = 120;
+    static constexpr int kSwitchWindowCount = 3;
+    static constexpr int kRescueWindow = 4;
+    static constexpr int kVsyncMissWindow = 6;
+    static constexpr int kVsyncMissLimit = 2;
+    static constexpr int kVsync30MissThresholdMs = 42;
+    static constexpr int kCart30UncapHoldFrames = 240;
+    static constexpr int kUncapLimiterMs60 = 16;
+    static constexpr int kUncapLimiterMs30 = 33;
+    static constexpr int kLateRescueTargetMs = 33;
+    static constexpr int kLateRescueGuardMs = 2;
+    static constexpr int kLateRescueMinRenderMs = 6;
+    int workSamples[kWorkSampleCount] = {};
+    int workSampleCount = 0;
+    int workSampleIndex = 0;
+    int workP95Ms = 0;
+    FramePaceMode paceMode = FramePaceMode::Vsync60;
+    FramePaceMode pendingMode = FramePaceMode::Vsync60;
+    int pendingCount = 0;
+    int modeHoldFrames = 0;
+    int paceTick = 0;
+    u64 frameStartMs = 0;
+    u64 lastPresentMs = 0;
+    int lastWorkMs = 0;
+    int lastRenderMs = 0;
+    u64 renderStartMs = 0;
+    int lastTargetFps = 0;
+    bool skipUploadThisFrame = false;
+    bool decisionConsumed = false;
+    bool cachedFrameValid = false;
+    int cachedTopW = 0;
+    int cachedTopH = 0;
+    int cachedBottomW = 0;
+    int cachedBottomH = 0;
+    int rescueAttemptHistory[kRescueWindow] = {};
+    int rescueHistory[kRescueWindow] = {};
+    int rescueIndex = 0;
+    int rescueOveruseWindows = 0;
+    u64 prevPresentMs = 0;
+    int vblankMissHistory[kVsyncMissWindow] = {};
+    int vblankMissIndex = 0;
+    int vblankMissOveruse = 0;
 
 #if REAL8_3DS_HAS_PAL8_TLUT
     C3D_Tlut gameTlut;
@@ -697,6 +753,11 @@ private:
         lastStereoDepth = 0;
         lastStereoConv = 0;
         lastStereoSwap = false;
+        cachedFrameValid = false;
+        cachedTopW = 0;
+        cachedTopH = 0;
+        cachedBottomW = 0;
+        cachedBottomH = 0;
     }
 
     bool initGameTextures(int newTopW, int newTopH, int newBottomW, int newBottomH) {
@@ -1333,6 +1394,128 @@ if (gameSubtexTopR) {
         if (r.y1 >= fb_h) r.y1 = fb_h - 1;
     }
 
+    int sumRecent(const int* history, int count) const {
+        int total = 0;
+        for (int i = 0; i < count; ++i) total += history[i];
+        return total;
+    }
+
+    void resetRescueHistory() {
+        for (int i = 0; i < kRescueWindow; ++i) {
+            rescueAttemptHistory[i] = 0;
+            rescueHistory[i] = 0;
+        }
+        rescueIndex = 0;
+    }
+
+    void resetVblankMissHistory() {
+        for (int i = 0; i < kVsyncMissWindow; ++i) {
+            vblankMissHistory[i] = 0;
+        }
+        vblankMissIndex = 0;
+    }
+
+    int getUncapLimiterMs() const {
+        const int target = (debugVMRef ? debugVMRef->targetFPS : 60);
+        return (target >= 60) ? kUncapLimiterMs60 : kUncapLimiterMs30;
+    }
+
+    int computeWorkP95Ms() const {
+        const int count = workSampleCount;
+        if (count <= 0) return 0;
+        int tmp[kWorkSampleCount];
+        for (int i = 0; i < count; ++i) {
+            tmp[i] = workSamples[i];
+        }
+        std::sort(tmp, tmp + count);
+        int idx = (count * 95 + 99) / 100 - 1;
+        if (idx < 0) idx = 0;
+        if (idx >= count) idx = count - 1;
+        return tmp[idx];
+    }
+
+    void recordWorkSample(int workMs, bool fastForward) {
+        if (fastForward || workMs <= 0) return;
+        workSamples[workSampleIndex] = workMs;
+        workSampleIndex = (workSampleIndex + 1) % kWorkSampleCount;
+        if (workSampleCount < kWorkSampleCount) workSampleCount++;
+        lastWorkMs = workMs;
+        if (workSampleCount >= kWorkSampleCount) {
+            workP95Ms = computeWorkP95Ms();
+            updatePacingMode(workP95Ms);
+        }
+    }
+
+    void updatePacingMode(int p95Ms) {
+        if (p95Ms <= 0) return;
+        const int target = (debugVMRef ? debugVMRef->targetFPS : 60);
+        const bool cart30 = (target <= 30);
+        const bool cart60 = (target >= 60);
+
+        if (lastTargetFps != target) {
+            lastTargetFps = target;
+            modeHoldFrames = kModeHoldFrames;
+            pendingCount = 0;
+            pendingMode = paceMode;
+        }
+
+        FramePaceMode desired = paceMode;
+        if (paceMode == FramePaceMode::Vsync60) {
+            if (cart30) desired = FramePaceMode::Vsync30;
+            else if (p95Ms >= kLeave60Ms) desired = FramePaceMode::Vsync30;
+        } else if (paceMode == FramePaceMode::Vsync30) {
+            if (!cart30 && p95Ms <= kEnter60Ms) desired = FramePaceMode::Vsync60;
+            else if (p95Ms >= kLeave30Ms) desired = FramePaceMode::Uncapped;
+        } else {
+            if (!cart30 && p95Ms <= kEnter60Ms) desired = FramePaceMode::Vsync60;
+            else if (p95Ms <= kEnter30Ms) desired = FramePaceMode::Vsync30;
+        }
+
+        if (cart30 && desired == FramePaceMode::Vsync60) {
+            desired = FramePaceMode::Vsync30;
+        }
+        if (cart30 && paceMode == FramePaceMode::Uncapped &&
+            modeHoldFrames < kCart30UncapHoldFrames) {
+            desired = FramePaceMode::Uncapped;
+        }
+
+        if (rescueOveruseWindows > 0 && paceMode == FramePaceMode::Vsync30) {
+            desired = FramePaceMode::Uncapped;
+        }
+        if (vblankMissOveruse > 0 && paceMode == FramePaceMode::Vsync30 && cart30) {
+            desired = FramePaceMode::Uncapped;
+        }
+
+        if (desired == paceMode) {
+            pendingMode = paceMode;
+            pendingCount = 0;
+        } else {
+            if (desired == pendingMode) pendingCount++;
+            else {
+                pendingMode = desired;
+                pendingCount = 1;
+            }
+
+            const int hold = modeHoldFrames;
+            const bool holdReady = (hold >= kModeHoldFrames);
+            const bool rescueOverride = (desired == FramePaceMode::Uncapped) &&
+                (rescueOveruseWindows > 0) && (hold >= (kModeHoldFrames / 2));
+
+            if ((pendingCount >= kSwitchWindowCount && holdReady) || rescueOverride) {
+                paceMode = pendingMode;
+                modeHoldFrames = 0;
+                pendingCount = 0;
+                rescueOveruseWindows = 0;
+                vblankMissOveruse = 0;
+                resetRescueHistory();
+                resetVblankMissHistory();
+            }
+        }
+
+        if (rescueOveruseWindows > 0) rescueOveruseWindows--;
+        if (vblankMissOveruse > 0) vblankMissOveruse--;
+    }
+
     bool ensureScanlineTexture(int w, int h) {
         if (w <= 0 || h <= 0) return false;
         const int texW = nextPow2(w);
@@ -1666,8 +1849,112 @@ if (gameSubtexTopR) {
         shutdownGfx();
     }
 
-    void beginLoop() { presentedThisLoop = false; }
+    void beginLoop() {
+        presentedThisLoop = false;
+        decisionConsumed = false;
+        skipUploadThisFrame = false;
+        frameStartMs = osGetTime();
+        paceTick++;
+        if (modeHoldFrames < 0x7FFFFFFF) modeHoldFrames++;
+    }
     bool didPresent() const { return presentedThisLoop; }
+    FramePresentDecision decideFramePresent() override {
+        if (decisionConsumed) return FramePresentDecision::Skip;
+        decisionConsumed = true;
+
+        const bool fastForward = isFastForwardHeld();
+        if (fastForward) {
+            skipUploadThisFrame = false;
+            return FramePresentDecision::Present;
+        }
+
+        if (screenshotPending) {
+            skipUploadThisFrame = false;
+            return FramePresentDecision::Present;
+        }
+
+        const int target = (debugVMRef ? debugVMRef->targetFPS : 60);
+        const bool cart30 = (target <= 30);
+        const int divisor = (paceMode == FramePaceMode::Vsync30 && !cart30) ? 2 : 1;
+        if (divisor > 1 && (paceTick % divisor) != 0) {
+            skipUploadThisFrame = false;
+            return FramePresentDecision::Skip;
+        }
+
+        const u64 now = osGetTime();
+        if (paceMode == FramePaceMode::Uncapped) {
+            const int limiter = getUncapLimiterMs();
+            if (lastPresentMs != 0 && (now - lastPresentMs) < (u64)limiter) {
+                skipUploadThisFrame = false;
+                return FramePresentDecision::Skip;
+            }
+            skipUploadThisFrame = false;
+            return FramePresentDecision::Present;
+        }
+
+        bool rescueAttempt = false;
+        bool rescueDone = false;
+        FramePresentDecision decision = FramePresentDecision::Present;
+
+        if (paceMode == FramePaceMode::Vsync30) {
+            if (lastPresentMs != 0 && cachedFrameValid && debugVMRef) {
+                const int estimate = (lastRenderMs > 0) ? lastRenderMs : 0;
+                const u64 elapsed = now - lastPresentMs;
+                const int threshold = kLateRescueTargetMs + kLateRescueGuardMs;
+                if (estimate >= kLateRescueMinRenderMs && (int)elapsed + estimate >= threshold) {
+                    const bool bottom_active = debugVMRef->bottom_screen_enabled && debugVMRef->fb_bottom &&
+                        (!debugVMRef->alt_fb || debugVMRef->draw_target_bottom);
+                    const int top_w = debugVMRef->hasAltFramebuffer() ? debugVMRef->alt_fb_w : debugVMRef->fb_w;
+                    const int top_h = debugVMRef->hasAltFramebuffer() ? debugVMRef->alt_fb_h : debugVMRef->fb_h;
+                    const int bottom_w = bottom_active ? debugVMRef->bottom_fb_w : debugVMRef->fb_w;
+                    const int bottom_h = bottom_active ? debugVMRef->bottom_fb_h : debugVMRef->fb_h;
+                    if (top_w == cachedTopW && top_h == cachedTopH &&
+                        bottom_w == cachedBottomW && bottom_h == cachedBottomH) {
+                        rescueAttempt = true;
+                        const int recentRescues = sumRecent(rescueHistory, kRescueWindow);
+                        if (recentRescues < 1) {
+                            rescueDone = true;
+                            decision = FramePresentDecision::Reuse;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (rescueAttempt) {
+            rescueAttemptHistory[rescueIndex] = 1;
+            rescueHistory[rescueIndex] = rescueDone ? 1 : 0;
+            rescueIndex = (rescueIndex + 1) % kRescueWindow;
+            const int attempts = sumRecent(rescueAttemptHistory, kRescueWindow);
+            if (attempts >= 2) {
+                rescueOveruseWindows = kSwitchWindowCount;
+            }
+        } else {
+            rescueAttemptHistory[rescueIndex] = 0;
+            rescueHistory[rescueIndex] = 0;
+            rescueIndex = (rescueIndex + 1) % kRescueWindow;
+        }
+
+        if (rescueOveruseWindows > 0 && paceMode == FramePaceMode::Vsync30 &&
+            modeHoldFrames >= (kModeHoldFrames / 2)) {
+            paceMode = FramePaceMode::Uncapped;
+            modeHoldFrames = 0;
+            pendingCount = 0;
+            rescueOveruseWindows = 0;
+            resetRescueHistory();
+        }
+        if (vblankMissOveruse > 0 && paceMode == FramePaceMode::Vsync30 &&
+            modeHoldFrames >= (kModeHoldFrames / 2)) {
+            paceMode = FramePaceMode::Uncapped;
+            modeHoldFrames = 0;
+            pendingCount = 0;
+            vblankMissOveruse = 0;
+            resetVblankMissHistory();
+        }
+
+        skipUploadThisFrame = (decision == FramePresentDecision::Reuse);
+        return decision;
+    }
 
     const char *getPlatform() const override { return "3DS"; }
     std::string getClipboardText() override { return ""; }
@@ -1679,6 +1966,11 @@ if (gameSubtexTopR) {
 
     void clearTopPreviewBlankHint() override {
         topPreviewHintValid = false;
+    }
+
+    int getPreferredTickMs() override {
+        const int target = (debugVMRef ? debugVMRef->targetFPS : 60);
+        return (target >= 60) ? kUncapLimiterMs60 : kUncapLimiterMs30;
     }
 
     void* allocLinearFramebuffer(size_t bytes, size_t align) override {
@@ -1760,7 +2052,19 @@ if (gameSubtexTopR) {
         if (top_w <= 0 || top_h <= 0 || bottom_w <= 0 || bottom_h <= 0) return;
         ensureGameTextures(top_w, top_h, bottom_w, bottom_h);
         if (!gameTex || !gameTexTop || !gameTexTopR || !gameSubtex || !gameSubtexBottom || !gameSubtexTop || !gameSubtexTopR) return;
+        renderStartMs = osGetTime();
         const bool wantScreenshot = screenshotPending;
+        const bool fastForward = isFastForwardHeld();
+        bool allowUpload = true;
+        if (skipUploadThisFrame) {
+            const bool sizeMatch = cachedFrameValid &&
+                cachedTopW == top_w && cachedTopH == top_h &&
+                cachedBottomW == bottom_w && cachedBottomH == bottom_h;
+            if (sizeMatch && !wantScreenshot) {
+                allowUpload = false;
+            }
+        }
+        skipUploadThisFrame = false;
         bool capturedThisFrame = false;
 
         const bool inGameSingleScreen = (topbuffer == bottombuffer);
@@ -1777,7 +2081,24 @@ if (gameSubtexTopR) {
             topPreviewBlank = isBlankTopPreview(topbuffer, bottombuffer);
         }
 
+        const bool topIsVmFb = (debugVMRef && topbuffer == debugVMRef->fb);
+        const bool bottomIsVmFb = (debugVMRef && bottombuffer == debugVMRef->fb);
+        const bool bottomIsBottomFb = (debugVMRef && bottombuffer == debugVMRef->fb_bottom);
+        const bool bottomDirty = (debugVMRef && debugVMRef->bottom_dirty);
+        DirtyRect dirtyTop;
+        bool topDirtyValid = false;
+        if (topIsVmFb && getDirtyRectForBuffer(topbuffer, top_w, top_h, dirtyTop)) {
+            alignDirtyRectToTiles(dirtyTop, top_w, top_h);
+            topDirtyValid = dirtyTop.valid;
+        }
+
         auto updateBottomTexture = [&](bool allowScreenshot) {
+            if (bottomIsVmFb && topIsVmFb && !topDirtyValid && !allowScreenshot) {
+                return;
+            }
+            if (bottomIsBottomFb && !bottomDirty && !allowScreenshot) {
+                return;
+            }
 #if REAL8_3DS_HAS_PAL8_TLUT
             if (useGpuPalette) {
                 u8* bottomIndexSrc = indexBufferBottom;
@@ -1841,181 +2162,168 @@ if (gameSubtexTopR) {
             stereoActive = stereoCapable && stereoSlider > 0.01f;
         }
 
+        if (!allowUpload) {
+            stereoActive = lastStereoActive;
+        }
+
         // When 3D is disabled, the system duplicates the left framebuffer to the right.
         gfxSet3D(stereoActive);
 
-        if (stereoActive) {
-            static std::vector<uint8_t> eyeL;
-            static std::vector<uint8_t> eyeR;
-            static std::vector<uint8_t> zL;
-            static std::vector<uint8_t> zR;
+        if (allowUpload && stereoActive) {
+            const bool canSkipStereoUpload =
+                topIsVmFb && !topDirtyValid && !wantScreenshot &&
+                stereoBuffersValid && lastStereoActive;
+            if (canSkipStereoUpload) {
+                if (!inGameSingleScreen) {
+                    updateBottomTexture(false);
+                }
+            } else {
+                static std::vector<uint8_t> eyeL;
+                static std::vector<uint8_t> eyeR;
+                static std::vector<uint8_t> zL;
+                static std::vector<uint8_t> zR;
 
-            const size_t pixelCount = (size_t)top_w * (size_t)top_h;
-            if (eyeL.size() != pixelCount) {
-                eyeL.assign(pixelCount, 0);
-                eyeR.assign(pixelCount, 0);
-                zL.assign(pixelCount, 0);
-                zR.assign(pixelCount, 0);
-                stereoBuffersValid = false;
-            }
+                const size_t pixelCount = (size_t)top_w * (size_t)top_h;
+                if (eyeL.size() != pixelCount) {
+                    eyeL.assign(pixelCount, 0);
+                    eyeR.assign(pixelCount, 0);
+                    zL.assign(pixelCount, 0);
+                    zR.assign(pixelCount, 0);
+                    stereoBuffersValid = false;
+                }
 
-            constexpr float kPxPerBucket = 1.0f; // base pixels per bucket
-            const float bucketScale = (float)depthLevel * stereoSlider * kPxPerBucket;
-            const int maxShiftClamp = (int)ceilf(fabsf((float)Real8VM::STEREO_BUCKET_MAX * bucketScale) + (float)std::abs(convPx));
-            bool fullClear = !stereoBuffersValid || !lastStereoActive ||
-                (lastStereoSlider < 0.0f || fabsf(stereoSlider - lastStereoSlider) > 0.001f) ||
-                (depthLevel != lastStereoDepth) || (convPx != lastStereoConv) || (swapEyes != lastStereoSwap);
+                constexpr float kPxPerBucket = 1.0f; // base pixels per bucket
+                const float bucketScale = (float)depthLevel * stereoSlider * kPxPerBucket;
+                const int maxShiftClamp = (int)ceilf(fabsf((float)Real8VM::STEREO_BUCKET_MAX * bucketScale) + (float)std::abs(convPx));
+                bool fullClear = !stereoBuffersValid || !lastStereoActive ||
+                    (lastStereoSlider < 0.0f || fabsf(stereoSlider - lastStereoSlider) > 0.001f) ||
+                    (depthLevel != lastStereoDepth) || (convPx != lastStereoConv) || (swapEyes != lastStereoSwap);
 
-            int srcX0 = 0;
-            int srcY0 = 0;
-            int srcX1 = top_w - 1;
-            int srcY1 = top_h - 1;
+                int srcX0 = 0;
+                int srcY0 = 0;
+                int srcX1 = top_w - 1;
+                int srcY1 = top_h - 1;
 
-            int clearX0 = 0;
-            int clearY0 = 0;
-            int clearX1 = top_w - 1;
-            int clearY1 = top_h - 1;
+                int clearX0 = 0;
+                int clearY0 = 0;
+                int clearX1 = top_w - 1;
+                int clearY1 = top_h - 1;
 
-            if (!fullClear && debugVMRef) {
-                int dx0 = debugVMRef->dirty_x0;
-                int dy0 = debugVMRef->dirty_y0;
-                int dx1 = debugVMRef->dirty_x1;
-                int dy1 = debugVMRef->dirty_y1;
+                if (!fullClear && debugVMRef) {
+                    int dx0 = debugVMRef->dirty_x0;
+                    int dy0 = debugVMRef->dirty_y0;
+                    int dx1 = debugVMRef->dirty_x1;
+                    int dy1 = debugVMRef->dirty_y1;
 
-                if (dx1 < 0 || dy1 < 0) {
-                    fullClear = true;
-                } else {
-                    if (dx0 < 0) dx0 = 0;
-                    if (dy0 < 0) dy0 = 0;
-                    if (dx1 >= top_w) dx1 = top_w - 1;
-                    if (dy1 >= top_h) dy1 = top_h - 1;
-                    if (dx0 > dx1 || dy0 > dy1) {
+                    if (dx1 < 0 || dy1 < 0) {
                         fullClear = true;
                     } else {
-                        srcX0 = dx0;
-                        srcY0 = dy0;
-                        srcX1 = dx1;
-                        srcY1 = dy1;
+                        if (dx0 < 0) dx0 = 0;
+                        if (dy0 < 0) dy0 = 0;
+                        if (dx1 >= top_w) dx1 = top_w - 1;
+                        if (dy1 >= top_h) dy1 = top_h - 1;
+                        if (dx0 > dx1 || dy0 > dy1) {
+                            fullClear = true;
+                        } else {
+                            srcX0 = dx0;
+                            srcY0 = dy0;
+                            srcX1 = dx1;
+                            srcY1 = dy1;
 
-                        int maxShift = maxShiftClamp;
-                        if (maxShift < 0) maxShift = 0;
-                        clearX0 = srcX0 - maxShift;
-                        clearX1 = srcX1 + maxShift;
-                        if (clearX0 < 0) clearX0 = 0;
-                        if (clearX1 >= top_w) clearX1 = top_w - 1;
-                        clearY0 = srcY0;
-                        clearY1 = srcY1;
-                    }
-                }
-            }
-
-            DirtyRect stereoDirty;
-            if (fullClear) {
-                std::fill(eyeL.begin(), eyeL.end(), 0);
-                std::fill(eyeR.begin(), eyeR.end(), 0);
-                std::fill(zL.begin(), zL.end(), 0);
-                std::fill(zR.begin(), zR.end(), 0);
-            } else {
-                const int clearW = clearX1 - clearX0 + 1;
-                for (int y = clearY0; y <= clearY1; ++y) {
-                    std::memset(eyeL.data() + (size_t)y * (size_t)top_w + clearX0, 0, (size_t)clearW);
-                    std::memset(eyeR.data() + (size_t)y * (size_t)top_w + clearX0, 0, (size_t)clearW);
-                    std::memset(zL.data() + (size_t)y * (size_t)top_w + clearX0, 0, (size_t)clearW);
-                    std::memset(zR.data() + (size_t)y * (size_t)top_w + clearX0, 0, (size_t)clearW);
-                }
-                stereoDirty.x0 = clearX0;
-                stereoDirty.y0 = clearY0;
-                stereoDirty.x1 = clearX1;
-                stereoDirty.y1 = clearY1;
-                stereoDirty.valid = true;
-                alignDirtyRectToTiles(stereoDirty, top_w, top_h);
-            }
-
-            for (int li = 0; li < Real8VM::STEREO_LAYER_COUNT; ++li) {
-                const int bucket = li - Real8VM::STEREO_BUCKET_BIAS;
-                int shift = (int)lroundf((float)bucket * bucketScale) + convPx;
-                if (swapEyes) shift = -shift;
-                if (shift < -maxShiftClamp) shift = -maxShiftClamp;
-                if (shift >  maxShiftClamp) shift =  maxShiftClamp;
-                const uint8_t zval = (uint8_t)(bucket < 0 ? -bucket : bucket); // |bucket| in 0..7
-
-                for (int y = srcY0; y <= srcY1; ++y) {
-                    const uint8_t* src_row = debugVMRef->stereo_layer_row(li, y);
-                    for (int x = srcX0; x <= srcX1; ++x) {
-                        uint8_t src = src_row[x];
-                        if (src == 0xFF) continue;
-                        src &= 0x0F;
-
-                        const int lx = x + shift;
-                        if ((unsigned)lx < (unsigned)top_w) {
-                            const size_t i = (size_t)y * (size_t)top_w + (size_t)lx;
-                            if (zval >= zL[i]) { zL[i] = zval; eyeL[i] = src; }
-                        }
-
-                        const int rx = x - shift;
-                        if ((unsigned)rx < (unsigned)top_w) {
-                            const size_t i = (size_t)y * (size_t)top_w + (size_t)rx;
-                            if (zval >= zR[i]) { zR[i] = zval; eyeR[i] = src; }
+                            int maxShift = maxShiftClamp;
+                            if (maxShift < 0) maxShift = 0;
+                            clearX0 = srcX0 - maxShift;
+                            clearX1 = srcX1 + maxShift;
+                            if (clearX0 < 0) clearX0 = 0;
+                            if (clearX1 >= top_w) clearX1 = top_w - 1;
+                            clearY0 = srcY0;
+                            clearY1 = srcY1;
                         }
                     }
                 }
-            }
+
+                DirtyRect stereoDirty;
+                if (fullClear) {
+                    std::fill(eyeL.begin(), eyeL.end(), 0);
+                    std::fill(eyeR.begin(), eyeR.end(), 0);
+                    std::fill(zL.begin(), zL.end(), 0);
+                    std::fill(zR.begin(), zR.end(), 0);
+                } else {
+                    const int clearW = clearX1 - clearX0 + 1;
+                    for (int y = clearY0; y <= clearY1; ++y) {
+                        std::memset(eyeL.data() + (size_t)y * (size_t)top_w + clearX0, 0, (size_t)clearW);
+                        std::memset(eyeR.data() + (size_t)y * (size_t)top_w + clearX0, 0, (size_t)clearW);
+                        std::memset(zL.data() + (size_t)y * (size_t)top_w + clearX0, 0, (size_t)clearW);
+                        std::memset(zR.data() + (size_t)y * (size_t)top_w + clearX0, 0, (size_t)clearW);
+                    }
+                    stereoDirty.x0 = clearX0;
+                    stereoDirty.y0 = clearY0;
+                    stereoDirty.x1 = clearX1;
+                    stereoDirty.y1 = clearY1;
+                    stereoDirty.valid = true;
+                    alignDirtyRectToTiles(stereoDirty, top_w, top_h);
+                }
+
+                for (int li = 0; li < Real8VM::STEREO_LAYER_COUNT; ++li) {
+                    const int bucket = li - Real8VM::STEREO_BUCKET_BIAS;
+                    int shift = (int)lroundf((float)bucket * bucketScale) + convPx;
+                    if (swapEyes) shift = -shift;
+                    if (shift < -maxShiftClamp) shift = -maxShiftClamp;
+                    if (shift >  maxShiftClamp) shift =  maxShiftClamp;
+                    const uint8_t zval = (uint8_t)(bucket < 0 ? -bucket : bucket); // |bucket| in 0..7
+
+                    for (int y = srcY0; y <= srcY1; ++y) {
+                        const uint8_t* src_row = debugVMRef->stereo_layer_row(li, y);
+                        for (int x = srcX0; x <= srcX1; ++x) {
+                            uint8_t src = src_row[x];
+                            if (src == 0xFF) continue;
+                            src &= 0x0F;
+
+                            const int lx = x + shift;
+                            if ((unsigned)lx < (unsigned)top_w) {
+                                const size_t i = (size_t)y * (size_t)top_w + (size_t)lx;
+                                if (zval >= zL[i]) { zL[i] = zval; eyeL[i] = src; }
+                            }
+
+                            const int rx = x - shift;
+                            if ((unsigned)rx < (unsigned)top_w) {
+                                const size_t i = (size_t)y * (size_t)top_w + (size_t)rx;
+                                if (zval >= zR[i]) { zR[i] = zval; eyeR[i] = src; }
+                            }
+                        }
+                    }
+                }
 
 #if REAL8_3DS_HAS_PAL8_TLUT
-            if (useGpuPalette) {
-                // Use separate CPU buffers for the two uploads to avoid any chance of overlap.
-                blitFrameToTexture(eyeL.data(), top_w, top_h, gameTexTop,  cachedPalette565, cachedPalette32, wantScreenshot,  indexBufferTop,
-                                   stereoDirty.valid ? &stereoDirty : nullptr);
-                blitFrameToTexture(eyeR.data(), top_w, top_h, gameTexTopR, cachedPalette565, cachedPalette32, false, indexBufferBottom,
-                                   stereoDirty.valid ? &stereoDirty : nullptr);
-            } else
+                if (useGpuPalette) {
+                    // Use separate CPU buffers for the two uploads to avoid any chance of overlap.
+                    blitFrameToTexture(eyeL.data(), top_w, top_h, gameTexTop,  cachedPalette565, cachedPalette32, wantScreenshot,  indexBufferTop,
+                                       stereoDirty.valid ? &stereoDirty : nullptr);
+                    blitFrameToTexture(eyeR.data(), top_w, top_h, gameTexTopR, cachedPalette565, cachedPalette32, false, indexBufferBottom,
+                                       stereoDirty.valid ? &stereoDirty : nullptr);
+                } else
 #endif
-            {
-                blitFrameToTexture(eyeL.data(), top_w, top_h, gameTexTop,  cachedPalette565, cachedPalette32, wantScreenshot,  pixelBuffer565Top,
-                                   stereoDirty.valid ? &stereoDirty : nullptr);
-                blitFrameToTexture(eyeR.data(), top_w, top_h, gameTexTopR, cachedPalette565, cachedPalette32, false, pixelBuffer565Bottom,
-                                   stereoDirty.valid ? &stereoDirty : nullptr);
+                {
+                    blitFrameToTexture(eyeL.data(), top_w, top_h, gameTexTop,  cachedPalette565, cachedPalette32, wantScreenshot,  pixelBuffer565Top,
+                                       stereoDirty.valid ? &stereoDirty : nullptr);
+                    blitFrameToTexture(eyeR.data(), top_w, top_h, gameTexTopR, cachedPalette565, cachedPalette32, false, pixelBuffer565Bottom,
+                                       stereoDirty.valid ? &stereoDirty : nullptr);
+                }
+                if (wantScreenshot) capturedThisFrame = true;
+                stereoBuffersValid = true;
+                lastStereoSlider = stereoSlider;
+                lastStereoDepth = depthLevel;
+                lastStereoConv = convPx;
+                lastStereoSwap = swapEyes;
+                if (!inGameSingleScreen) {
+                    updateBottomTexture(false);
+                }
             }
-            if (wantScreenshot) capturedThisFrame = true;
-            stereoBuffersValid = true;
-            lastStereoSlider = stereoSlider;
-            lastStereoDepth = depthLevel;
-            lastStereoConv = convPx;
-            lastStereoSwap = swapEyes;
-            if (!inGameSingleScreen) {
-                updateBottomTexture(false);
-            }
-        } else {
+        } else if (allowUpload) {
 
         if (inGameSingleScreen) {
             // Update top texture and screenshot buffer from the game framebuffer.
-            DirtyRect dirtyTop;
-            if (getDirtyRectForBuffer(topbuffer, top_w, top_h, dirtyTop)) {
-                alignDirtyRectToTiles(dirtyTop, top_w, top_h);
-            }
-            #if REAL8_3DS_HAS_PAL8_TLUT
-            if (useGpuPalette) {
-                u8* topIndexSrc = indexBufferTop;
-                if (isLinearVmFramebuffer(topbuffer) && gameTexTop &&
-                    gameTexTop->width == top_w && gameTexTop->height == top_h) {
-                    topIndexSrc = (u8*)topbuffer;
-                }
-                blitFrameToTexture(topbuffer, top_w, top_h, gameTexTop, cachedPalette565, cachedPalette32, wantScreenshot, topIndexSrc,
-                                   dirtyTop.valid ? &dirtyTop : nullptr);
-            } else
-#endif
-            {
-                blitFrameToTexture(topbuffer, top_w, top_h, gameTexTop, cachedPalette565, cachedPalette32, wantScreenshot, pixelBuffer565Top,
-                                   dirtyTop.valid ? &dirtyTop : nullptr);
-            }
-            if (wantScreenshot) capturedThisFrame = true;
-        } else {
-            // Normal: top preview + bottom UI
-            if (!topPreviewBlank) {
-                DirtyRect dirtyTop;
-                if (getDirtyRectForBuffer(topbuffer, top_w, top_h, dirtyTop)) {
-                    alignDirtyRectToTiles(dirtyTop, top_w, top_h);
-                }
+            if (!(topIsVmFb && !topDirtyValid && !wantScreenshot)) {
                 #if REAL8_3DS_HAS_PAL8_TLUT
                 if (useGpuPalette) {
                     u8* topIndexSrc = indexBufferTop;
@@ -2023,13 +2331,35 @@ if (gameSubtexTopR) {
                         gameTexTop->width == top_w && gameTexTop->height == top_h) {
                         topIndexSrc = (u8*)topbuffer;
                     }
-                    blitFrameToTexture(topbuffer, top_w, top_h, gameTexTop, cachedPalette565, cachedPalette32, false, topIndexSrc,
-                                       dirtyTop.valid ? &dirtyTop : nullptr);
+                    blitFrameToTexture(topbuffer, top_w, top_h, gameTexTop, cachedPalette565, cachedPalette32, wantScreenshot, topIndexSrc,
+                                       topDirtyValid ? &dirtyTop : nullptr);
                 } else
 #endif
                 {
-                    blitFrameToTexture(topbuffer, top_w, top_h, gameTexTop, cachedPalette565, cachedPalette32, false, pixelBuffer565Top,
-                                       dirtyTop.valid ? &dirtyTop : nullptr);
+                    blitFrameToTexture(topbuffer, top_w, top_h, gameTexTop, cachedPalette565, cachedPalette32, wantScreenshot, pixelBuffer565Top,
+                                       topDirtyValid ? &dirtyTop : nullptr);
+                }
+                if (wantScreenshot) capturedThisFrame = true;
+            }
+        } else {
+            // Normal: top preview + bottom UI
+            if (!topPreviewBlank) {
+                if (!(topIsVmFb && !topDirtyValid)) {
+                    #if REAL8_3DS_HAS_PAL8_TLUT
+                    if (useGpuPalette) {
+                        u8* topIndexSrc = indexBufferTop;
+                        if (isLinearVmFramebuffer(topbuffer) && gameTexTop &&
+                            gameTexTop->width == top_w && gameTexTop->height == top_h) {
+                            topIndexSrc = (u8*)topbuffer;
+                        }
+                        blitFrameToTexture(topbuffer, top_w, top_h, gameTexTop, cachedPalette565, cachedPalette32, false, topIndexSrc,
+                                           topDirtyValid ? &dirtyTop : nullptr);
+                    } else
+#endif
+                    {
+                        blitFrameToTexture(topbuffer, top_w, top_h, gameTexTop, cachedPalette565, cachedPalette32, false, pixelBuffer565Top,
+                                           topDirtyValid ? &dirtyTop : nullptr);
+                    }
                 }
             }
             updateBottomTexture(true);
@@ -2038,9 +2368,28 @@ if (gameSubtexTopR) {
         
         }
 
-        lastStereoActive = stereoActive;
+        if (allowUpload) {
+            lastStereoActive = stereoActive;
+            cachedFrameValid = true;
+            cachedTopW = top_w;
+            cachedTopH = top_h;
+            cachedBottomW = bottom_w;
+            cachedBottomH = bottom_h;
+            const u64 workEndMs = osGetTime();
+            if (frameStartMs != 0 && workEndMs >= frameStartMs) {
+                recordWorkSample((int)(workEndMs - frameStartMs), fastForward);
+            }
+        }
 
-        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+        if (allowUpload) {
+            const u64 renderEndMs = osGetTime();
+            if (renderStartMs != 0 && renderEndMs >= renderStartMs) {
+                lastRenderMs = (int)(renderEndMs - renderStartMs);
+            }
+        }
+
+        const bool vsync = (paceMode != FramePaceMode::Uncapped) && !fastForward;
+        C3D_FrameBegin(vsync ? C3D_FRAME_SYNCDRAW : C3D_FRAME_NONBLOCK);
 
         int tx, ty, tw, th;
         float tscale;
@@ -2346,6 +2695,23 @@ if (gameSubtexTopR) {
         C2D_Flush();
         C3D_FrameEnd(0);
         presentedThisLoop = true;
+        lastPresentMs = osGetTime();
+        if (prevPresentMs != 0) {
+            const int interval = (int)(lastPresentMs - prevPresentMs);
+            const bool vsyncActive = vsync && !fastForward;
+            if (paceMode == FramePaceMode::Vsync30 && vsyncActive) {
+                vblankMissHistory[vblankMissIndex] = (interval > kVsync30MissThresholdMs) ? 1 : 0;
+                vblankMissIndex = (vblankMissIndex + 1) % kVsyncMissWindow;
+                const int misses = sumRecent(vblankMissHistory, kVsyncMissWindow);
+                if (misses >= kVsyncMissLimit) {
+                    vblankMissOveruse = kSwitchWindowCount;
+                }
+            } else {
+                vblankMissHistory[vblankMissIndex] = 0;
+                vblankMissIndex = (vblankMissIndex + 1) % kVsyncMissWindow;
+            }
+        }
+        prevPresentMs = lastPresentMs;
 
         if (screenshotPending && capturedThisFrame) {
             if (writeBmp24(pendingScreenshotPath, screenBuffer32.data(), screenW, screenH)) {

@@ -187,6 +187,8 @@ enum {
     ID_GC_AUTHOR,
     ID_GC_COVER,
     ID_GC_BROWSE,
+    ID_GC_COMP_PXA,
+    ID_GC_COMP_LEGACY,
     ID_GC_RESET,
     ID_GC_EXPORT
 };
@@ -246,7 +248,17 @@ static LRESULT CALLBACK GamecardDialogProc(HWND hWnd, UINT message, WPARAM wPara
                                          pad, y + editH + 2, editW, editH, hWnd, (HMENU)(UINT_PTR)ID_GC_COVER, NULL, NULL);
         HWND hBrowseBtn = CreateWindow("BUTTON", "Browse", WS_CHILD | WS_VISIBLE,
                                        pad + editW + pad, y + editH + 2, btnW, editH, hWnd, (HMENU)(UINT_PTR)ID_GC_BROWSE, NULL, NULL);
-        y += editH + 18 + editH;
+        y += editH + 12 + editH;
+
+        CreateWindow("STATIC", "Compression:", WS_CHILD | WS_VISIBLE,
+                     pad, y, labelW, editH, hWnd, NULL, NULL, NULL);
+        HWND hCompPxa = CreateWindow("BUTTON", "PXA", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
+                                     pad + labelW, y, 80, editH, hWnd, (HMENU)(UINT_PTR)ID_GC_COMP_PXA, NULL, NULL);
+        HWND hCompLegacy = CreateWindow("BUTTON", "Legacy", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                                        pad + labelW + 90, y, 90, editH, hWnd, (HMENU)(UINT_PTR)ID_GC_COMP_LEGACY, NULL, NULL);
+        SendMessage(hCompPxa, BM_SETCHECK, BST_CHECKED, 0);
+
+        y += editH + 14;
 
         HWND hResetBtn = CreateWindow("BUTTON", "Reset", WS_CHILD | WS_VISIBLE,
                                       pad, y, btnW, editH + 4, hWnd, (HMENU)(UINT_PTR)ID_GC_RESET, NULL, NULL);
@@ -263,6 +275,8 @@ static LRESULT CALLBACK GamecardDialogProc(HWND hWnd, UINT message, WPARAM wPara
             SendMessage(hAuthorEdit, WM_SETFONT, (WPARAM)state->font, TRUE);
             SendMessage(hCoverEdit, WM_SETFONT, (WPARAM)state->font, TRUE);
             SendMessage(hBrowseBtn, WM_SETFONT, (WPARAM)state->font, TRUE);
+            SendMessage(hCompPxa, WM_SETFONT, (WPARAM)state->font, TRUE);
+            SendMessage(hCompLegacy, WM_SETFONT, (WPARAM)state->font, TRUE);
             SendMessage(hResetBtn, WM_SETFONT, (WPARAM)state->font, TRUE);
             SendMessage(hExportBtn, WM_SETFONT, (WPARAM)state->font, TRUE);
         }
@@ -286,12 +300,14 @@ static LRESULT CALLBACK GamecardDialogProc(HWND hWnd, UINT message, WPARAM wPara
             SetDlgItemTextA(hWnd, ID_GC_TITLE, "");
             SetDlgItemTextA(hWnd, ID_GC_AUTHOR, "");
             SetDlgItemTextA(hWnd, ID_GC_COVER, "");
+            CheckRadioButton(hWnd, ID_GC_COMP_PXA, ID_GC_COMP_LEGACY, ID_GC_COMP_PXA);
             return 0;
         }
         if (id == ID_GC_EXPORT) {
             std::string title = GetDlgItemTextString(hWnd, ID_GC_TITLE);
             std::string author = GetDlgItemTextString(hWnd, ID_GC_AUTHOR);
             std::string cover = GetDlgItemTextString(hWnd, ID_GC_COVER);
+            bool useLegacy = (IsDlgButtonChecked(hWnd, ID_GC_COMP_LEGACY) == BST_CHECKED);
 
             if (title.empty()) {
                 MessageBoxA(hWnd, "Please enter a Game Title.", "Missing Title", MB_OK | MB_ICONWARNING);
@@ -313,7 +329,10 @@ static LRESULT CALLBACK GamecardDialogProc(HWND hWnd, UINT message, WPARAM wPara
                 return 0;
             }
 
-            bool ok = Real8Tools::ExportGamecard(state->vm, state->host, outputPath, title, author, cover, templatePng);
+            Real8Tools::GamecardCompression compression = useLegacy
+                ? Real8Tools::GamecardCompression::Legacy
+                : Real8Tools::GamecardCompression::Pxa;
+            bool ok = Real8Tools::ExportGamecard(state->vm, state->host, outputPath, title, author, cover, templatePng, compression);
             if (!ok) {
                 MessageBoxA(hWnd, "Export failed. Check logs.txt for details.", "Export Failed", MB_OK | MB_ICONERROR);
                 return 0;
@@ -357,7 +376,7 @@ static bool ShowGamecardExportDialog(HWND parent, Real8VM* vm, WindowsHost* host
 
     HWND hWnd = CreateWindowEx(WS_EX_DLGMODALFRAME, className, "Export Gamecard",
                                WS_VISIBLE | WS_SYSMENU | WS_CAPTION,
-                               300, 300, 400, 260,
+                               300, 300, 400, 300,
                                parent, NULL, GetModuleHandle(NULL), (LPVOID)&state);
     if (!hWnd) {
         UnregisterClass(className, GetModuleHandle(NULL));

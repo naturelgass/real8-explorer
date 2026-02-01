@@ -44,10 +44,15 @@ public:
     static void ExportStaticVars(Real8VM* vm, IReal8Host* host, const std::string &outputFolder);
     static void ExportStaticVars(Real8VM* vm, IReal8Host* host, const std::string &outputFolder, const std::vector<StaticVarEntry>& entries);
     static void ExportMusic(Real8VM* vm, IReal8Host* host, const std::string &outputFolder);
+    enum class GamecardCompression {
+        Pxa,
+        Legacy
+    };
     static bool ExportGamecard(Real8VM* vm, IReal8Host* host, const std::string &outputFile,
                                const std::string &title, const std::string &author,
                                const std::string &coverArtPath,
-                               const std::vector<uint8_t> &templatePng);
+                               const std::vector<uint8_t> &templatePng,
+                               GamecardCompression compression);
     static std::vector<StaticVarEntry> CollectStaticVars(Real8VM* vm);
 
 private:

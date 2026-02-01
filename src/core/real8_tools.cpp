@@ -511,6 +511,90 @@ namespace {
         return true;
     }
 
+    static bool buildLegacyRaw(const std::vector<uint8_t>& input, std::vector<uint8_t>& output) {
+        if (input.size() > 0xFFFF) return false;
+
+        static const char *legacy_lut = "^\n 0123456789abcdefghijklmnopqrstuvwxyz!#%(){}[]<>+=/*:;.,~_";
+        uint8_t lutIndex[256] = {};
+        for (int i = 1; i < 60; ++i) {
+            lutIndex[(uint8_t)legacy_lut[i]] = (uint8_t)i;
+        }
+
+        std::vector<uint8_t> payload;
+        payload.reserve(input.size());
+
+        std::vector<uint32_t> costPrefix;
+        costPrefix.resize(input.size() + 1, 0);
+        for (size_t i = 0; i < input.size(); ++i) {
+            uint32_t cost = lutIndex[input[i]] != 0 ? 1u : 2u;
+            costPrefix[i + 1] = costPrefix[i] + cost;
+        }
+
+        size_t i = 0;
+        while (i < input.size()) {
+            int bestLen = 0;
+            int bestOffset = 0;
+            int maxOffset = (int)std::min<size_t>(3135, i);
+            int maxLen = (int)std::min<size_t>(17, input.size() - i);
+            for (int offset = 1; offset <= maxOffset; ++offset) {
+                int len = 0;
+                while (len < maxLen && input[i + len] == input[i - offset + len]) {
+                    len++;
+                }
+                if (len > bestLen) {
+                    bestLen = len;
+                    bestOffset = offset;
+                    if (bestLen == maxLen) {
+                        break;
+                    }
+                }
+            }
+
+            bool useLz = false;
+            if (bestLen >= 2) {
+                uint32_t literalCost = costPrefix[i + bestLen] - costPrefix[i];
+                if (literalCost > 2) {
+                    useLz = true;
+                }
+            }
+
+            if (useLz) {
+                uint8_t val = (uint8_t)(0x3c + (bestOffset >> 4));
+                uint8_t val2 = (uint8_t)(((bestLen - 2) << 4) | (bestOffset & 0x0f));
+                payload.push_back(val);
+                payload.push_back(val2);
+                i += (size_t)bestLen;
+            } else {
+                uint8_t b = input[i];
+                uint8_t code = lutIndex[b];
+                if (code != 0) {
+                    payload.push_back(code);
+                } else {
+                    payload.push_back(0);
+                    payload.push_back(b);
+                }
+                i++;
+            }
+        }
+
+        if (payload.size() > 0xFFFF) return false;
+
+        output.clear();
+        output.reserve(8 + payload.size());
+        output.push_back(':');
+        output.push_back('c');
+        output.push_back(':');
+        output.push_back(0);
+        uint16_t rawLen = (uint16_t)input.size();
+        output.push_back((uint8_t)((rawLen >> 8) & 0xFF));
+        output.push_back((uint8_t)(rawLen & 0xFF));
+        uint16_t compLen = (uint16_t)payload.size();
+        output.push_back((uint8_t)((compLen >> 8) & 0xFF));
+        output.push_back((uint8_t)(compLen & 0xFF));
+        output.insert(output.end(), payload.begin(), payload.end());
+        return true;
+    }
+
     static bool loadPngRgba(const std::string& path, std::vector<unsigned char>& out, unsigned& w, unsigned& h) {
         unsigned char* image = nullptr;
         unsigned error = lodepng_decode32_file(&image, &w, &h, path.c_str());
@@ -1110,7 +1194,8 @@ void Real8Tools::ExportMusic(Real8VM* vm, IReal8Host* host, const std::string &o
 bool Real8Tools::ExportGamecard(Real8VM* vm, IReal8Host* host, const std::string &outputFile,
                                 const std::string &title, const std::string &author,
                                 const std::string &coverArtPath,
-                                const std::vector<uint8_t> &templatePng)
+                                const std::vector<uint8_t> &templatePng,
+                                GamecardCompression compression)
 {
 #if defined(__GBA__)
     (void)vm;
@@ -1137,14 +1222,21 @@ bool Real8Tools::ExportGamecard(Real8VM* vm, IReal8Host* host, const std::string
     if (!header.empty()) lua = header + lua;
 
     std::vector<uint8_t> luaBytes(lua.begin(), lua.end());
-    std::vector<uint8_t> pxa;
-    if (!buildPxaRaw(luaBytes, pxa)) {
-        host->log("[EXPORT] Failed to compress LUA with PXA.");
-        return false;
+    std::vector<uint8_t> code;
+    if (compression == GamecardCompression::Legacy) {
+        if (!buildLegacyRaw(luaBytes, code)) {
+            host->log("[EXPORT] Failed to compress LUA with Legacy.");
+            return false;
+        }
+    } else {
+        if (!buildPxaRaw(luaBytes, code)) {
+            host->log("[EXPORT] Failed to compress LUA with PXA.");
+            return false;
+        }
     }
 
     const size_t codeCapacity = 0x8000 - 0x4300;
-    if (pxa.size() > codeCapacity) {
+    if (code.size() > codeCapacity) {
         host->log("[EXPORT] Compressed LUA exceeds cart capacity.");
         return false;
     }
@@ -1155,7 +1247,7 @@ bool Real8Tools::ExportGamecard(Real8VM* vm, IReal8Host* host, const std::string
     memcpy(cart.data() + 0x3000, vm->ram + 0x3000, 0x0100);
     memcpy(cart.data() + 0x3100, vm->ram + 0x3100, 0x0100);
     memcpy(cart.data() + 0x3200, vm->ram + 0x3200, 0x1100);
-    memcpy(cart.data() + 0x4300, pxa.data(), pxa.size());
+    memcpy(cart.data() + 0x4300, code.data(), code.size());
 
     unsigned w = 0;
     unsigned h = 0;

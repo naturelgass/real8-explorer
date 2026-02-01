@@ -73,6 +73,8 @@ private:
     void buildInGameMenu();
     void buildContextMenu();
     void resetModeForShell();
+    void updatePointerState();
+    bool isPointerDoubleClick(int index, ShellState state);
 
     // --- Rendering ---
     void renderFileList(bool drawTopPreview = true);
@@ -146,6 +148,15 @@ private:
     std::string pendingPreviewUrl;
     bool pendingRepoRefresh = false;
     bool inputLatch = false;
+
+    // Pointer (mouse/touch) state for shell navigation.
+    MouseState pointerState{};
+    uint8_t pointerButtonsPrev = 0;
+    bool pointerPrimaryPressed = false;
+    bool pointerSecondaryPressed = false;
+    unsigned long pointerLastClickMs = 0;
+    int pointerLastClickIndex = -1;
+    ShellState pointerLastClickState = STATE_BOOT;
     
     // Background stars logic
     struct Star { float x, y, speed; uint8_t col; };

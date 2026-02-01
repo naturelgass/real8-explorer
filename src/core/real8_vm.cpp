@@ -1045,7 +1045,11 @@ void Real8VM::runFrame()
     static int tick_counter = 0;
     tick_counter++;
     bool is60FPS = (targetFPS == 60);
+    const bool hostTicksAt30 = (host_tick_hz <= 30);
     bool shouldRunLua = is60FPS || (tick_counter % 2 == 0);
+    if (!is60FPS && hostTicksAt30) {
+        shouldRunLua = true;
+    }
 
     if (skip_update_logic) {
         skip_update_logic = false; 
@@ -1870,6 +1874,12 @@ return; // Libretro frontend handles the actual flip
         palette_map = final_palette;
     }
 
+    FramePresentDecision present_decision = FramePresentDecision::Present;
+    if (host) {
+        present_decision = host->decideFramePresent();
+        if (present_decision == FramePresentDecision::Skip) return;
+    }
+
     
 #if !defined(__GBA__)
     uint8_t st_flags = 0;
@@ -1922,8 +1932,10 @@ return; // Libretro frontend handles the actual flip
             host->flipScreenDirty(fb, fb_w, fb_h, palette_map, sx0, sy0, sx1, sy1);
         }
 
-        dirty_x0 = fb_w; dirty_y0 = fb_h; dirty_x1 = -1; dirty_y1 = -1;
-        if (bottom_active) bottom_dirty = false;
+        if (present_decision == FramePresentDecision::Present) {
+            dirty_x0 = fb_w; dirty_y0 = fb_h; dirty_x1 = -1; dirty_y1 = -1;
+            if (bottom_active) bottom_dirty = false;
+        }
         return;
     }
 
@@ -2065,8 +2077,10 @@ return; // Libretro frontend handles the actual flip
         host->flipScreenDirty(fb, fb_w, fb_h, palette_map, dirty_x0, dirty_y0, dirty_x1, dirty_y1);
     }
 #endif
-    if (bottom_active) bottom_dirty = false;
-    dirty_x0 = fb_w; dirty_y0 = fb_h; dirty_x1 = -1; dirty_y1 = -1;
+    if (present_decision == FramePresentDecision::Present) {
+        if (bottom_active) bottom_dirty = false;
+        dirty_x0 = fb_w; dirty_y0 = fb_h; dirty_x1 = -1; dirty_y1 = -1;
+    }
 
 }
 

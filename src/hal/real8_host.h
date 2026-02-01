@@ -19,6 +19,13 @@ struct MouseState
     uint8_t btn;
 };
 
+enum class FramePresentDecision : uint8_t
+{
+    Present,
+    Skip,
+    Reuse
+};
+
 class IReal8Host
 {
 public:
@@ -64,6 +71,8 @@ public:
         (void)y1;
         flipScreen(framebuffer, fb_w, fb_h, palette_map);
     }
+    virtual FramePresentDecision decideFramePresent() { return FramePresentDecision::Present; }
+    virtual int getPreferredTickMs() { return 16; }
 
 // Optional true-color flip (stereo/anaglyph). Pixel format: 0x00RRGGBB (XRGB8888).
 virtual bool flipScreenRGBADirty(const uint32_t* xrgb8888, int w, int h,

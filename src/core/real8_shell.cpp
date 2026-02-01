@@ -256,6 +256,7 @@ void Real8Shell::update()
 {
     // 1. Poll Hardware
     host->pollInput();
+    updatePointerState();
     updateAsyncDownloads();
     ShellState prevState = lastState;
 
@@ -597,6 +598,30 @@ void Real8Shell::update()
     lastState = sysState;
 }
 
+void Real8Shell::updatePointerState()
+{
+    if (!host) return;
+    pointerState = host->getMouseState();
+    const bool primaryDown = (pointerState.btn & 1) != 0;
+    pointerPrimaryPressed = primaryDown && !(pointerButtonsPrev & 1);
+    pointerSecondaryPressed = ((pointerState.btn & 2) != 0) && !(pointerButtonsPrev & 2);
+    pointerButtonsPrev = pointerState.btn;
+}
+
+bool Real8Shell::isPointerDoubleClick(int index, ShellState state)
+{
+    if (!host) return false;
+    const unsigned long now = host->getMillis();
+    const unsigned long delta = now - pointerLastClickMs;
+    const bool isDouble = (pointerLastClickIndex == index &&
+                           pointerLastClickState == state &&
+                           delta <= 350);
+    pointerLastClickMs = now;
+    pointerLastClickIndex = index;
+    pointerLastClickState = state;
+    return isDouble;
+}
+
 void Real8Shell::startAsyncDownload(AsyncDownload &task, const std::string &url, const std::string &path)
 {
     if (task.active) return;
@@ -806,6 +831,51 @@ void Real8Shell::updateBrowser()
         if (fileSelection >= gameList.size()) fileSelection = 0;
     }
 
+    // Pointer/touch navigation for the file list.
+    if (pointerPrimaryPressed || pointerSecondaryPressed) {
+        const int items = 11;
+        const int pageStart = (fileSelection / items) * items;
+        const int yStart = is3ds ? 15 : 18;
+        const int rowStart = yStart - 2;
+        const int rowHeight = 9;
+        const int listX0 = 2;
+        const int listX1 = 125;
+        const bool isTouchPlatform = isSwitchPlatform || is3ds;
+
+        if (pointerState.x >= listX0 && pointerState.x <= listX1 &&
+            pointerState.y >= rowStart && pointerState.y < (rowStart + (items * rowHeight))) {
+            int row = (pointerState.y - rowStart) / rowHeight;
+            int idx = pageStart + row;
+            if (idx >= 0 && idx < (int)gameList.size()) {
+                const bool wasSame = (idx == fileSelection);
+                if (idx != fileSelection) fileSelection = idx;
+
+                if (pointerSecondaryPressed && !gameList[idx].isFolder) {
+                    targetGame = gameList[idx];
+                    buildContextMenu();
+                    sysState = STATE_OPTIONS_MENU;
+                    return;
+                }
+
+                bool activate = false;
+                if (pointerPrimaryPressed) {
+                    activate = isTouchPlatform ? wasSame : isPointerDoubleClick(idx, STATE_BROWSER);
+                }
+
+                if (activate) {
+                    targetGame = gameList[idx];
+                    if (targetGame.isFolder) {
+                        current_vfs_path = targetGame.path;
+                        refreshGameList();
+                    } else {
+                        sysState = STATE_LOADING;
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
     // Preview Loader
     if (fileSelection != lastFileSelection) {
         lastFileSelection = fileSelection;
@@ -871,12 +941,34 @@ void Real8Shell::buildContextMenu()
 
 void Real8Shell::updateOptionsMenu()
 {
+    bool pointerActivate = false;
+    if (pointerPrimaryPressed) {
+        const int menuX0 = 10;
+        const int menuX1 = 117;
+        const int menuY0 = 20;
+        const int menuY1 = 97;
+        if (pointerState.x >= menuX0 && pointerState.x <= menuX1 &&
+            pointerState.y >= menuY0 && pointerState.y <= menuY1) {
+            const int startY = 37;
+            const int rowStart = startY - 2;
+            const int rowHeight = 12;
+            int row = (pointerState.y - rowStart) / rowHeight;
+            if (row >= 0 && row < (int)contextOptions.size()) {
+                const bool wasSame = (row == contextSelection);
+                contextSelection = row;
+                if (wasSame || isPointerDoubleClick(row, STATE_OPTIONS_MENU)) {
+                    pointerActivate = true;
+                }
+            }
+        }
+    }
+
     if (vm->btnp(2)) { contextSelection--; if (contextSelection < 0) contextSelection = contextOptions.size() - 1; }
     if (vm->btnp(3)) { contextSelection++; if (contextSelection >= contextOptions.size()) contextSelection = 0; }
     
     if (vm->btnp(4)) sysState = STATE_BROWSER; // Back
 
-    if (vm->btnp(5)) { // Action
+    if (vm->btnp(5) || pointerActivate) { // Action
         std::string action = contextOptions[contextSelection];
 
         if (action == "LAUNCH") sysState = STATE_LOADING;

@@ -156,6 +156,8 @@ public:
   bool showStats = false;
   bool crt_filter = false;
   bool stereoscopic = false;
+  int host_tick_hz = 60;
+  void setHostTickHz(int hz) { host_tick_hz = (hz > 0) ? hz : 60; }
   
 #if !defined(__GBA__)
   // --------------------------------------------------------------------------

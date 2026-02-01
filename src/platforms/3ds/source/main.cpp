@@ -55,6 +55,46 @@ struct FrameStats {
     }
 };
 
+struct VmTickScheduler {
+    static constexpr u64 kDefaultTickMs = 16;
+    static constexpr u64 kMaxCatchupMs = 100;
+    u64 nextTickMs = 0;
+    u64 stepMs = kDefaultTickMs;
+
+    void reset(u64 now) { nextTickMs = now; }
+    void setStepMs(u64 ms) { stepMs = (ms > 0) ? ms : kDefaultTickMs; }
+
+    bool shouldTick(u64 now, bool fastForward) {
+        if (fastForward) {
+            nextTickMs = now;
+            return true;
+        }
+        if (nextTickMs == 0) nextTickMs = now;
+        if (now > nextTickMs + kMaxCatchupMs) {
+            nextTickMs = now;
+            return true;
+        }
+        return now >= nextTickMs;
+    }
+
+    void advance(u64 now, bool fastForward) {
+        if (fastForward) {
+            nextTickMs = now;
+            return;
+        }
+        if (nextTickMs == 0) nextTickMs = now;
+        nextTickMs += stepMs;
+        if (now > nextTickMs + (stepMs * 4)) {
+            nextTickMs = now + stepMs;
+        }
+    }
+
+    u64 sleepMs(u64 now) const {
+        if (nextTickMs == 0 || now >= nextTickMs) return 0;
+        return nextTickMs - now;
+    }
+};
+
 void applyN3DSSpeedup(ThreeDSHost* host) {
     bool isNew3ds = false;
     Result rc = APT_CheckNew3DS(&isNew3ds);
@@ -348,9 +388,26 @@ int main(int argc, char *argv[])
     };
 
     FrameStats frameStats;
+    VmTickScheduler tickScheduler;
+    tickScheduler.reset(osGetTime());
     while (running && aptMainLoop()) {
-        frameStats.beginFrame();
         host->pollInput();
+        const bool fastForward = host->isFastForwardHeld();
+        const int preferredTickMs = host->getPreferredTickMs();
+        tickScheduler.setStepMs((u64)preferredTickMs);
+        vm->setHostTickHz((preferredTickMs <= 20) ? 60 : 30);
+        const u64 now = osGetTime();
+        if (!tickScheduler.shouldTick(now, fastForward)) {
+            u64 sleepMs = tickScheduler.sleepMs(now);
+            if (!fastForward && sleepMs > 0) {
+                if (sleepMs > 1) sleepMs = 1;
+                svcSleepThread((s64)sleepMs * 1000000LL);
+            }
+            continue;
+        }
+
+        host->beginLoop();
+        frameStats.beginFrame();
         if (host->isExitComboHeld()) {
             running = false;
             break;
@@ -449,10 +506,11 @@ int main(int argc, char *argv[])
         }
 
         u64 workEndMs = osGetTime();
-        if (!host->isFastForwardHeld()) {
+        if (!fastForward && !host->didPresent()) {
             gspWaitForVBlank();
         }
         frameStats.endFrame(host, workEndMs);
+        tickScheduler.advance(osGetTime(), fastForward);
     }
 
     delete vm;
@@ -468,26 +526,47 @@ int main(int argc, char *argv[])
     host->log("Real-8 3DS Port Started.");
 
     FrameStats frameStats;
+    VmTickScheduler tickScheduler;
+    tickScheduler.reset(osGetTime());
     bool running = true;
-    bool doTick = true;   // toggles every vblank
 
     while (running && aptMainLoop()) {
+        host->pollInput();
+        const bool fastForward = host->isFastForwardHeld();
+        const int preferredTickMs = host->getPreferredTickMs();
+        tickScheduler.setStepMs((u64)preferredTickMs);
+        vm->setHostTickHz((preferredTickMs <= 20) ? 60 : 30);
+        const u64 now = osGetTime();
+        if (!tickScheduler.shouldTick(now, fastForward)) {
+            u64 sleepMs = tickScheduler.sleepMs(now);
+            if (!fastForward && sleepMs > 0) {
+                if (sleepMs > 1) sleepMs = 1;
+                svcSleepThread((s64)sleepMs * 1000000LL);
+            }
+            continue;
+        }
+
         host->beginLoop();
         frameStats.beginFrame();
 
-        host->pollInput();
         if (host->isExitComboHeld()) break;
+
+        if (vm->interpolation != host->interpolation) {
+            host->setInterpolation(vm->interpolation);
+        }
 
         shell->update();
         if (vm->quit_requested) break;
 
+        const u64 workEndMs = osGetTime();
         // Only wait if we DIDN'T present this loop.
         // (If we did present, SYNCDRAW already waited.)
-        if (!host->isFastForwardHeld() && !host->didPresent()) {
+        if (!fastForward && !host->didPresent()) {
             gspWaitForVBlank();
         }
 
-        frameStats.endFrame(host, osGetTime());
+        frameStats.endFrame(host, workEndMs);
+        tickScheduler.advance(osGetTime(), fastForward);
     }
 
     delete shell;
